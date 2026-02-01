@@ -1,0 +1,24 @@
+# タスク指示テンプレート
+# このファイルをコピーして {agent}.yaml として使用
+
+task_id: TASK-XXX
+assigned_to: coder  # coder / reviewer / documenter / log_analyzer
+priority: medium    # critical / high / medium / low
+title: "タスクのタイトル"
+description: |
+  タスクの詳細説明をここに記述。
+  - 具体的な要件
+  - 期待される成果物
+acceptance_criteria:
+  - 完了条件1
+  - 完了条件2
+context:
+  files:
+    - path/to/relevant/file1.py
+    - path/to/relevant/file2.py
+  related_tasks:
+    - TASK-XXX  # 関連タスクがあれば
+  notes: |
+    追加のコンテキスト情報
+created_at: ""  # ISO8601形式: 2024-01-01T10:00:00
+deadline: ""    # オプション: 期限がある場合
