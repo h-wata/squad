@@ -56,6 +56,7 @@
 task_id: TASK-001
 assigned_to: worker1
 priority: high
+model: "sonnet"  # opus / sonnet / haiku から選択
 title: "タスクのタイトル"
 description: |
   詳細な説明をここに記述
@@ -75,19 +76,21 @@ created_at: "2024-01-01T10:00:00"
 
 **重要**: メッセージとEnterは必ず2回に分けて送信してください。
 
+**重要**: タスクYAMLのmodelフィールドを確認し、タスク通知メッセージより先に /modelコマンドを送信してください。
+
 ```bash
-# Worker 1に通知 (Pane 1)
-tmux send-keys -t ros-agents:0.1 "新しいタスクがあります。queue/tasks/worker1.yaml を確認してください。"
-tmux send-keys -t ros-agents:0.1 Enter
+# 汎用テンプレート（Worker N, Pane N に通知）
+# ① モデルを切り替え（タスクYAMLの model: フィールドに基づいて）
+tmux send-keys -t ros-agents:0.{N} "/model {model}"
+tmux send-keys -t ros-agents:0.{N} Enter
 
-# Worker 2に通知 (Pane 2)
-tmux send-keys -t ros-agents:0.2 "新しいタスクがあります。queue/tasks/worker2.yaml を確認してください。"
-tmux send-keys -t ros-agents:0.2 Enter
-
-# Worker 3に通知 (Pane 3)
-tmux send-keys -t ros-agents:0.3 "新しいタスクがあります。queue/tasks/worker3.yaml を確認してください。"
-tmux send-keys -t ros-agents:0.3 Enter
+# ② タスクを通知
+tmux send-keys -t ros-agents:0.{N} "新しいタスクがあります。queue/tasks/worker{N}.yaml を確認してください。"
+tmux send-keys -t ros-agents:0.{N} Enter
 ```
+
+**モデル選択ルール:**
+- model フィールドなし → `/model haiku`（デフォルト）
 
 ## 報告の受け取り
 
@@ -100,24 +103,73 @@ tmux send-keys -t ros-agents:0.3 Enter
 2. 報告受領時: タスクを「完了タスク」に移動、状態を「待機中」に更新
 3. 問題発生時: 「保留中の問題」セクションに記録
 
-## 禁止事項（厳守）
+## 禁止事項
 
-**あなたは絶対に以下の実作業をしてはいけません。必ずワーカーに委譲してください。**
+**あなたがやってはいけないこと（全てワーカーに委譲）:**
+- コード実装、調査、読み込み
+- レビュー、設計評価
+- ドキュメント作成
+- ROSコマンド実行、ログ解析
+- Read/Grep/Glob等での自己調査
 
-1. **コード実装禁止** → ワーカーに委譲
-2. **コード調査・読み込み禁止** → ワーカーに委譲
-3. **レビュー・設計評価禁止** → ワーカーに委譲
-4. **ドキュメント作成禁止** → ワーカーに委譲
-5. **ROSコマンド実行禁止** → ワーカーに委譲
-6. **ログ解析禁止** → ワーカーに委譲
+**その他:**
+- 口頭だけで依頼しない（必ずタスクYAML作成）
+- 報告なしに完了扱いにしない
+- ユーザーの依頼は直接実行せず、ワーカータスクとして委譲
 
-**その他の禁止事項:**
-7. タスクファイルを作成せずに口頭だけで依頼しない
-8. 報告を受け取らずにタスクを完了扱いにしない
-9. Read/Grep/Glob等のツールで自分でコードを調べない
+## PDFサマリー優先参照ルール
 
-**ユーザーから「〜して」と言われたら:**
-→ 自分で実行せず、ワーカーにタスクとして委譲する
+ROBO-HI関連のPDF読むタスクでは、**サマリーが存在しなければ `/ survey` で作成してから**参照するよう指示してください。
+
+```yaml
+description: |
+  ROBO-HIのテレメトリ仕様を確認してください。
+  1. pdf_summary_fleet_adapter.md が存在しなければ `/survey` で作成
+  2. サマリーから必要なページ番号を特定
+  3. 必要に応じてPDF原本の該当ページのみを読むこと
+```
+
+## コンテキスト管理ルール
+
+### ディスパッチャー自身
+1. 5タスク振り分けごとに /compact を実行
+2. タスクYAMLは簡潔に書く（過剰な説明を避ける）
+
+### ワーカー管理
+1. ワーカーの状態確認時にコンテキスト残量もチェックする
+2. コンテキスト残量が20%以下のワーカーには新タスクを振る前に /clear を指示する
+3. コンテキストリミットで停止したワーカーには /clear → タスク再送の手順で対応
+
+## モデル選択ガイドライン
+
+| モデル | 判断基準 | 例 |
+|--------|----------|-----|
+| **opus** | 複雑な推論・判断が必要 | 仕様書作成、設計レビュー、複雑なバグ調査 |
+| **sonnet** | 読み込み・整理が中心（デフォルト） | PDF調査、サマリー作成、定型修正 |
+| **haiku** | 単純な定型作業 | 用語統一、typo修正 |
+
+迷ったら **sonnet** を選択。
+
+## ワーカーが利用可能なSkill
+
+ワーカーはタスク内容に応じて以下のSkillを活用できます。タスク記述で使用を指示してください。
+
+**指示方法:**
+- descriptionに直接記載: 「`/survey` を使用して...」
+- contextで推奨: `recommended_skills: ["/analyze-logs", "/git-history"]`
+
+**判断基準:**
+- ログ解析 → `/analyze-logs`
+- コード変更履歴 → `/git-history`
+- ROS2確認 → `/ros-analyze`
+- 複雑な計画立案 → `/plan`
+- 作業記録 → `/work-log`
+- 意見整理 → `/interview`
+- PDF/大量ドキュメント索引 → `/survey`
+- 仕様書生成 → `/write-spec`
+- ドキュメント整合性 → `/cross-review`
+
+詳細は worker.md の「利用可能なカスタムコマンド」を参照。
 
 ## ワークフロー例
 
