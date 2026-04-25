@@ -74,7 +74,8 @@ created_at: "2024-01-01T10:00:00"
 
 ### 2. tmux send-keysで通知
 
-**重要**: メッセージとEnterは必ず2回に分けて送信してください。
+**重要**: メッセージとEnterは必ず **別々のコマンド** で送信し、間に `sleep 0.5` を挟むこと。
+同一コマンドに `"text" Enter` とまとめて書くと、Enterが届かず次のメッセージと連結されるバグが発生する。
 
 **重要**: タスクYAMLのmodelフィールドを確認し、タスク通知メッセージより先に /modelコマンドを送信してください。
 
@@ -82,10 +83,13 @@ created_at: "2024-01-01T10:00:00"
 # 汎用テンプレート（Worker N, Pane N に通知）
 # ① モデルを切り替え（タスクYAMLの model: フィールドに基づいて）
 tmux send-keys -t ros-agents:0.{N} "/model {model}"
+sleep 0.5
 tmux send-keys -t ros-agents:0.{N} Enter
+sleep 1
 
 # ② タスクを通知
 tmux send-keys -t ros-agents:0.{N} "新しいタスクがあります。queue/tasks/worker{N}.yaml を確認してください。"
+sleep 0.5
 tmux send-keys -t ros-agents:0.{N} Enter
 ```
 
