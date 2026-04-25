@@ -1,0 +1,73 @@
+task_id: TASK-104
+worker: worker2
+status: completed
+summary: "SUMMARY.md 作成完了。7セクション構成、全出典明記。Cold-entry は実行中と明記済み。"
+details: |
+  ## 作成ファイル
+  /home/gisen/work/tmux-multi-agents/docs/poc-reports/SUMMARY.md
+
+  ## 行数・構成
+  約 260 行。以下の 7 セクションを含む:
+
+  1. **実行環境**
+     - Home/Office の IP、OS、zenohd バージョン、apt 管理の旨
+     - replication 設定一覧（interval=10s、sub_intervals=5、hot=6、warm=30）
+     - RocksDB データ格納先の plan.md との不一致も注記
+
+  2. **検証ゴールと結果**
+     - Goal 4/5 PASSED、Tier-1 PASSED、Short/Mid-hot/Mid-warm PASSED
+     - Cold-entry「実行中」明記
+     - Tier-2/3 は「未着手」
+
+  3. **タイムライン（テスト一覧）**
+     - TASK-088 〜 F2 まで 18 行のテーブル
+     - 各行: task_id / 実行日時 / 担当 / タイトル / 結果サマリー
+
+  4. **検証手順詳細**
+     - 4.1 スモークテスト（TASK-093）
+     - 4.2 Scenario A / Scenario C（TASK-094）: 目的・手順・期待・実測値を記述
+     - 4.3 Short（TASK-098/099）
+     - 4.4 Mid-hot（TASK-100）
+     - 4.5 Mid-warm（F1）: CLI limit トラップの注意書きあり
+     - 4.6 Cold-entry（F2）: 「実行中、別途追記」明記
+     - 4.7 Tier-1 ベンチマーク: throughput 31,805 ops/sec、search 20.8ms、RSS 29MB 等
+
+  5. **主な発見**
+     - 双方向 replication 動作確認
+     - hot/warm 境界跨ぎでも収束時間 ESTAB+5s と変わらず
+     - tombstone は existence-based（復活なし）
+     - CLI/MCP/API default limit 不統一（CLI=20、MCP=20、API=50）
+     - search は Zenoh 分散クエリで動作（ローカル storage に非依存）
+
+  6. **既知の課題**
+     - BLOCKER: config 実 IP ハードコード（commit 447e27c）
+     - IMPORTANT: test_search_respects_since_iso_filter date-dependent（commit 6e8e453）
+     - IMPORTANT: CLI/MCP/API default limit 不統一
+     - NOTICE: RocksDB パス不一致、README 未記載、systemd 未設定、env 未設定
+
+  7. **次のテスト候補**
+     - Tier-2/3 ベンチマーク、Cold-entry 結果確認、GC/retention、DR、NTP skew、MCP 統合
+
+  ## 出典の網羅性
+  - dashboard.md（完了タスク欄、保留問題）: 参照済み
+  - memory/project_mesh_mem_poc_results.md: 参照済み（Scenario A/C の実測値）
+  - memory/project_mesh_mem_state.md: 参照済み（環境詳細）
+  - memory/project_mesh_mem_search_limit.md: 参照済み（CLI limit 不統一）
+  - memory/project_network.md: 参照済み（IP 情報）
+  - docs/poc-reports/raw/TASK-097-worker1-tier1.yaml: 参照済み（Tier-1 数値）
+  - docs/poc-reports/raw/TASK-101-worker2-search-limit.yaml: 参照済み（limit 仕様）
+
+  ## 既存メモリとの矛盾確認
+  矛盾なし。以下の点を確認:
+  - IP: Home=192.168.134.28、Office=192.168.128.12（project_network.md と一致）
+  - zenohd v1.9.0（project_mesh_mem_state.md の「v1.9.0 確定」と一致）
+  - Scenario A 25秒、Scenario C 3秒（project_mesh_mem_poc_results.md と一致）
+  - CLI limit 20（TASK-101 raw yaml と一致）
+
+  ## 特記事項
+  - Mid-warm は TASK 番号なし（Dispatcher BG "F1" として表記）
+  - TASK-102 (hot/warm/cold semantics 調査) は実行中のため付記として末尾に追加
+  - 絵文字なし（CLAUDE.md ルールに従い、✅ 等は使わず PASSED/実行中 等のテキストで表記）
+
+issues: []
+completed_at: "2026-04-25T17:00:00+09:00"

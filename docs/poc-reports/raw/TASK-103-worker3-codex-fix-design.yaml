@@ -1,0 +1,118 @@
+task_id: TASK-103
+worker: worker3
+status: completed
+summary: "BLOCKER・IMPORTANT 各1件の修正方針を設計。それぞれ推奨案1つを選定。実装なし。"
+completed_at: "2026-04-25T16:40:00+09:00"
+
+details: |
+
+  ============================================================
+  BLOCKER: config/zenohd_*.json5 に実IP がハードコード
+  ============================================================
+
+  ## 現状分析
+  - README (line 17) は「192.168.3.x / 192.168.3.y を実IPに書き換えよ」と案内済み
+  - 実configには 192.168.134.28 / 192.168.128.12 がコミット済み → 矛盾
+  - .gitignore に config/*.json5 の除外なし
+  - zenohd_localhost.json5 は現在 untracked（git status: ??）
+
+  ## 比較表
+
+  方針A: placeholder戻し (192.168.3.x/y)
+    変更量: 最小 | clone後即動く: ×（要書換） | 失敗リスク: IPミスで失敗 | .gitignore: 不要 | README整合: ◎
+
+  方針B: 環境変数置換 (${HOME_IP} 等)
+    変更量: 中 | clone後即動く: △（env要） | 失敗リスク: envなし時エラー | .gitignore: 不要 | README整合: ○要更新
+
+  方針C: テンプレート+.gitignore'd実config
+    変更量: 大 | clone後即動く: ×（コピー要） | 失敗リスク: 低 | .gitignore: 必要 | README整合: △複雑化
+
+  方針D: examples/ named profile
+    変更量: 最大 | clone後即動く: ×（過剰設計） | .gitignore: 必要 | README整合: △過剰
+
+  ## 推奨: A) placeholder 戻し
+
+  理由:
+  1. README が既に 192.168.3.x / 192.168.3.y 形式を案内しており、最も整合性が高い
+  2. 変更が最小（config 2ファイルのIP部分のみ）— 1コミットで完結
+  3. PoC利用者には clone 後の sed -i 手順が README に既記載
+  4. B/C より依存ツール・ファイル数が増えない
+  5. git履歴に実IPが残るが、新規cloneした利用者には影響なし
+
+  具体的変更箇所（zenohd_home.json5）:
+    listen  : "tcp/192.168.134.28:7447" → "tcp/192.168.3.x:7447"
+    connect : "tcp/192.168.128.12:7447" → "tcp/192.168.3.y:7447"
+    コメント: 実IP記述 → "192.168.3.x: 自機(home)" / "192.168.3.y: 対向(office)"
+
+  具体的変更箇所（zenohd_office.json5）:
+    listen  : "tcp/192.168.128.12:7447" → "tcp/192.168.3.y:7447"
+    connect : "tcp/192.168.134.28:7447" → "tcp/192.168.3.x:7447"
+    コメント: 実IP記述 → "192.168.3.y: 自機(office)" / "192.168.3.x: 対向(home)"
+
+  ## 影響範囲 (A案)
+  - 変更ファイル: config/zenohd_home.json5, config/zenohd_office.json5
+  - README: 更新不要（現行の案内と整合するため）
+  - CHANGELOG: 更新推奨 — 「実IPをプレースホルダーに戻し (security)」として記録
+
+  ============================================================
+  IMPORTANT: tests/test_store_single.py:143 — since_iso ハードコード
+  ============================================================
+
+  ## 現状分析
+  - old.created_at = '2020-01-01T00:00:00.000000Z'  ← dataclasses.replace で明示固定
+  - recent.created_at = _utc_now_iso()               ← テスト実行時刻 (CI clock依存)
+  - since_iso = '2024-01-01T00:00:00Z'              ← ハードコード
+  - CI clock が 2024-01-01 以前なら recent が除外されテスト失敗
+
+  ## 比較表
+
+  方針A: recent の created_at を明示固定
+    変更量: 最小 | CI依存除去: ○ | 追加依存: なし | 既存構造との親和性: ◎（同一手法踏襲）
+
+  方針B: fixture timestamp - 1分で動的閾値
+    変更量: 中 | CI依存除去: ○ | 追加依存: なし（計算追加） | 既存構造との親和性: △（ロジック複雑化）
+
+  方針C: freezegun で時刻固定
+    変更量: 大 | CI依存除去: ○ | 追加依存: freezegun追加 | 既存構造との親和性: △（外部依存増）
+
+  方針D: 現状維持
+    変更量: なし | CI依存除去: × | 追加依存: なし | 既存構造との親和性: ◎（リスク残存）
+
+  ## 推奨: A) recent の created_at を明示固定
+
+  理由:
+  1. old で既に同じ手法 (dataclasses.replace(..., created_at=...)) を使っており一貫性がある
+  2. 変更量が最小（2行程度の追加のみ）
+  3. 新たなライブラリ依存なし
+  4. CI clock への依存を完全排除
+  5. since_iso='2024-01-01T00:00:00Z' はそのまま維持可能
+
+  変更イメージ（方針レベル）:
+    # 変更前
+    recent = _mk_obs('recent observation', project='since-test')
+
+    # 変更後
+    recent = dataclasses.replace(
+        _mk_obs('recent observation', project='since-test'),
+        created_at='2025-06-01T00:00:00.000000Z',  # since_iso(2024-01-01)より後の固定値
+    )
+
+  ## 影響範囲 (A案)
+  - 変更ファイル: tests/test_store_single.py（3行程度）
+  - README / CHANGELOG 更新: 不要（テスト内部の修正）
+
+  ============================================================
+  実装ステップ（参考：実施する場合の順序）
+  ============================================================
+
+  Step 1: BLOCKER 修正（1コミット）
+    - config/zenohd_home.json5 の実IP → プレースホルダー置換（IP + コメント）
+    - config/zenohd_office.json5 の実IP → プレースホルダー置換（IP + コメント）
+    - CHANGELOG に security/fix エントリ追記
+    - コミット: "config: replace hardcoded LAN IPs with placeholder (security)"
+
+  Step 2: IMPORTANT 修正（1コミット）
+    - tests/test_store_single.py の recent に created_at を明示固定
+    - コミット: "test: pin recent observation created_at to eliminate CI-clock dependency"
+
+issues: []

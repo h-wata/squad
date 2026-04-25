@@ -1,0 +1,50 @@
+task_id: TASK-106
+worker: worker1
+status: completed
+# yamllint disable-line rule:line-length
+summary: "test_search_respects_since_iso_filter の recent obs に created_at 固定を追加。pytest 7件全件 pass、コミット 40b1fe9 作成済み。push なし。"
+
+details: |
+  ## 変更内容
+  ファイル: tests/test_store_single.py (138行目)
+
+  変更前:
+    recent = _mk_obs('recent observation', project='since-test')
+
+  変更後:
+    recent = dataclasses.replace(
+        _mk_obs('recent observation', project='since-test'),
+        created_at='2025-06-01T00:00:00.000000Z',
+    )
+
+  ## lint / format 結果
+  - yapf -i tests/test_store_single.py: OK
+  - ruff check tests/test_store_single.py: All checks passed!
+
+  ## pytest 結果
+  PYTHONPATH=src python -m pytest tests/test_store_single.py -v
+  7 passed, 1 warning in 3.05s
+  全件 PASSED:
+    - test_save_then_search_roundtrip
+    - test_tombstone_hides_observation
+    - test_reconnect_after_session_reset
+    - test_search_respects_project_filter
+    - test_search_empty_returns_empty_not_error
+    - test_search_respects_session_id_filter
+    - test_search_respects_since_iso_filter ← 修正対象
+
+  ## コミット情報
+  hash: 40b1fe9
+  message: test: pin recent observation created_at to eliminate CI-clock dependency
+  変更: 1 file changed, 4 insertions(+), 1 deletion(-)
+  push: なし
+
+  ## git log -5
+  40b1fe9 test: pin recent observation created_at to eliminate CI-clock dependency
+  844f1a3 config: add zenohd_localhost.json5 for single-host development
+  447e27c config: set actual home/office IPs (192.168.134.28 / 192.168.128.12)
+  6e8e453 test: cover identity key_expr and search session_id/since filters
+  eee38a8 docs: add CHANGELOG and README "Status & known limitations" for v0.1.0
+
+issues: []
+completed_at: "2026-04-25T16:45:00+09:00"

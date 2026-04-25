@@ -1,0 +1,161 @@
+task_id: TASK-102
+worker: worker1
+status: completed
+# yamllint disable-line rule:line-length
+summary: "hot/warm/cold semantics をソースから解明。5秒収束は initial_alignment() が接続時に即実行されるため（interval 周期を待たない）。warm/cold 効果はデータの保存時刻 age で bucket が決まり、接続イベントではなく定期 digest 比較のコストに効く。"
+
+details: |
+  ════════════════════════════════════════════════════════
+  ## 1. hot/warm/cold の正確な定義（ソース由来）
+  ════════════════════════════════════════════════════════
+
+  ### Era の決まり方 — 「partition duration」ではなく「データ保存時刻の age」
+  ソース: plugins/zenoh-plugin-storage-manager/src/replication/configuration.rs
+
+  ```rust
+  // interval_idx はデータの HLC timestamp の絶対値から計算
+  let interval = timestamp_ms_since_epoch / self.interval.as_millis();
+  let sub_interval = (timestamp_ms_since_epoch - ...) / (interval_ms / sub_intervals);
+
+  // hot/warm 境界の計算
+  fn hot_era_lower_bound(&self, hot_era_upper_bound: IntervalIdx) -> IntervalIdx {
+      (*hot_era_upper_bound - self.hot + 1).into()  // 現在 - hot intervals
+  }
+  fn warm_era_lower_bound(&self, hot_era_upper_bound: IntervalIdx) -> IntervalIdx {
+      (*hot_era_upper_bound - self.hot - self.warm + 1).into()  // 現在 - (hot+warm) intervals
+  }
+  // hot_era_upper_bound = 現在の last_elapsed_interval（UNIX epoch からの ms / interval_ms）
+  ```
+
+  ### 現在の設定 (interval=10s, hot=6, warm=30) での時間窓
+
+  | Era  | 時間範囲（データの保存時刻） | 粒度 |
+  |------|--------------------------|------|
+  | hot  | 現在〜60秒前のデータ | SubInterval (2秒粒度) |
+  | warm | 60秒〜360秒前のデータ | Interval (10秒粒度) |
+  | cold | 360秒より古いデータ | 全体を単一フィンガープリント |
+
+  sub_interval 粒度 = interval / sub_intervals = 10s / 5 = 2s
+
+  ### Digest 構造の粒度差
+  ソース: replication/digest.rs
+
+  ```
+  Digest {
+      cold_era_fingerprint:   XOR aggregate（単一値）← 最も粗い
+      warm_era_fingerprints:  HashMap<IntervalIdx, Fingerprint>（10秒粒度）
+      hot_era_fingerprints:   HashMap<IntervalIdx, HashMap<SubIntervalIdx, Fingerprint>>（2秒粒度）
+  }
+  ```
+
+  diff() は hot → warm → cold の順に比較。cold に差分がある場合のみ最粗比較が走る。
+
+  ════════════════════════════════════════════════════════
+  ## 2. 「5秒収束」の理論的説明 ← 最重要発見
+  ════════════════════════════════════════════════════════
+
+  ソース: plugins/zenoh-plugin-storage-manager/src/replication/core.rs
+
+  ### 接続時の処理フロー
+
+  ```
+  B が起動（zenohd start）
+      ↓
+  spawn_digest_publisher()    // interval 周期の定期 digest 発行タスク開始
+  spawn_digest_subscriber()   // 他 replica の digest 受信タスク開始
+  spawn_aligner_queryable()   // aligner クエリ応答タスク開始
+      ↓
+  scouting delay 待機 (~500ms)
+      ↓
+  initial_alignment() 即実行
+      ↓
+  spawn_query_replica_aligner(AlignmentQuery::Discovery) ← A に全データ問い合わせ
+      ↓
+  A が応答 → B のストレージに適用 → 収束完了
+  ```
+
+  **ポイント**: initial_alignment() は interval 周期 (10s) を待たない。
+  接続確立後 scouting delay（約0.5秒）の後に即座に Discovery クエリが走る。
+
+  ### なぜ分断時間（30s / 65s / 300s）で収束時間が変わらないか
+
+  分断時間は initial_alignment() の **タイミング** に影響しない。
+  B が起動すれば、約0.5s 後に Discovery が走り、A が応答した時点で全件同期完了。
+
+  観察された収束: REPLICATION_WAIT=5s で全ケース収束 ← 設計通りの正常動作
+
+  ### 「想定通り」か「異常」か
+
+  判定: **想定通り** — 観察した5秒収束は initial_alignment の正常動作。
+  設計書に「分断時間が長いほど収束時間延伸」と予測したのは誤り。
+
+  ════════════════════════════════════════════════════════
+  ## 3. warm/cold 効果が実際に現れる条件
+  ════════════════════════════════════════════════════════
+
+  warm/cold の digest 粒度差は「接続復帰時の収束速度」ではなく
+  「定期 digest 比較（interval ごと）の精度・コスト」に影響する。
+
+  ### 効果が出る条件
+
+  1. **大量の古いデータ（cold/warm era）が存在する環境**
+     - 例: 数千件の observation が 6分以上前に保存済み
+     - cold era（単一 fp）は変更なければ比較コスト最小
+     - warm/cold に大量差分があると「差分の特定」が粗くなる（chunk 単位でしか分からない）
+
+  2. **interval 周期の定期 digest 比較** での差分検出コスト
+     - 両側で常時接続、10秒ごとに digest を交換
+     - cold era に差分があると: 単一 fp が違う → warm 全体を確認 → hot で詳細確認
+     - データ量が少ない（〜100件）なら cold/warm の fp 比較コストは無視できる
+
+  3. **初回 full sync 時間（非常に大量データの場合）**
+     - Discovery が全件転送する場合、件数が多ければ時間がかかる
+     - これは warm/cold の粒度ではなく転送データ量に依存
+
+  ### warm/cold 効果を最小再現するための条件
+
+  - 両側で 5000件以上の observation を 7分以上前に書き込んでおく（cold era に入れる）
+  - 片側にのみ追加で 100件書き込む（差分を作る）
+  - 接続を一瞬切って再接続 → initial_alignment の Discovery 応答時間を計測
+  - これを hot era のみデータ / cold era のみデータで比較すれば粒度差が見える可能性
+
+  ════════════════════════════════════════════════════════
+  ## 4. F2 (Cold-entry 30分テスト) 結果の解釈
+  ════════════════════════════════════════════════════════
+
+  F2 (分断30分、20件 save) の期待される挙動:
+  - 分断中に保存した 20件は保存直後の timestamp → hot era のデータ
+  - B を起動した瞬間に initial_alignment が走り、5〜15秒で収束する
+  - warm/cold の粒度差は出ない（データが hot era にあるため、かつ initial_alignment が先に動く）
+
+  つまり F2 でも 「収束は 30分後の起動から数秒以内」が正しい予測。
+  30分後に収束に時間がかかるとすれば、A 側の zenohd が大量データを response するのに
+  時間がかかる場合のみ（今回は 25件程度なので問題ない）。
+
+  ════════════════════════════════════════════════════════
+  ## 5. 追加メモ: propagation_delay の役割
+  ════════════════════════════════════════════════════════
+
+  propagation_delay (250ms) は Digest 生成時の「現在の interval」を決める際に使われる。
+  「put してから storage に届くまでの遅延」を考慮し、最新 interval を digest から除外することで
+  「まだ storage に届いていないかもしれないデータ」を誤検出しない。
+  収束速度（initial_alignment タイミング）には影響しない。
+
+  ════════════════════════════════════════════════════════
+  ## ソース citation まとめ
+  ════════════════════════════════════════════════════════
+
+  1. configuration.rs: get_time_classification(), hot_era_lower_bound(), warm_era_lower_bound()
+     → interval_idx 計算式、era boundary 計算
+     URL: github.com/eclipse-zenoh/zenoh/blob/main/plugins/zenoh-plugin-storage-manager/src/replication/configuration.rs
+
+  2. digest.rs: Digest struct, diff() method
+     → cold/warm/hot の粒度差（single fp / HashMap<Interval> / HashMap<Interval, SubInterval>）
+     URL: github.com/eclipse-zenoh/zenoh/blob/main/plugins/zenoh-plugin-storage-manager/src/replication/digest.rs
+
+  3. core.rs: initial_alignment(), spawn_digest_publisher(), AlignmentQuery::Discovery
+     → 接続時即時同期のフロー、interval 待機なし
+     URL: github.com/eclipse-zenoh/zenoh/blob/main/plugins/zenoh-plugin-storage-manager/src/replication/core.rs
+
+issues: []
+completed_at: "2026-04-25T16:50:00+09:00"

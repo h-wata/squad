@@ -1,0 +1,155 @@
+task_id: TASK-101
+worker: worker2
+status: completed
+summary: "CLI search のデフォルト limit 仕様を確認。CLI/MCP は 20、API は 50 で不一致。"
+details: |
+  ## default limit 調査結果
+
+  ### 1. CLI default limit
+  **ファイル**: /home/gisen/work/mesh-mem/src/mesh_mem/__main__.py:141
+  ```python
+  p_search.add_argument('-n', '--limit', type=int, default=20)
+  ```
+  → **CLI default: 20**
+
+  ### 2. API (store.py) default limit
+  **ファイル**: /home/gisen/work/mesh-mem/src/mesh_mem/store.py:182
+  ```python
+  def search_observations(
+      query: str = '',
+      agent_family: str = '',
+      client_id: str = '',
+      pc_id: str = '',
+      session_id: str = '',
+      project: str = '',
+      since_iso: str = '',
+      limit: int = 50,  # ← API default
+  ) -> list[Observation]:
+  ```
+  → **API default: 50**
+
+  ### 3. MCP サーバー default limit
+  **ファイル**: /home/gisen/work/mesh-mem/src/mesh_mem/mcp_server.py:60
+  ```python
+  def search_memory(
+      query: str = '',
+      agent_family: str = '',
+      client_id: str = '',
+      pc_id: str = '',
+      session_id: str = '',
+      project: str = '',
+      since_iso: str = '',
+      limit: int = 20,  # ← MCP default
+  ) -> str:
+  ```
+  → **MCP default: 20**
+
+  ### 4. MAX_SEARCH 定数と clamping
+  **ファイル**: /home/gisen/work/mesh-mem/src/mesh_mem/store.py:36
+  ```python
+  MAX_SEARCH = 10_000
+  ```
+
+  **Clamping ロジック** (store.py:188)
+  ```python
+  limit = max(1, min(limit, MAX_SEARCH))
+  ```
+  → 最終的な limit は [1, 10000] の範囲に clamp される
+
+  ## 不一致分析
+
+  ### 発見: CLI/MCP と API の default が異なる
+  - **CLI** (`mesh-mem search`): default = **20**
+  - **MCP server** (`search_memory`): default = **20**
+  - **API** (`search_observations()`): default = **50**
+
+  ### 理由
+  CLI と MCP サーバーは `search_observations()` を呼び出す際に
+  **明示的に limit パラメータを渡している**：
+
+  **__main__.py:34-43** (CLI)
+  ```python
+  results = search_observations(
+      query=args.query or '',
+      agent_family=args.agent_family or '',
+      client_id=args.client_id or '',
+      pc_id=args.pc_id or '',
+      session_id=args.session_id or '',
+      project=args.project or '',
+      since_iso=args.since or '',
+      limit=args.limit,  # ← argparse のデフォルト値 (20) を明示的に渡す
+  )
+  ```
+
+  **mcp_server.py:67-76** (MCP)
+  ```python
+  results = search_observations(
+      query=query,
+      agent_family=agent_family,
+      client_id=client_id,
+      pc_id=pc_id,
+      session_id=session_id,
+      project=project,
+      since_iso=since_iso,
+      limit=limit,  # ← 関数の limit パラメータ (default=20) を渡す
+  )
+  ```
+
+  ### 観測行動の説明
+  - `mesh-mem search "split-bench-mid-warm"`: 20件で停止
+    → CLI の argparse default (20) が使用される
+  - `mesh-mem search "split-bench-mid-warm" --limit 100`: 30件すべて返却
+    → 明示的な --limit が使用される（clamp なし、30 < MAX_SEARCH だから）
+  - 直接 API 呼び出し `search_observations()`: 呼び出し側が limit を指定しなければ 50件
+    → API の default = 50 が使用される
+
+  ## 仕様判定
+
+  **統一不統一**: **不統一（仕様による）**
+
+  理由：
+  - API のデフォルトは 50 だが、CLI/MCP が明示的に 20 を指定している
+  - これは実装上の intentional な差別化（UI と API で別々のデフォルトを持つ）か、
+    単なる過去の歴史的ずれかは不明（コメント記載なし）
+
+  ## Mid-warm 分断テスト時の挙動
+
+  **仮説検証結果**:
+  - CLI default は 20（確認）
+  - API default は別値 50（確認）
+  - 挙動の違い：
+    - CLI: `--limit` 指定なしで 20件取得
+    - API: `limit` 指定なしで 50件取得
+    - いずれも MAX_SEARCH=10,000 で cap される
+
+  30件のデータがあり、`mesh-mem search` で 20件で止まるのは
+  CLI の argparse `default=20` が原因（API のデフォルトは関係ない）。
+
+  ## ポーリングコマンド改善案
+
+  ベンチマーク・分断テスト用のポーリングコマンド（split-bench-mid-warm 等）では
+  以下の方針を推奨：
+
+  **推奨: 明示的に --limit を指定する**
+  ```bash
+  mesh-mem search "split-bench-mid-warm" --limit 1000
+  ```
+
+  理由：
+  1. デフォルト値の不一致に依存しない（API/CLI の実装変更に耐性がある）
+  2. テストデータサイズが不明な場合、MAX_SEARCH に近い値（例: 1000, 5000）を指定することで
+     全データ取得の意図を明確にできる
+  3. 他の検索コマンドとの一貫性向上
+
+  ## まとめ
+
+  | 項目 | CLI | MCP | API |
+  |------|-----|-----|-----|
+  | ファイル | __main__.py:141 | mcp_server.py:60 | store.py:182 |
+  | デフォルト値 | 20 | 20 | 50 |
+  | 呼び出し方 | argparse で 20 を明示指定 | 関数定義で 20 がデフォルト | 関数定義で 50 がデフォルト |
+  | MAX_SEARCH | 10,000 (共通) |
+  | Clamping | max(1, min(limit, 10000)) (共通) |
+
+issues: []
+completed_at: "2026-04-25T16:45:00+09:00"

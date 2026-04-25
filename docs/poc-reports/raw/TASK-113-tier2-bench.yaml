@@ -1,0 +1,64 @@
+task_id: TASK-113
+worker: worker2
+title: "Tier-2 ベンチマーク (N=1000, payload=500B, workers=10)"
+
+meta:
+  started_at: "2026-04-25T18:06:57+09:00"
+  finished_at: "2026-04-25T18:06:58+09:00"
+  zenohd_pid: 2392214
+  commit_hash: "c4cfaeeed005ca72caac6906ec6c60aed7355adf"  # pragma: allowlist secret
+  db_size_before: "396K"
+  db_size_after: "1.5M"
+  db_path: "~/.local/share/zenoh-mem/agent_mem/"
+
+result:
+  save:
+    n: 1000
+    payload_b: 500
+    workers: 10
+    elapsed_s: 0.027
+    ops_per_sec: 37053.0
+  search:
+    - limit: 10
+      actual: 10
+      latency_ms: 86.9
+    - limit: 50
+      actual: 50
+      latency_ms: 54.3
+    - limit: 100
+      actual: 100
+      latency_ms: 48.8
+    - limit: 500
+      actual: 500
+      latency_ms: 49.6
+    - limit: 1000
+      actual: 1000
+      latency_ms: 54.6
+
+post_run_check:
+  scale_bench_count: 1000  # mesh-mem search "" --project scale-bench --limit 1000 | wc -l => 3000 lines / 3 per obs
+
+analysis:
+  save_throughput:
+    verdict: passed
+    note: >
+      37,053 ops/sec (Tier-1: 31,805 ops/sec)。
+      workers=10 による並列化だが put() は非同期 fire-and-forget のため、
+      throughput はキューイング速度を反映。実際の永続化は search 確認で 1000件 intact。
+
+  search_latency:
+    verdict: passed
+    note: >
+      全 limit で 500ms 以下。ただしデータ量 10倍（100→1000件）で
+      latency は Tier-1 比 2〜3倍に増加（limit=50: 20ms→54ms, limit=1000: 21ms→54ms）。
+      search_observations は tomb_expr + obs 全件走査後に slice する実装のため
+      ほぼ線形スケーリング。limit=10 の 86.9ms は初回接続オーバーヘッド込み。
+
+  overall_verdict: passed
+  concerns:
+    - >
+      search 全件走査の線形スケーリング: 1000件で50ms台。10万件規模では
+      FTS インデックスなしでは厳しくなる可能性（Issue #5 の想定外）。
+    - >
+      limit=10 の初回オーバーヘッド（86.9ms）は接続確立コスト。
+      連続呼び出しでは 50ms 台に下がる（Tier-1 と同様のパターン）。

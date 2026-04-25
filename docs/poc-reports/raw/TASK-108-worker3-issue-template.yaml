@@ -1,0 +1,35 @@
+task_id: TASK-108
+worker: worker3
+status: completed
+summary: ".github/ISSUE_TEMPLATE/task.md を新規作成し、1コミット作成。push なし。"
+completed_at: "2026-04-25T16:52:00+09:00"
+
+details: |
+  ## 作成ファイル
+  /home/gisen/work/mesh-mem/.github/ISSUE_TEMPLATE/task.md
+
+  ## ファイル内容
+  - YAML frontmatter: name="Task", about="General task tracking ..."
+  - セクション: Background / Acceptance Criteria / Out of Scope / Notes
+  - コメントは英語（GitHub UI 表示向け）
+  - 絵文字なし
+
+  ## コミット
+  hash: 9bd3def
+  message: "chore: add GitHub issue template (task)"
+
+  ## git log -6
+  9bd3def chore: add GitHub issue template (task)
+  36c12b7 config: replace hardcoded LAN IPs with placeholder (security)
+  40b1fe9 test: pin recent observation created_at to eliminate CI-clock dependency
+  844f1a3 config: add zenohd_localhost.json5 for single-host development
+  447e27c config: set actual home/office IPs (192.168.134.28 / 192.168.128.12)
+  6e8e453 test: cover identity key_expr and search session_id/since filters
+
+  ## 既存 .github ファイル
+  作業前に .github ディレクトリが存在しないことを確認済み。既存ファイルへの影響なし。
+
+  ## push 状態
+  push していない（ローカルコミットのみ）
+
+issues: []

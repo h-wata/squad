@@ -1,0 +1,31 @@
+task_id: TASK-086
+worker: worker3
+status: completed
+summary: |
+  TASK-085の差分SLAM/インクリメンタルマップ更新 OSS調査結果（9件）を
+  既存レポート末尾に追記。frontmatterにSLAM・IncrementalMappingタグを追加。
+
+  9つのプロジェクト（slam_toolbox・GLIM・FAST-LIO2・LIO-SAM・Multi-Robot Graph SLAM
+  等）を「優先度別推奨表・詳細記述・ASCIIパイプライン図」で統合。
+
+output_file: "/home/gisen/Documents/my-obsidian/Tec_insight/Open-RMF-MEC活用パターンとMap管理.md"
+
+sections_added:
+  - "## 6. 差分SLAM / インクリメンタルマップ更新 OSS"
+  - "### 概要"
+  - "### 優先度別推奨（表形式、9プロジェクト）"
+  # yamllint disable-line rule:line-length
+  - "### プロジェクト詳細（slam_toolbox / GLIM / FAST-LIO2 / LIO-SAM / Multi-Robot Graph SLAM / lidar_based_map_updating / Ogm2Pgbm / HBA / Map Enhancer）"
+  - "### 既存プロジェクトとの接続パイプライン（4パイプライン + ASCII図）"
+  - "## まとめ"
+
+tags_updated:
+  added: ["SLAM", "IncrementalMapping"]
+
+pipeline_diagrams_included:
+  - "GLIM on MEC + bag2pgm 統合（最優先）"
+  - "2D差分更新（セッション間マップ継続）"
+  - "3D差分更新 + グローバル最適化"
+  - "産総研テーマ統合フロー"
+
+completed_at: "2026-03-03T09:15:00"

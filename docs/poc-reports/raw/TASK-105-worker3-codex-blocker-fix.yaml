@@ -1,0 +1,51 @@
+task_id: TASK-105
+worker: worker3
+status: completed
+# yamllint disable-line rule:line-length
+summary: "config/zenohd_*.json5 の実IP (192.168.134.28 / 192.168.128.12) をプレースホルダー (192.168.3.x/y) に置換。CHANGELOG.md に Security セクション追記。1コミット作成。zenohd 未再起動確認済み。"
+completed_at: "2026-04-25T16:45:00+09:00"
+
+details: |
+  ## 変更ファイル
+  - config/zenohd_home.json5
+  - config/zenohd_office.json5
+  - CHANGELOG.md
+
+  ## diff (config)
+  config/zenohd_home.json5:
+    - listen  : "tcp/192.168.134.28:7447" → "tcp/192.168.3.x:7447"
+    - connect : "tcp/192.168.128.12:7447" → "tcp/192.168.3.y:7447"
+    - コメント: 実IP → "192.168.3.x: 自機 (home) の LAN IP — 実 IP に置換すること"
+                       "192.168.3.y: 対向 (office) の LAN IP — 実 IP に置換すること"
+
+  config/zenohd_office.json5:
+    - listen  : "tcp/192.168.128.12:7447" → "tcp/192.168.3.y:7447"
+    - connect : "tcp/192.168.134.28:7447" → "tcp/192.168.3.x:7447"
+    - コメント: 実IP → "192.168.3.y: 自機 (office) の LAN IP — 実 IP に置換すること"
+                       "192.168.3.x: 対向 (home) の LAN IP — 実 IP に置換すること"
+
+  ## CHANGELOG.md 追記
+  [0.1.0] の ### Security セクション（新規追加）に以下を記録:
+    - Replaced hardcoded LAN IPs in config/zenohd_*.json5 with placeholders
+      (192.168.3.x / 192.168.3.y) to align with README guidance and avoid
+      leaking deployment-specific addresses.
+
+  ## コミット
+  hash: 36c12b7
+  message: "config: replace hardcoded LAN IPs with placeholder (security)"
+
+  ## git log -5
+  36c12b7 config: replace hardcoded LAN IPs with placeholder (security)
+  40b1fe9 test: pin recent observation created_at to eliminate CI-clock dependency
+  844f1a3 config: add zenohd_localhost.json5 for single-host development
+  447e27c config: set actual home/office IPs (192.168.134.28 / 192.168.128.12)
+  6e8e453 test: cover identity key_expr and search session_id/since filters
+
+  ## zenohd 稼働確認
+  pgrep -a zenohd → PID 2392214 / zenohd -c .../config/zenohd_home.json5
+  再起動なし。稼働継続を確認。
+
+  ## push 状態
+  push していない（ローカルコミットのみ）
+
+issues: []

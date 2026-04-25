@@ -1,0 +1,80 @@
+task_id: TASK-097
+worker: worker1
+status: completed
+summary: "Tier-1 ベンチマーク（100件 save + search）完了。全判定基準クリア。既存データ無傷確認済み。"
+
+details: |
+  ## 環境確認（実行前）
+  - zenohd PID: 2392214（稼働中）
+  - 既存 observation: 6件（split-test×3, mesh-mem×2, poc×1）
+
+  ## 作成ファイル
+  - scripts/bench_bulk_save.py（API 適合済み実装版）
+  - .gitignore に scripts/*.csv / *.log / *.json を追加
+
+  ## Tier-1 実行結果
+  実行コマンド:
+    BENCH_N=100 BENCH_PAYLOAD=200 BENCH_WORKERS=1 PYTHONPATH=src python3 scripts/bench_bulk_save.py
+
+  ### Save 結果
+  | 項目 | 値 |
+  |------|-----|
+  | n | 100件 |
+  | payload | 200B |
+  | workers | 1 |
+  | elapsed | 0.003s |
+  | throughput | 31,805.5 ops/sec |
+
+  ※ session.put() は非同期 fire-and-forget のため、throughput はキューイング速度を反映。
+    実際に RocksDB に書き込まれていることは search で 100件返ってきたことで確認済み。
+
+  ### Search Latency 結果
+  | limit | actual | latency_ms |
+  |-------|--------|------------|
+  | 10    | 10     | 58.8       |
+  | 50    | 50     | 20.8       |
+  | 100   | 100    | 20.8       |
+  | 500   | 100    | 22.9       |
+  | 1000  | 100    | 21.0       |
+
+  ※ limit=10 が 58.8ms と limit=50 より遅い理由:
+    search_observations は tomb_expr を全走査してから obs を走査し最後に slice する実装。
+    最初の呼び出しで接続確立オーバーヘッドが乗るため。2回目以降はセッションキャッシュが効いて 20ms 台。
+
+  ※ limit=500/1000 で actual=100 なのは scale-bench が 100件しかないため（正常動作）。
+
+  ### リソース使用量（実行後）
+  - zenohd RSS: 29,704 KB (29.0 MB)
+  - RocksDB ディスク: 320KB (/home/gisen/.local/share/zenoh-mem/agent_mem/)
+
+  ### 既存データ保全確認
+  - 実行後の全 observation: 106件
+    - scale-bench: 100件（今回追加）
+    - split-test: 3件（既存、無傷）
+    - mesh-mem: 2件（既存、無傷）
+    - poc: 1件（既存、無傷）
+  - 既存 6件 → 全件 intact ✅
+
+  ## 判定
+  | 基準 | 値 | 結果 |
+  |------|----|------|
+  | throughput ≥ 10 ops/sec | 31,805.5 ops/sec | 合格 |
+  | search@100 ≤ 500ms | 20.8ms | 合格 |
+  | 既存データ保全 | 6件 intact | 合格 |
+
+  **総合判定: 合格**
+
+  ## 観察事項
+  1. put() 非同期: zenohd へのキューイング速度が throughput に出ている。
+     実際の永続化レイテンシは search で確認（100件が正常に返ってきた）。
+  2. search の最初の呼び出しオーバーヘッド: 初回 58ms、2回目以降 20ms 台。
+     tomb_expr 全走査 + obs 全走査の構造上、limit 変化はほぼ影響しない（全件走査後に slice）。
+  3. RocksDB 増加: 320KB は軽微。100件 × 200B ≈ 20KB の生データに対してオーバーヘッドあり。
+  4. scale-bench 100件は残存（次の Tier-2 以降に引き継ぎ）。
+
+  ## 次のアクション候補
+  - Short 分断テスト（30秒 / 10件）: Office ユーザーの stop/start 協調が必要
+  - Tier-2（1000件）: 引き続き Home ローカルで完結可能
+
+issues: []
+completed_at: "2026-04-25T15:55:00+09:00"

@@ -1,0 +1,54 @@
+task_id: TASK-107
+worker: worker2
+status: completed
+summary: "SUMMARY.md に TASK-102/103 の発見を追記完了。6箇所を編集、付記を Section 8 に昇格。矛盾なし。"
+details: |
+  ## 編集ファイル
+  /home/gisen/work/tmux-multi-agents/docs/poc-reports/SUMMARY.md
+  (263行 → 459行)
+
+  ## 追記・変更内容（6箇所）
+
+  ### 1. ヘッダー追記
+  「最終更新: 2026-04-25（TASK-102 / TASK-103 発見を追記）」を追加
+
+  ### 2. タイムライン (Section 3) 更新
+  - TASK-102: 「実行中」→ 完了行に更新（2026-04-25 16:50、initial_alignment 解明の要約を追記）
+  - TASK-103 を新規追加（2026-04-25 16:40、修正方針 A/A 推奨）
+  - TASK-105/106 を新規追加（実装中）
+
+  ### 3. Section 4.4 Mid-hot に注記追加
+  「注（TASK-102 解析より）: 収束は initial_alignment() による Discovery クエリで起きており、
+  warm tier digest 比較ではない。セクション 8.1 参照」
+
+  ### 4. Section 5.2 更新
+  タイトルを「hot/warm 境界跨ぎでも収束時間は変わらず」→ 「分断後収束が常時 ~5秒だった理由（TASK-102 解明）」に改題。
+  「推測される」という表現を削除し、TASK-102 ソース解析由来の説明に差し替え。
+  TASK-096 の予測誤りも明記。
+
+  ### 5. Section 6 BLOCKER / IMPORTANT 更新
+  - B-1 対処案: 「テンプレート形式に戻す...」→「推奨 方針 A: placeholder 戻し（192.168.3.x/y）、TASK-105 で実装中」
+  - I-1 対処案: 「fixture から動的に...」→「推奨 方針 A: recent created_at を '2025-06-01' に固定、TASK-106 で実装中」
+
+  ### 6. 付記 → Section 8「補足調査結果」に昇格
+  「付記: TASK-102 調査中」を削除し、完成した Section 8 を追加:
+    - 8.1: zenoh hot/warm/cold semantics と 5秒収束の理論解明（TASK-102）
+      - era 境界の時間窓テーブル（hot=60秒、warm=360秒、cold=それ以前）
+      - initial_alignment() の起動フロー（コードブロック）
+      - 設計時予測との差異（TASK-096 の「warm で延伸」が誤りだった理由）
+      - warm/cold 効果が現れる条件
+    - 8.2: Codex 修正方針設計（TASK-103）
+      - BLOCKER B-1 方針 A の具体的変更箇所（zenohd_home/office.json5）
+      - IMPORTANT I-1 方針 A の変更イメージ（コードブロック）
+
+  ## 既存内容との矛盾確認
+
+  矛盾なし。確認ポイント:
+  - Cold-entry（F2）: 「実行中」表記を維持済み（Section 2 / 4.6 / タイムライン）
+  - TASK-105/106: 「実装中」表記（完了確認はしていない）
+  - IP（192.168.134.28/192.168.128.12）: 既存のまま変更なし（Section 1 / 6 のコンテキスト維持）
+  - 既存の観測値（25秒、3秒、ESTAB+5s）: 変更なし、TASK-102 の理論を追記のみ
+  - 絵文字なし: チェック済み
+
+issues: []
+completed_at: "2026-04-25T17:10:00+09:00"

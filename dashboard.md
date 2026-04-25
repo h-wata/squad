@@ -1,20 +1,35 @@
 # プロジェクトダッシュボード
 
-**最終更新**: 2026-02-14 01:50
+**最終更新**: 2026-04-25 21:48
 
 ## 現在のステータス
 
 | ワーカー | Pane | 状態 | 現在のタスク |
 |---------|------|------|------------|
-| Worker 1 | 1 | 待機中 | TASK-048完了 |
+| Worker 1 | 1 | 待機中 | - |
 | Worker 2 | 2 | 待機中 | - |
 | Worker 3 | 3 | 待機中 | - |
 
 ## アクティブタスク
 
-| タスクID | 担当 | タイトル | 目的 |
-|---------|------|---------|------|
 なし
+
+## GitHub Issues (mesh-mem 現状)
+
+### クローズ済み
+- ~~[#1 Unify default limit across CLI/MCP/API](https://github.com/h-wata/mesh-mem/issues/1)~~ → c0f5194
+- ~~[#2 Align ZENOH_BACKEND_ROCKSDB_ROOT path](https://github.com/h-wata/mesh-mem/issues/2)~~ → 2a39ff5
+- ~~[#3 Provide systemd override for zenohd](https://github.com/h-wata/mesh-mem/issues/3)~~ → c4cfaee
+- ~~[#4 Add fastmcp as test dependency](https://github.com/h-wata/mesh-mem/issues/4)~~ → e5768c4 (47 passed / 0 skipped)
+
+### オープン
+- [#5 Expand benchmark and DR test coverage](https://github.com/h-wata/mesh-mem/issues/5) (Tier-2/3 完了、DR/NTP/MCP は設計済・実行待ち、GC 残)
+- [#6 Prepare v0.2.0 release](https://github.com/h-wata/mesh-mem/issues/6) (#5/#7 解消後)
+- [#7 search_observations: server-side filtering](https://github.com/h-wata/mesh-mem/issues/7) ← Tier-3 で発覚 (16k obs で 2.2s)
+
+### 解消済み（Codex レビュー対応、push 済み）
+- ~~BLOCKER: config 実 IP ハードコード~~ → commit 36c12b7
+- ~~IMPORTANT: test_search_respects_since_iso_filter date-dependent~~ → commit 40b1fe9
 
 ## 待機中タスク
 
@@ -24,54 +39,49 @@
 
 | タスクID | 担当 | タイトル | 完了日時 |
 |---------|------|---------|---------|
-| TASK-047 | Worker 3 | Agent PDF見出し・サマリー作成 | 2026-02-14 00:25 |
-| TASK-046 | Worker 2 | Fleet Adapter PDF見出し・サマリー作成 | 2026-02-14 00:10 |
-| TASK-045 | Worker 1 | コマンドIDトラッキング調査（kachaka-api-for-openrmf） | 2026-02-13 18:40 |
-| TASK-044 | Worker 1 | kachaka_spec.md move_to_pose引数名/Quaternion変換確認 | 2026-02-13 18:30 |
-| TASK-043 | Worker 1 | TASK-041/042修正結果の完全性チェック | 2026-02-13 18:15 |
-| TASK-041 | Worker 2 | kachaka_spec.md テレメトリ/コマンドJSON修正 | 2026-02-13 18:05 |
-| TASK-042 | Worker 3 | temi_spec.md テレメトリ/コマンドJSON修正 | 2026-02-13 18:00 |
-| TASK-040 | Worker 1 | ROBO-HI公式テレメトリ/コマンドJSONフォーマット調査 | 2026-02-13 17:40 |
-| TASK-037 | Worker 1 | Temi仕様書レビュー | 2026-02-13 17:10 |
-| TASK-038 | Worker 2 | Kachaka仕様書+シミュレーション手順書レビュー | 2026-02-12 21:10 |
-| TASK-039 | Worker 3 | 年間実装計画書レビュー | 2026-02-13 17:20 |
-| TASK-036 | Worker 1 | シミュレーション動作手順書作成 | 2026-02-12 20:30 |
-| TASK-034 | Worker 1 | Kachaka個別仕様書作成 | 2026-02-12 19:55 |
-| TASK-035 | Worker 2 | Temi個別仕様書作成 | 2026-02-12 20:00 |
-| TASK-033 | Worker 2 | 実装計画書修正(ELV連携スコープ外) | 2026-02-12 19:30 |
-| TASK-032 | Worker 1 | 年間実装計画書策定 | 2026-02-12 19:00 |
-| TASK-029 | Worker 2 | ROBO HI Agent SDK/Dockerドキュメント調査 | 2026-02-12 18:10 |
-| TASK-028 | Worker 1 | ROBO HI Fleet Adapter SDK/Dockerドキュメント調査 | 2026-02-12 18:15 |
-| TASK-031 | Worker 3 | Temi Robot SDK 調査 | 2026-02-12 00:45 |
-| TASK-030 | Worker 3 | kachaka-api-for-openrmf 既存コードベース調査 | 2026-02-12 00:15 |
-| TASK-027 | Worker 1 | bag2pgm.sh LiDARプリセット機能追加 | 2026-02-06 13:40 |
-| TASK-026 | Worker 1 | pcd2pgm.launch.py 引数対応修正 | 2026-02-05 18:10 |
-| TASK-025 | Worker 1 | bag2pgm パイプラインテスト | 2026-02-05 18:30 |
-| TASK-023 | Worker 1 | glim_export_ply CLIツール実装 | 2026-02-05 18:15 |
-| TASK-024 | Worker 2 | bag2pgm 統合スクリプト作成 | 2026-02-05 18:10 |
-| TASK-021 | Worker 2 | GLIM CLI/自動化オプション調査 | 2026-02-05 17:50 |
-| TASK-022 | Worker 3 | PLY→PCD変換の自動化オプション調査 | 2026-02-05 17:36 |
-| TASK-020 | Worker 1 | glim_ws内PLY→PGM関連コード調査 | 2026-02-05 17:30 |
-| TASK-019 | Worker 1 | スキル→コマンド移行 & 既存コマンド追加 | 2026-01-30 21:30 |
-| TASK-018 | Worker 1 | ワーカー指示書にスキル一覧・提案指示追記 | 2026-01-30 21:20 |
-| TASK-017 | Worker 2 | Git履歴調査スキル (/git-history) 作成 | 2026-01-30 21:10 |
-| TASK-016 | Worker 1 | ログ解析スキル (/analyze-logs) 作成 | 2026-01-30 21:05 |
-| TASK-015 | Worker 1 | Map mismatch修正コミット (d77689c) | 2026-01-30 20:55 |
-| TASK-014 | Worker 1 | Map mismatchエラーハンドリング修正 | 2026-01-30 20:25 |
-| TASK-013 | Worker 1 | kachaka-api Map mismatchエラーハンドリング調査 | 2026-01-30 20:15 |
-| TASK-012 | Worker 1 | EV連携試験ログ解析 - RMF階誤認識問題特定 | 2026-01-30 20:00 |
-| TASK-011 | Coder | fleet_adapter NavGraph mutex追加の工数調査 | 2026-01-30 14:00 |
-| TASK-010 | Coder | visualization.launch.xmlにMutexGroupVisualizer追加 | 2026-01-30 13:40 |
-| TASK-009 | Coder | MutexGroupVisualizer Lane色変更機能追加 | 2026-01-30 13:25 |
-| TASK-008 | Coder | MutexGroupVisualizer マーカー未出力問題の修正 | 2026-01-30 13:05 |
-| TASK-007 | Coder | MutexGroupVisualizer修正: building.yamlから位置取得 | 2026-01-30 12:45 |
-| TASK-006 | Coder | MutexGroupVisualizer マーカー非表示問題の調査 | 2026-01-30 08:20 |
-| TASK-005 | Coder | Mutex Group Rviz Plugin 使用方法の確認 | 2026-01-30 08:00 |
-| TASK-004 | Coder | Open-RMF Mutex Group Rviz Plugin レビュー指摘修正 | 2026-01-30 07:45 |
-| TASK-003 | Reviewer | Open-RMF Mutex Group Rviz Plugin コードレビュー | 2026-01-30 07:30 |
-| TASK-002 | Coder | Open-RMF Mutex Group Rviz Plugin実装 | 2026-01-30 07:00 |
-| TASK-001 | Documenter | cube_navigationパラメータの解説ドキュメント作成 | 2026-01-29 18:15 |
-
-## 保留中の問題
-
-*保留中の問題はありません*
+| TASK-117 | Worker 3 | Issue #5-E: MCP integration smoke 設計書（5 Case、305 行） | 2026-04-25 18:15 |
+| TASK-116 | Worker 2 | Issue #5-D: NTP skew 100ms-600s 設計書（298 行） | 2026-04-25 18:15 |
+| TASK-115 | Worker 1 | Issue #5-C: Tier-3 ベンチ実行（save 42k ops/s、search 16k 件で 2.2s → 新 Issue #7） | 2026-04-25 18:15 |
+| TASK-114 | Worker 3 | Issue #5-B: DR(24h) 分断テスト設計書（447行、TASK-102 整合済み） | 2026-04-25 18:10 |
+| TASK-113 | Worker 2 | Issue #5-A: Tier-2 ベンチ合格（37k ops/s、search 50-87ms、1000件 intact） | 2026-04-25 18:07 |
+| TASK-112 | Worker 1 | Issue #3: systemd override example.conf + README 手順（commit c4cfaee） | 2026-04-25 18:12 |
+| TASK-111 | Worker 3 | Issue #4: fastmcp を test extras に追加（47 passed / 0 skipped、commit e5768c4） | 2026-04-25 17:12 |
+| TASK-110 | Worker 2 | Issue #2: rocksdb path 統一 + migration note（commit 2a39ff5） | 2026-04-25 17:10 |
+| TASK-109 | Worker 1 | Issue #1: search default limit を 50 に統一（commit c0f5194） | 2026-04-25 17:15 |
+| Bench | Dispatcher | F2 Cold-entry 30分分断（ESTAB+11s 収束、TASK-102 理論を実証） | 2026-04-25 16:57 |
+| TASK-108 | Worker 3 | GitHub Issue Template 作成 (commit 9bd3def) | 2026-04-25 16:51 |
+| TASK-107 | Worker 2 | SUMMARY.md に TASK-102/103 追記（459 行に拡張） | 2026-04-25 17:10 |
+| TASK-105 | Worker 3 | Codex BLOCKER 実装（config IP placeholder、commit 36c12b7） | 2026-04-25 16:45 |
+| TASK-106 | Worker 1 | Codex IMPORTANT 実装（test created_at 固定、commit 40b1fe9） | 2026-04-25 16:45 |
+| TASK-104 | Worker 2 | SUMMARY.md 作成（260 行、7 セクション） | 2026-04-25 17:00 |
+| TASK-103 | Worker 3 | Codex BLOCKER + IMPORTANT 修正方針設計（推奨案 A,A） | 2026-04-25 16:40 |
+| TASK-102 | Worker 1 | zenoh hot/warm/cold semantics 調査（5秒収束の理論解明） | 2026-04-25 16:38 |
+| TASK-101 | Worker 2 | mesh-mem: CLI search default limit 仕様確認（CLI=20, MCP=20, API=50） | 2026-04-25 16:25 |
+| TASK-100 | Dispatcher | mesh-mem: Mid-hot 分断（65秒、20件）合格、ESTAB+5s 収束 | 2026-04-25 15:59 |
+| TASK-099 | Dispatcher | mesh-mem: Short 再測（クリーン）30秒、10件、ESTAB+5s 収束 | 2026-04-25 15:57 |
+| TASK-098 | Dispatcher | mesh-mem: Short 分断テスト（30秒分断、10件、両側10件揃った） | 2026-04-25 15:55 |
+| TASK-097 | Worker 1 | mesh-mem: Tier-1 ベンチマーク実装＆実行（合格） | 2026-04-25 15:55 |
+| TASK-096 | Worker 1 | mesh-mem: 大規模 + 長期分断シナリオ設計（推奨: Tier-1 + Short） | 2026-04-25 15:50 |
+| TASK-095 | Worker 2 | mesh-mem: 未コミット変更の整理コミット（3コミット、push なし） | 2026-04-25 15:35 |
+| TASK-094 | Worker 2 | mesh-mem: Split-brain 復旧テスト（設計 + 実行、Goal 4/5 達成） | 2026-04-25 15:27 |
+| TASK-093 | Worker 2 | mesh-mem: Home/Office Zenoh クラスタのスモークテスト（全通過） | 2026-04-25 10:15 |
+| TASK-092 | Worker 1 | Home zenohd v1.9 + rocksdb plugin 導入計画（実態確認で不要判明） | 2026-04-24 21:00 |
+| TASK-091 | Worker 2 | mesh-mem: Office PC bring-up 時 Search 可否調査 | 2026-04-24 21:00 |
+| TASK-090 | Worker 2 | mesh-mem: Home IP typo 修正 (128.28→134.28) | 2026-04-24 20:52 |
+| TASK-089 | Worker 2 | mesh-mem: Zenoh Home/Office IP 設定整合 | 2026-04-24 20:47 |
+| TASK-088 | Worker 2 | mesh-mem: plan.md vs 実装のギャップ分析と追加実装 | 2026-04-24 20:45 |
+| TASK-087 | Worker 1 | Gaussian Splatting 実装と説明の追記 | 2026-03-03 10:50 |
+| TASK-086 | Worker 3 | 差分SLAMセクション追記 | 2026-03-03 09:15 |
+| TASK-085 | Worker 2 | 差分SLAM / インクリメンタルマップ更新 OSS調査 | 2026-03-02 19:30 |
+| TASK-084 | Worker 3 | Open-RMF×MEC + Map管理 統合レポート作成 | 2026-03-02 18:35 |
+| TASK-083 | Worker 3 | Open-RMF × MEC 活用パターン調査 | 2026-03-02 17:30 |
+| TASK-082 | Worker 2 | MECを使ったMap管理調査 | 2026-03-02 17:45 |
+| TASK-081 | Worker 3 | MECオフロード用途セクション追記 | 2026-03-02 16:55 |
+| TASK-080 | Worker 3 | ROS2/MEC調査レポート Zenohセクション追記 | 2026-03-02 16:40 |
+| TASK-079 | Worker 2 | Zenoh + MEC/Cloud ロボットソリューション調査 | 2026-03-02 16:20 |
+| TASK-078 | Worker 3 | ROS2 + Cloud/MEC 調査レポート作成 | 2026-03-02 16:05 |
+| TASK-077 | Worker 2 | ROS2 + Cloud/MEC連携プロジェクト調査 | 2026-03-02 15:45 |
+| TASK-076 | Worker 3 | FY25下期報告会アジェンダ フォワード案件追加 | 2026-03-02 14:50 |
+| TASK-075 | Worker 3 | FY25下期 社内報告会 項目リストアップ | 2026-03-02 14:30 |
+| TASK-074 | Worker 2 | Obsidian 要確認ファイルの最終処理 | 2026-03-02 14:00 |
+| TASK-073 | Worker 2 | Obsidian ファイル整理・移動実行 | 2026-03-02 11:40 |
