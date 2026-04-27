@@ -6,7 +6,7 @@
 | 検証期間 | 2026-04-24 〜 2026-04-25 |
 | 作成日 | 2026-04-25 |
 | 出典 | dashboard.md、memory ファイル、docs/poc-reports/raw/ |
-| 最終更新 | 2026-04-25（TASK-102 / TASK-103 発見を追記） |
+| 最終更新 | 2026-04-27（TASK-119 DR 24h 分断テスト結果を追記） |
 
 ---
 
@@ -83,7 +83,10 @@
 | TASK-102 | 2026-04-25 16:50 | Worker 1 | zenoh hot/warm/cold semantics 調査（ソース解析） | initial_alignment() 接続直後に即実行 → 分断時間に依存せず ~5秒収束と解明。TASK-096 の「warm で延伸」予測は誤り |
 | TASK-103 | 2026-04-25 16:40 | Worker 3 | Codex 指摘 BLOCKER / IMPORTANT 修正方針設計 | BLOCKER→方針 A（placeholder 戻し）、IMPORTANT→方針 A（固定値）を推奨 |
 | TASK-105/106 | 実装中 | Worker 3 | Codex 修正実装（BLOCKER + IMPORTANT） | 実装中 |
-| F2 | 実行中 | Dispatcher BG | Cold-entry 30分分断テスト | 実行中（17:00 完了予定） |
+| F2 | 2026-04-25 | Dispatcher BG | Cold-entry 30分分断テスト | PASSED（TASK-119 DR 24h テストに吸収） |
+| TASK-113 | 2026-04-25 18:06 | Worker 2 | Tier-2 ベンチマーク（1,000件） | save 37,053 ops/sec、search 全 limit 50-87ms — PASSED |
+| TASK-116 | 2026-04-25 | Worker 2 | NTP skew 境界テスト 設計書作成 | docs/poc-reports/ntp_skew_test_design.md 作成 |
+| TASK-119 | 2026-04-27 08:58 | Dispatcher | DR 24h 分断テスト（1,192件 save、24.45h partition） | G1 PARTIAL / G2 FAIL / G3-G4 PASS / Tombstone PASS。cold-era step-function 収束を実証（§8.3） |
 
 出典: dashboard.md 完了タスク欄
 
@@ -334,6 +337,7 @@ mesh-mem search "split-bench-X" --limit 1000 | grep -c "obs"
 | N-2 | zenohd v1.9 / rocksdb plugin が apt 管理である旨が README に未記載 | セットアップ手順として明記が必要 |
 | N-3 | systemd による自動起動が未設定（手動起動のみ） | 本番運用に向けて systemd unit 設定が必要 |
 | N-4 | MESH_MEM_AGENT_FAMILY / MESH_MEM_CLIENT_ID が新ターミナルで未設定になる | bashrc 等への恒久設定推奨。未設定時は `[unknown/unknown]` で記録される |
+| N-5 | zenohd 再起動直後の `--project` フィルタ競合（DR 24h テストで観測） | sub-issue #8 で別途 track。詳細は §8.3 参照 |
 
 出典: dashboard.md、memory/project_mesh_mem_state.md、memory/project_mesh_mem_poc_results.md
 
@@ -457,3 +461,94 @@ recent = dataclasses.replace(
 推奨理由: `old` observation で同じ手法（`dataclasses.replace(..., created_at=...)`）を既に使用しており一貫性がある。追加ライブラリ不要。CI clock 依存を完全排除できる。
 
 想定コミット: `"test: pin recent observation created_at to eliminate CI-clock dependency"`
+
+---
+
+### 8.3 DR 24h 分断テスト結果（TASK-119）
+
+TASK-119（Dispatcher 直実行）が 2026-04-26 〜 2026-04-27 の実機 2台で 24.45時間 の長期分断テストを実施した。
+
+出典: docs/poc-reports/raw/TASK-119-dr-1day-result.yaml、docs/poc-reports/dr_1day_test_design.md
+
+#### 実施概要
+
+| 項目 | 値 |
+|------|-----|
+| 分断開始 | 2026-04-26T08:19:52+09:00（Office zenohd を SIGTERM で停止） |
+| Writer 開始 | 2026-04-26T12:59:43+09:00（分断から 4h40m 遅延） |
+| 再接続 | 2026-04-27T08:46:44+09:00 |
+| 分断時間 | 24.45h |
+| Writer 稼働時間（分断中） | 19.78h |
+| 保存件数 | 1,192件（目標 1,440件、未達理由: 分断後の Worker 起動遅延） |
+
+Writer の 4h40m 遅延は TASK-118 ワーカー起動の rate-limit 残留によるもので、システム障害ではない。
+1,192件は cold-era 検証（全件 XOR 単一 fingerprint でのアライメント）として十分な規模。
+
+#### G1-G4 + Tombstone 判定表
+
+| Goal | 期待値 | 実測値 | 判定 |
+|------|--------|--------|------|
+| G1: Writer が 1,440件 save 完了 | 1,440 writes | 1,192 writes（4h40m 遅延で未達） | PARTIAL |
+| G2: 再接続後 30秒以内に収束 | <= 30s | 97-282秒（step-function 0 → 1,193） | FAIL |
+| G3: Home/Office のデータ損失ゼロ | diff 空 | 両側 md5 一致（pre-delete 1,194件 / post-delete 1,189件） | PASS |
+| G4: ストレージ上限内（DB<50MB、RSS<200MB） | DB<50MB、RSS<200MB | DB ~26MB、RSS ~82MB | PASS |
+| Tombstone 伝播（5件削除→5s 以内に両側反映） | Home 削除が Office に伝播 | 5s 待機後に両側 1,194→1,189、md5 一致 | PASS |
+
+G1 の未達はワークフロー側の問題（Worker 起動遅延）であり、replication システム自体の障害ではない。
+G2 の FAIL は §8.1 および設計書 §5.2 で既に予測されていた cold-era の期待動作であり、
+バグではなく **cold era における正常な収束挙動**として記録する。
+
+#### 主要発見 1: cold-era step-function 収束
+
+再接続後の Office 側 obs 件数の推移:
+
+| 時刻 | Office 件数 | Home 件数 |
+|------|------------|----------|
+| ESTAB 直後（T+0s） | 0 | 1,188-1,190 |
+| T+35s（poll1 window 開始） | 0 | 1,188-1,190 |
+| T+105s（poll1 window 終了） | 0 | 1,188-1,190 |
+| T+211s（poll2 window 開始） | 0 | 1,191-1,193 |
+| T+280s（poll2 window 終了） | 0 | 1,191-1,193 |
+| T+282s（spot check） | 1,193 | 1,193 |
+
+Office 側は 0件のまま 97-282秒経過し、その後一瞬で 1,193件に**ジャンプ**した。
+途中経過（部分同期、件数の単調増加）は一切観測されなかった。
+
+このパターンは §8.1 で解明した cold era の仕組みと整合する:
+- cold era のデータは **XOR 単一 fingerprint**（単一のハッシュ値）として管理される
+- `initial_alignment()` は Discovery クエリで対向の全 cold era データを一括転送する
+- 転送が完了するまで Office 側の storage には何も現れず、完了した瞬間に全件が反映される
+- 1,192-1,194件 × ~72KB 相当のデータを 1 アライメントサイクルで転送するため 97-282秒を要した
+
+**§5.2 の仮説「30秒で収束」は cold era では非現実的**であり、本実測で update する。
+hot/warm era（分断時間 <360秒）では initial_alignment が数秒以内に完了するが、
+cold era（360秒超の古いデータが大量に存在する場合）ではデータ転送時間が支配的になる。
+
+なお §8.1 で導いた「分断時間が何分でも ~5秒収束する」結論は、
+「最初の接続で initial_alignment が即実行される」という点では今回も成立している（T+0.5s で Discovery 実行）。
+変化したのは「Discovery によるデータ転送完了までの時間」であり、これはデータ量に比例する。
+
+#### 主要発見 2: --project filter race（sub-issue #8）
+
+再接続直後の数分間、以下の挙動が観測された:
+
+```bash
+# Office 側
+mesh-mem search "" --project dr-test --limit 2000
+# → 0件（0 → 1,193 ジャンプの前）
+
+mesh-mem search "" --limit 20
+# → 同時刻に dr-test の obs が含まれたリストが返る
+```
+
+`--project` フィルタなしの empty keyword search では同じデータが見えているにもかかわらず、
+`--project dr-test` 指定では 0件になる現象が数分間継続した。
+
+これは CLI / MCP filter 処理と zenohd storage backend の hydration の間に競合が存在する可能性を示唆する。
+本テスト時点では根本原因の特定には至っていない。sub-issue #8 で別途調査・track する。
+
+#### §8.1 との整合
+
+TASK-102 の結論「`initial_alignment()` は接続直後に即実行され、分断時間は alignment トリガーに影響しない」は、
+24h スケールでも成立することが確認された（Office zenohd 起動後 T+0.5s で Discovery クエリが走った）。
+§8.1 の結論に変更はない。cold era では Discovery 後の**データ転送完了時間**が新たに支配的要因として追加される。

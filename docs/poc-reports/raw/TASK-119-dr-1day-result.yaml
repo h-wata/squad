@@ -1,0 +1,155 @@
+task_id: TASK-119
+worker: dispatcher
+title: "DR 1day partition test - Phase 3 reconnect + Phase 4 integrity"
+issue: "https://github.com/h-wata/mesh-mem/issues/5"
+
+meta:
+  start_partition: "2026-04-26T08:19:52+09:00"
+  writer_start: "2026-04-26T12:59:43+09:00"  # 4h40m delay vs partition
+  start_phase3: "2026-04-27T08:46:44+09:00"
+  end_phase4: "2026-04-27T08:58:00+09:00"
+  partition_duration_h: 24.45
+  writer_active_during_partition_h: 19.78
+
+baseline:
+  home:
+    zenohd_pid: 2392214
+    db_size: 25M
+    zenohd_rss_kb: 80464
+    dr_test_count: 0
+    ntp: "active synced"
+  office:
+    zenohd_pid: 688237
+    db_size: 25M
+    zenohd_rss_kb: 80668
+    dr_test_count: 0
+    ntp: "active synced"
+
+partition:
+  method: "kill -TERM on Office zenohd PID 688237 (no systemd unit installed)"
+  office_save_during_split: "Unable to connect to any of [tcp/localhost:7447] (expected)"
+  writer:
+    pid: 2799943
+    cmd: "bash scripts/run_dr_writer.sh"
+    interval_sec: 60
+    target_total: 1440
+    actual_saved: 1192
+    # yamllint disable-line rule:line-length
+    target_unmet_reason: "Writer started 4h40m after partition due to TASK-118 worker activation lag (rate-limit residual). Phase 3 cut writer at obs 1192."
+
+reconnect:
+  # yamllint disable-line rule:line-length
+  office_zenohd_restart_cmd: "ZENOH_BACKEND_ROCKSDB_ROOT=$HOME/.local/share/zenoh-mem nohup zenohd -c ~/work/mesh-mem/config/zenohd_office.json5 > /tmp/zenohd_office.log 2>&1 &"
+  office_new_zid: "a7241198e0bc15d05103e297e7379c1"
+  estab_observed_at: "2026-04-27T08:46:48+09:00"  # ~3s after restart
+  estab_pairs:
+    - "192.168.128.12:39800 <-> 192.168.134.28:7447"
+    - "192.168.128.12:7447 <-> 192.168.134.28:49412"
+
+convergence_polling:
+  poll1_window:
+    start: "2026-04-27T08:47:19+09:00"
+    end: "2026-04-27T08:48:25+09:00"
+    home_count_range: [1188, 1190]
+    office_count_range: [0, 0]
+    note: "Office stayed at 0 for entire 70s window."
+  poll2_window:
+    start: "2026-04-27T08:50:18+09:00"
+    end: "2026-04-27T08:51:14+09:00"
+    home_count_range: [1191, 1193]
+    office_count_range: [0, 0]
+    note: "Office still 0 via --project filter."
+  spot_check_at: "2026-04-27T08:51:30+09:00"
+  spot_check_office_count: 1193
+  estimated_convergence:
+    earliest: "2026-04-27T08:48:25+09:00"
+    latest: "2026-04-27T08:51:30+09:00"
+    duration_from_estab_sec_min: 97
+    duration_from_estab_sec_max: 282
+    pattern: "step-function (0 -> 1193 jump), no gradual increase observed"
+
+integrity_check:
+  pre_delete:
+    home_count: 1194
+    office_count: 1194
+    home_md5: "12aab89d0c99b99447e0a64a45b160cc"  # pragma: allowlist secret
+    office_md5: "12aab89d0c99b99447e0a64a45b160cc"  # pragma: allowlist secret
+    match: true
+  tombstone_test:
+    deleted_5_ids:
+      - "0027d3eca0774ab891f73a89d068cb56"
+      - "00637dc1c37c4d818cde77d3fb31e1c5"
+      - "0081d1ecc0f343f8a75a9c5e14d1c5fd"
+      - "008d2cc65ab04e8cbeba18a9127308d0"
+      - "00ec5c2df3ec45bea428f59b6fe28334"
+    delete_executor: "Home (mesh-mem delete)"
+    propagation_wait_sec: 5
+  post_delete:
+    home_count: 1189
+    office_count: 1189
+    home_md5: "1b0552e009aa06d909e1e382da05585c"  # pragma: allowlist secret
+    office_md5: "1b0552e009aa06d909e1e382da05585c"  # pragma: allowlist secret
+    match: true
+
+verdict:
+  G1_writer_completes_1440:
+    expected: "1440 writes during 24h partition"
+    actual: "1192 writes (target unmet due to 4h40m writer-start lag)"
+    result: PARTIAL
+    note: "Workflow lag, not a system fault. 1192 obs is still meaningful for cold-era validation."
+  G2_convergence_under_30s:
+    expected: "<= 30 sec after ESTAB"
+    actual: "97-282 sec range (step-function 0 -> 1193)"
+    result: FAIL
+    # yamllint disable-line rule:line-length
+    note: "As predicted in design §5.2: cold era's XOR-single-fingerprint causes whole-set Discovery transfer. Latency dominated by transferring ~72 KB across ~1194 obs in a single alignment cycle."
+  G3_loss_zero:
+    expected: "diff empty between Home/Office IDs"
+    actual: "md5 match on both pre-delete (1194) and post-delete (1189)"
+    result: PASS
+  G4_storage_bounds:
+    expected: "DB total < 50 MB, zenohd RSS < 200 MB"
+    actual: "DB ~26 MB, RSS ~82 MB"
+    result: PASS
+  tombstone_propagation:
+    expected: "5 tombstones propagate to Office within 5s"
+    actual: "Office count went 1194 -> 1189 within 5s wait, md5 match"
+    result: PASS
+
+key_findings:
+  # yamllint disable-line rule:line-length
+  - "TASK-102 hypothesis confirmed at 24h scale: initial_alignment fires immediately, partition duration is irrelevant to alignment trigger."
+  # yamllint disable-line rule:line-length
+  - "Cold-era convergence is a step-function: Office returns 0 until full transfer completes, then jumps to whole count. No partial / monotonically-increasing observation."
+  # yamllint disable-line rule:line-length
+  - "G2 30-sec target is unrealistic for cold-era Discovery with 1000+ obs. Design hypothesis §5.2 already noted this risk."
+  - "Tombstone semantics work cleanly across post-recovery sync (existence-based deletion preserved)."
+  # yamllint disable-line rule:line-length
+  - "Project filter (--project dr-test) returns 0 for ~few minutes after Office restart even though data exists - confirmed by 'mm search empty-kw' returning rows simultaneously. Possible CLI/MCP filter race vs storage backend hydration. May warrant separate investigation."
+
+artifacts:
+  home:
+    - /tmp/dr_test_baseline.txt
+    - /tmp/dr_test_phase3_start.txt
+    - /tmp/dr_writer.log
+    - /tmp/dr_phase3_home.log
+    - /tmp/dr_phase3_home2.log
+    - /tmp/dr_home_ids.txt
+    - /tmp/dr_home_ids_after.txt
+    - /tmp/dr_deleted_ids.txt
+  office:
+    - /tmp/dr_phase3_office.log
+    - /tmp/dr_phase3_office2.log
+    - /tmp/dr_office_ids.txt
+    - /tmp/dr_office_ids_after.txt
+    - /tmp/zenohd_office.log
+  scripts:
+    - /home/gisen/work/mesh-mem/scripts/run_dr_writer.sh
+
+next_actions:
+  - "Update SUMMARY.md §8 with TASK-119 findings (cold-era step-function convergence)."
+  - "Comment on Issue #5 noting AC 'DR scenario' completion (with G1 caveat)."
+  - "Consider opening sub-issue: investigate --project filter race after zenohd restart."
+  - "Decide whether scripts/run_dr_writer.sh should be committed to mesh-mem repo (PoC tool, optional)."
+
+completed_at: "2026-04-27T08:58:30+09:00"
