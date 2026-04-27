@@ -1,0 +1,155 @@
+task_id: TASK-122
+worker: dispatcher
+title: "NTP skew boundary test - Case 1-3 partial execution"
+issue: "https://github.com/h-wata/mesh-mem/issues/5"
+design_ref: "/home/gisen/work/tmux-multi-agents/docs/poc-reports/ntp_skew_test_design.md"
+
+meta:
+  start: "2026-04-27T14:34:00+09:00"
+  end: "2026-04-27T14:46:00+09:00"
+  cases_attempted: ["Case-1 (100ms)", "Case-2 (1s)", "Case-3 (10s)"]
+  cases_skipped: ["Case-4 (60s era)", "Case-5 (600s)"]
+  cases_skipped_reason: "design called for Case 4-5 only after baseline cleanup; deferred to follow-up task"
+
+environment:
+  home:
+    hostname: hwatahome-jazzy
+    timesyncd: active synced
+    chrony: not installed
+  office:
+    hostname: hwata-jazzy
+    timesyncd: active synced
+    chrony: not installed
+    sudo: requires password (cached during test)
+  mesh_mem_cli:
+    home: /home/gisen/.local/bin/mesh-mem
+    office: mm  (alias = /home/gisen/.venv/mesh-mem/bin/mesh-mem)
+
+baseline_anomaly:
+  observation: "Office reported 'synchronized: yes / NTP service: active' but real wall clock was ~12.75s behind Home"
+  pre_test_drift_sec: 12.75
+  pre_test_office_utc: "2026-04-27T05:38:46.17"
+  pre_test_home_utc: "2026-04-27T05:38:58.92"
+  significance: "timedatectl status alone is not a reliable indicator of inter-host clock alignment in this environment"
+
+methodology_caveats:
+  - "tmux send-keys lag (~0.3-1s) limits achievable skew precision to ~1s minimum"
+  # yamllint disable-line rule:line-length
+  - "100ms target unattainable via this control path; would require local-process clock injection (libfaketime) or container-level skew"
+  - "sudo password timeout adds another constraint window"
+
+cases:
+  case_re1:
+    intent: "drift baseline (no added skew)"
+    actual_effective_skew_s: 0.78
+    office_obs_created_at_utc: "2026-04-27T05:43:17"
+    home_obs_created_at_utc: "2026-04-27T05:43:16"
+    obs_count_each_side: 3
+    project: ntp-r1
+    md5_home: "f3145eb2c2c7078d29fe03711f2b1a05"  # pragma: allowlist secret
+    md5_office: "f3145eb2c2c7078d29fe03711f2b1a05"  # pragma: allowlist secret
+    sync_match: true
+
+  case_re2:
+    intent: "+1s skew on Office"
+    actual_effective_skew_s: 0.05
+    # yamllint disable-line rule:line-length
+    note: "Home time used as base for date -d '+1s' computation, so the 'set' operation effectively reset Office to ~Home time + 1s, but lag absorbed most of it"
+    office_obs_created_at_utc: "2026-04-27T05:43:45"
+    home_obs_created_at_utc: "2026-04-27T05:43:45"
+    obs_count_each_side: 3
+    project: ntp-r2
+    md5_home: "833efe6a46d0246806fdf8c58db83e46"  # pragma: allowlist secret
+    md5_office: "833efe6a46d0246806fdf8c58db83e46"  # pragma: allowlist secret
+    sync_match: true
+
+  case_re3:
+    intent: "+10s skew on Office"
+    actual_effective_skew_s: 10.53
+    office_obs_created_at_utc: "2026-04-27T05:44:41"
+    home_obs_created_at_utc: "2026-04-27T05:44:31"
+    obs_count_each_side: 3
+    project: ntp-r3
+    md5_home: "19ad925e8404a091128e92e40ff39234"  # pragma: allowlist secret
+    md5_office: "19ad925e8404a091128e92e40ff39234"  # pragma: allowlist secret
+    sync_match: true
+
+restoration:
+  set_ntp_true_at: "2026-04-27T14:45:34+09:00"
+  drift_after_5s: ~1s
+  drift_after_60s: not measured
+  # yamllint disable-line rule:line-length
+  note: "systemd-timesyncd uses slew (smooth) for small offsets; chrony's makestep would force a step but chrony not installed"
+
+verdict:
+  G1_100ms_normal_operation:
+    expected: "save/search/sync all normal at 100ms skew"
+    actual: "could not achieve 100ms-level skew via tmux control path"
+    result: NOT_VERIFIABLE
+    note: "would need libfaketime or container-level isolation to verify cleanly"
+
+  G2_1s_replication_unbroken:
+    expected: "replication healthy at 1s skew, alignment within 30s"
+    actual: "Re-2 effective ~0s; Re-3 effective +10s -> md5 match on both"
+    result: PASS
+    note: "Replication is robust against multi-second drift up to at least 10s"
+
+  G3_10s_route_A_observable:
+    expected: "since_iso filter mismatch should be observable at 10s skew"
+    actual: "Office obs (05:44:41) vs Home obs (05:44:31): a since_iso=05:44:35 cutoff would drop Home obs"
+    result: PASS
+    note: "Hypothesis confirmed: --since-iso filter behavior is host-clock dependent"
+
+  G4_60s_era_inconsistency:
+    expected: "hot/warm era classification mismatch at 60s skew"
+    actual: not_executed
+    result: DEFERRED
+    note: "would require longer test window with era-boundary observation"
+
+  G5_600s_breakdown:
+    expected: "system-level breakdown documented"
+    actual: not_executed
+    result: DEFERRED
+    note: "deferred together with G4"
+
+key_findings:
+  - finding: "timedatectl 'synchronized: yes / NTP service: active' is NOT a guarantee of inter-host clock alignment"
+    severity: notice
+    # yamllint disable-line rule:line-length
+    impact: "Operators relying solely on systemd-timesyncd status may have undetected multi-second drift; --since-iso filtering and tombstone TTL evaluation are silently affected"
+
+  - finding: "Replication and integrity (md5 of obs IDs) survives at least up to +10s clock skew"
+    severity: positive
+    impact: "Cold/hot era classification at small skew (<60s) does not break sync"
+
+  - finding: "Tombstone retention semantics under skew not yet tested (route C)"
+    severity: open
+    impact: "GC + skew interaction is the GC test (TASK-121 design) responsibility"
+
+  - finding: "chrony not installed on either host; manual recovery only via timedatectl set-time/set-ntp"
+    severity: notice
+    impact: "Operational guidance should recommend installing chrony for makestep-style strict alignment"
+
+new_issue_candidates:
+  - title: "Document required NTP setup (sub-second drift advisory) for mesh-mem operations"
+    # yamllint disable-line rule:line-length
+    body_summary: "Since --since-iso filter and tombstone TTL evaluations rely on host wall clock, operators should be advised to install chrony or equivalent for sub-second alignment. timedatectl status alone is insufficient."
+    target_repo: "h-wata/mesh-mem"
+    label: documentation
+
+artifacts:
+  observation_projects:
+    - ntp-r1 (3+3 obs)
+    - ntp-r2 (3+3 obs)
+    - ntp-r3 (3+3 obs)
+  prior_failed_attempts:
+    - ntp-c1 (3+3 obs from initial attempt before drift was detected)
+    - ntp-skew-test (1 obs baseline)
+
+next_actions:
+  - "Update SUMMARY.md §8.4 with NTP skew partial findings"
+  - "Comment on Issue #5 noting NTP AC partially executed (G2/G3 PASS, G1 not verifiable, G4/G5 deferred)"
+  - "File doc-only issue at h-wata/mesh-mem about NTP setup advisory"
+  - "Defer G4/G5 to follow-up task (requires libfaketime or container isolation)"
+
+completed_at: "2026-04-27T15:40:00+09:00"

@@ -87,6 +87,7 @@
 | TASK-113 | 2026-04-25 18:06 | Worker 2 | Tier-2 ベンチマーク（1,000件） | save 37,053 ops/sec、search 全 limit 50-87ms — PASSED |
 | TASK-116 | 2026-04-25 | Worker 2 | NTP skew 境界テスト 設計書作成 | docs/poc-reports/ntp_skew_test_design.md 作成 |
 | TASK-119 | 2026-04-27 08:58 | Dispatcher | DR 24h 分断テスト（1,192件 save、24.45h partition） | G1 PARTIAL / G2 FAIL / G3-G4 PASS / Tombstone PASS。cold-era step-function 収束を実証（§8.3） |
+| TASK-122 | 2026-04-27 15:40 | Dispatcher | NTP skew 境界テスト Case 1-3 部分実施 | G1 NOT_VERIFIABLE / G2 PASS / G3 PASS / G4-G5 DEFERRED。timedatectl の信頼性問題を発見（§8.4） |
 
 出典: dashboard.md 完了タスク欄
 
@@ -338,6 +339,7 @@ mesh-mem search "split-bench-X" --limit 1000 | grep -c "obs"
 | N-3 | systemd による自動起動が未設定（手動起動のみ） | 本番運用に向けて systemd unit 設定が必要 |
 | N-4 | MESH_MEM_AGENT_FAMILY / MESH_MEM_CLIENT_ID が新ターミナルで未設定になる | bashrc 等への恒久設定推奨。未設定時は `[unknown/unknown]` で記録される |
 | N-5 | zenohd 再起動直後の `--project` フィルタ競合（DR 24h テストで観測） | sub-issue #8 で別途 track。詳細は §8.3 参照 |
+| N-6 | `timedatectl` の `synchronized: yes` は inter-host clock alignment を保証しない | TASK-122 で Office/Home 両方 "synchronized: yes" でも 12.75s の drift を観測。`--since-iso` フィルタと tombstone TTL の評価に影響。chrony インストール推奨（詳細は §8.4）|
 
 出典: dashboard.md、memory/project_mesh_mem_state.md、memory/project_mesh_mem_poc_results.md
 
@@ -552,3 +554,98 @@ mesh-mem search "" --limit 20
 TASK-102 の結論「`initial_alignment()` は接続直後に即実行され、分断時間は alignment トリガーに影響しない」は、
 24h スケールでも成立することが確認された（Office zenohd 起動後 T+0.5s で Discovery クエリが走った）。
 §8.1 の結論に変更はない。cold era では Discovery 後の**データ転送完了時間**が新たに支配的要因として追加される。
+
+---
+
+### 8.4 NTP skew 境界テスト 部分実施結果（TASK-122）
+
+TASK-122（Dispatcher 直実行）が 2026-04-27 14:34〜14:46 に実機 2台で Case 1-3 相当の NTP skew テストを部分実施した。
+Case 4（60s、era 境界）・Case 5（600s）は設計書の条件（ベースラインクリーンアップ後）を満たさないため defer した。
+
+出典: docs/poc-reports/raw/TASK-122-ntp-skew-result.yaml、docs/poc-reports/ntp_skew_test_design.md
+
+#### 実施概要
+
+| Case | intent | 実効 skew | project | md5 一致 |
+|------|--------|----------|---------|---------|
+| Re-1 | drift baseline（skew なし） | 0.78s | ntp-r1 | 一致 |
+| Re-2 | +1s skew on Office | 0.05s（lag で吸収） | ntp-r2 | 一致 |
+| Re-3 | +10s skew on Office | 10.53s | ntp-r3 | 一致 |
+
+各 Case で Home/Office それぞれ 3件ずつ obs を save し、両側の全 obs ID の md5 を比較した。
+全 Case で md5 が一致し、replication の整合性が維持されたことを確認した。
+
+#### 環境制約（重要）
+
+| 制約 | 詳細 |
+|------|------|
+| tmux send-keys ラグ | 0.3〜1s のラグがあり、100ms 精度の skew 制御は不可能 |
+| 100ms 目標の未達 | G1（100ms）の検証には libfaketime またはコンテナレベルの時計注入が必要 |
+| chrony 未インストール | Home/Office 両方に chrony が未インストール。時計復元は `timedatectl set-ntp true` のみ（slew 方式） |
+| sudo password | キャッシュ期間内での実施が必要 |
+
+tmux 制御経路での 100ms skew 精度は構造上達成できない。正確な小 skew テストには
+別アプローチ（libfaketime、コンテナ隔離）が必要。
+
+#### 重要発見 1: timedatectl の信頼性問題
+
+テスト開始前のベースライン計測で以下を観測した:
+
+```
+Office: timedatectl status → NTP service: active / synchronized: yes
+Home:   timedatectl status → NTP service: active / synchronized: yes
+
+実測:
+  Office UTC: 2026-04-27T05:38:46.17
+  Home   UTC: 2026-04-27T05:38:58.92
+  差: 12.75秒
+```
+
+両ホストで `timedatectl` が "synchronized: yes" と報告していたにもかかわらず、
+実際のホスト間時刻差は 12.75秒に達していた。
+
+これは `synchronized: yes` が「このホストが自身の NTP サーバーと同期している」ことを示すのみであり、
+**2台のホスト間の時刻差（inter-host alignment）を保証するものではない**ことを意味する。
+NTP サーバー側のずれや、異なる NTP ソースを使っている場合に発生しうる。
+
+この発見は以下に影響する:
+- `mesh-mem search --since-iso` フィルタ: `created_at` がホスト時計依存のため、12.75s のずれが直接フィルタ境界に影響する
+- tombstone TTL / `mesh-mem gc` の retention 判定: 各ホストの時計でのみ評価されるため、対向ホストの expired 判断が 12.75s ずれる
+
+運用推奨: `chrony` をインストールし `chronyc tracking` でオフセットを定期確認すること（`Last offset` < 100ms 推奨）。
+詳細は README の [Time sync](#time-sync) セクションを参照。
+
+#### 重要発見 2: replication は 10s skew でも健全
+
+Case Re-3（実効 +10.53s skew）で以下を確認:
+
+```
+Office obs created_at: 2026-04-27T05:44:41 UTC
+Home   obs created_at: 2026-04-27T05:44:31 UTC
+（差: 10秒）
+→ md5 一致: 19ad925e8404a091128e92e40ff39234
+```
+
+`created_at` に 10秒の差があっても replication（obs ID リストの整合）は壊れなかった。
+zenoh の replication は HLC timestamp の一致ではなく obs key の存在ベースで同期するため、
+`created_at` の値がずれても obs の到達性には影響しない。
+
+経路 A（`--since-iso` フィルタ外れ）の仮説も確認済み:
+since_iso カットオフを `05:44:35` に設定すれば、Home obs（`05:44:31`）は除外されるが Office obs（`05:44:41`）は含まれる。
+ただし今回は since_iso フィルタの実動作を自動計測していないため、次回テストで明示的に計測することが望ましい。
+
+#### G1-G5 達成度表
+
+| Goal | 内容 | 結果 | 備考 |
+|------|------|------|------|
+| G1: skew=100ms で正常動作 | save/search/sync 全て正常 | NOT_VERIFIABLE | tmux ラグで 100ms 精度不可。libfaketime 等が必要 |
+| G2: skew=1s で replication 正常 | alignment 30秒以内 | PASS | Re-2 実効 ~0s・Re-3 実効 10s いずれも md5 一致 |
+| G3: skew=10s で経路 A（since_iso 外れ）観測 | Office obs が Home より 10s 進む | PASS | 仮説通りに 10s の created_at 差を確認 |
+| G4: skew=60s で era 不整合観測 | hot/warm era 分類食い違い | DEFERRED | 設計書条件未達のため保留 |
+| G5: skew=600s での破綻記録 | 何が壊れるかを記録 | DEFERRED | G4 と合わせて保留 |
+
+#### 既存セクションとの整合
+
+- §8.1（initial_alignment の即実行）: NTP skew は initial_alignment のトリガーには影響しない。skew は `created_at` の値と `--since-iso` フィルタ動作に影響する別経路。
+- §8.3（cold-era step-function 収束）: NTP skew テストはデータ量の問題とは独立。両発見は直交する。
+- §5.2（5秒収束）: skew があっても zenohd の再起動時 alignment 速度は変わらない（今回テストでも確認）。

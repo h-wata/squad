@@ -1,13 +1,13 @@
 # プロジェクトダッシュボード
 
-**最終更新**: 2026-04-27 08:58
+**最終更新**: 2026-04-27 15:43
 
 ## 現在のステータス
 
 | ワーカー | Pane | 状態 | 現在のタスク |
 |---------|------|------|------------|
 | Worker 1 | 1 | 待機中 | - |
-| Worker 2 | 2 | 作業中 | TASK-120 (SUMMARY.md §8.3 DR 24h 追記) |
+| Worker 2 | 2 | 待機中 | - |
 | Worker 3 | 3 | 待機中 | - |
 
 ## DR 24h テスト 完了（24.45h）
@@ -35,9 +35,12 @@
 - ~~[#4 Add fastmcp as test dependency](https://github.com/h-wata/mesh-mem/issues/4)~~ → e5768c4 (47 passed / 0 skipped)
 
 ### オープン
-- [#5 Expand benchmark and DR test coverage](https://github.com/h-wata/mesh-mem/issues/5) (Tier-2/3 完了、DR/NTP/MCP は設計済・実行待ち、GC 残)
+- [#5 Expand benchmark and DR test coverage](https://github.com/h-wata/mesh-mem/issues/5) (Tier-2/3 ✅、DR ✅、NTP partial、MCP/GC 設計済、Case 4-5 実機 defer)
 - [#6 Prepare v0.2.0 release](https://github.com/h-wata/mesh-mem/issues/6) (#5/#7 解消後)
 - [#7 search_observations: server-side filtering](https://github.com/h-wata/mesh-mem/issues/7) ← Tier-3 で発覚 (16k obs で 2.2s)
+- [#8 --project filter race after zenohd restart](https://github.com/h-wata/mesh-mem/issues/8) ← DR 24h で発見
+- [#9 Observation 構造化（長記憶向け）](https://github.com/h-wata/mesh-mem/issues/9) ← user 提起
+- [#10 NTP setup advisory (chrony recommended)](https://github.com/h-wata/mesh-mem/issues/10) ← NTP skew test で発見
 
 ### 解消済み（Codex レビュー対応、push 済み）
 - ~~BLOCKER: config 実 IP ハードコード~~ → commit 36c12b7
@@ -51,6 +54,10 @@
 
 | タスクID | 担当 | タイトル | 完了日時 |
 |---------|------|---------|---------|
+| TASK-123 | Worker 2 | SUMMARY.md §8.4 NTP skew 結果追記（+97 行）、§3/§6 更新 | 2026-04-27 15:42 |
+| TASK-122 | Dispatcher | Issue #5 NTP skew Case Re-1/2/3 実施（G2/G3 PASS、G1 NOT_VERIFIABLE、G4/G5 DEFERRED） | 2026-04-27 15:40 |
+| TASK-121 | Worker 3 | Issue #5 GC/retention 設計書（413 行、実装事実調査済み） | 2026-04-27 14:45 |
+| TASK-120 | Worker 2 | SUMMARY.md §8.3 DR 24h 追記（+94 行） | 2026-04-27 09:05 |
 | TASK-119 | Dispatcher | Issue #5 DR 24h Phase 3-4: 再接続 + ID diff + tombstone（G3/G4/Tombstone PASS、G2 仮説どおり FAIL） | 2026-04-27 08:58 |
 | TASK-118 | Worker 1 | Issue #5 DR 24h Phase 2: run_dr_writer.sh + nohup 起動（PID 2799943） | 2026-04-26 13:01 |
 | TASK-117 | Worker 3 | Issue #5-E: MCP integration smoke 設計書（5 Case、305 行） | 2026-04-25 18:15 |
