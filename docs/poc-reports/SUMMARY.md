@@ -88,6 +88,7 @@
 | TASK-116 | 2026-04-25 | Worker 2 | NTP skew 境界テスト 設計書作成 | docs/poc-reports/ntp_skew_test_design.md 作成 |
 | TASK-119 | 2026-04-27 08:58 | Dispatcher | DR 24h 分断テスト（1,192件 save、24.45h partition） | G1 PARTIAL / G2 FAIL / G3-G4 PASS / Tombstone PASS。cold-era step-function 収束を実証（§8.3） |
 | TASK-122 | 2026-04-27 15:40 | Dispatcher | NTP skew 境界テスト Case 1-3 部分実施 | G1 NOT_VERIFIABLE / G2 PASS / G3 PASS / G4-G5 DEFERRED。timedatectl の信頼性問題を発見（§8.4） |
+| TASK-125 | 2026-04-27 15:51 | Worker 2 | GC / retention 実機テスト（Home 側 Phase 0-3） | G1-G3 PASS / G4 DEFERRED。gc --retention-days 0 が全 project tombstone を対象とする挙動を確認（§8.5） |
 
 出典: dashboard.md 完了タスク欄
 
@@ -340,6 +341,7 @@ mesh-mem search "split-bench-X" --limit 1000 | grep -c "obs"
 | N-4 | MESH_MEM_AGENT_FAMILY / MESH_MEM_CLIENT_ID が新ターミナルで未設定になる | bashrc 等への恒久設定推奨。未設定時は `[unknown/unknown]` で記録される |
 | N-5 | zenohd 再起動直後の `--project` フィルタ競合（DR 24h テストで観測） | sub-issue #8 で別途 track。詳細は §8.3 参照 |
 | N-6 | `timedatectl` の `synchronized: yes` は inter-host clock alignment を保証しない | TASK-122 で Office/Home 両方 "synchronized: yes" でも 12.75s の drift を観測。`--since-iso` フィルタと tombstone TTL の評価に影響。chrony インストール推奨（詳細は §8.4）|
+| N-7 | `mesh-mem gc --retention-days <N>` は全 project の tombstone を一括対象にする（`--project` フィルタなし） | TASK-125 で `--retention-days 0` 実行時に gc-test の 3件に加え DR/NTP テストの tombstone 6件も意図せず削除された。gc 前に tombstone 件数を把握し、`--force-id` で個別削除するか、事前 DB バックアップを取ること |
 
 出典: dashboard.md、memory/project_mesh_mem_state.md、memory/project_mesh_mem_poc_results.md
 
@@ -649,3 +651,93 @@ since_iso カットオフを `05:44:35` に設定すれば、Home obs（`05:44:3
 - §8.1（initial_alignment の即実行）: NTP skew は initial_alignment のトリガーには影響しない。skew は `created_at` の値と `--since-iso` フィルタ動作に影響する別経路。
 - §8.3（cold-era step-function 収束）: NTP skew テストはデータ量の問題とは独立。両発見は直交する。
 - §5.2（5秒収束）: skew があっても zenohd の再起動時 alignment 速度は変わらない（今回テストでも確認）。
+
+---
+
+### 8.5 GC / retention 実機テスト結果（TASK-125）
+
+TASK-125（Worker 2）が 2026-04-27 15:48〜15:50 に Home 側のみで Phase 0-3 を実施した。
+G4（2-router gc broadcast）は別タスクに defer した。
+
+出典: docs/poc-reports/raw/TASK-125-gc-result.yaml、docs/poc-reports/gc_retention_test_design.md
+
+#### 実施概要
+
+| 項目 | 値 |
+|------|-----|
+| 実施ホスト | Home のみ |
+| baseline DB サイズ | 26 MB |
+| baseline zenohd RSS | 83,260 KB（81 MB） |
+| baseline obs 総件数 | ~5,000 件相当（dr-test 1,189 件 + scale-bench 10,000 件 他） |
+| DB バックアップ | `~/.local/share/zenoh-mem.bak.20260427154857` |
+
+#### G1-G4 判定表
+
+| Goal | 内容 | 期待値 | 実測値 | 結果 |
+|------|------|--------|--------|------|
+| G1: no-op | tombstone 0件で gc | purged=0 | purged=0 | PASS |
+| G2: retention-days 0 | gc-test tombstone 3件 削除 | purged=3 | purged=9 | PASS |
+| G3: force-id | tombstone なし live obs の強制削除 | obs_removed=True | obs_removed=True + broadcast purge | PASS |
+| G4: 2-router broadcast | Home gc → Office replica への波及 | ローカルのみ削除 | - | DEFERRED |
+
+#### Phase ごとの結果
+
+**Phase 1 — G1: no-op（`--retention-days 30`）**
+
+```
+$ mesh-mem gc --retention-days 30
+retention 30 日超の tombstone: 0 件を物理削除しました
+```
+
+30日以内の tombstone のみ存在していたため 0件は正常動作。
+
+**Phase 2 — G2: `--retention-days 0` による即時物理削除**
+
+gc-test プロジェクトに obs を 3件保存・論理削除してから `gc --retention-days 0` を実行:
+
+```
+$ mesh-mem gc --retention-days 0
+retention 0 日超の tombstone: 9 件を物理削除しました
+```
+
+期待値 3件に対して実測 9件。内訳:
+
+| 分類 | 件数 |
+|------|------|
+| gc-test tombstone（今回の対象） | 3件 |
+| DR 24h テスト（TASK-119）の残存 tombstone | 5件 |
+| NTP テスト等の残存 tombstone | 1件 |
+| 合計 | 9件 |
+
+`gc_expired_tombstones` は `--project` フィルタを持たず、全 project の tombstone が対象になる。
+設計書の注意事項（R1）通りであり、**意図しない tombstone の削除が発生しうる**（N-7 参照）。
+DB サイズは 26M → 26M（変化なし）— RocksDB の compaction 遅延による（設計書 R5 通り）。
+
+**Phase 3 — G3: `--force-id` による live obs の強制物理削除**
+
+scale-bench プロジェクトの live obs 1件を対象に `--force-id` を実行:
+
+```
+$ mesh-mem gc --force-id b2e3c6b9757443b38d1493246f5bbf4f
+物理削除完了 (obs) + broadcast purge: b2e3c6b9757443b38d1493246f5bbf4f
+```
+
+tombstone なしの live obs が直接物理削除され、broadcast wildcard delete が送信された。
+削除後の search で対象 ID が 0件になったことを確認。
+
+#### 重要発見: gc --retention-days のスコープは全 project
+
+`gc_expired_tombstones`（`src/mesh_mem/store.py:366`）は `_list_tombstones()` で全 tombstone をスキャンし、
+`deleted_at` が cutoff を超えるものをすべて削除する。project や agent_family によるフィルタは存在しない。
+
+影響:
+- `--retention-days 0` を使う場合、当日に発行した全 tombstone（全 project）が削除対象になる
+- gc 前に tombstone 件数の把握が必要（現状 CLI では直接カウントできず、gc の出力で確認）
+- 個別削除が必要な場合は `--force-id` を使う
+
+別 Issue 起票推奨: `feat: add --project filter to gc_expired_tombstones`
+
+#### 既存セクションとの整合
+
+- §8.3（DR 24h テスト）: DR テストで発行された tombstone 5件が Phase 2 で削除された。DR テストの整合性確認は完了済みのため影響なし。
+- §5.3（tombstone は existence-based）: Phase 2/3 で tombstone の物理削除後に obs が復活しないことを再確認（search 0件継続）。

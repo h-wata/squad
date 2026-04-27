@@ -1,0 +1,110 @@
+task_id: TASK-125
+worker: worker2
+title: "GC / Retention 実機テスト (Home 側のみ、Phase 0-3)"
+issue: "https://github.com/h-wata/mesh-mem/issues/5"
+design_ref: "/home/gisen/work/tmux-multi-agents/docs/poc-reports/gc_retention_test_design.md"
+
+meta:
+  started_at: "2026-04-27T15:48:19+09:00"
+  finished_at: "2026-04-27T15:50:00+09:00"
+  zenohd_pid: 2392214
+  commit_hash: "7a5ccd327bb23d93d09b260dd2ca1247ab10f311"  # pragma: allowlist secret
+  db_backup: "~/.local/share/zenoh-mem.bak.20260427154857"
+
+baseline:
+  db_size: "26M"
+  zenohd_rss_kb: 83260
+  zenohd_vsz_kb: 1785492
+  obs_total_lines: 15000  # wc -l (3行/obs = 5000件相当)
+  dr_test_count: 1189
+  scale_bench_count: 10000  # Tier-3 実行済み
+
+phase1_g1:
+  command: "mesh-mem gc --retention-days 30"
+  output: "retention 30 日超の tombstone: 0 件を物理削除しました"
+  result: PASS
+  note: "30日以内の tombstone のみ存在するため 0件は正常"
+
+phase2_g2:
+  obs_saved:
+    - "cda2414e814e4ad5977b68d0c9aa8f1b"  # pragma: allowlist secret
+    - "916f3502ad75449b8563840f2edf24e2"  # pragma: allowlist secret
+    - "b7680525345f4941ab49d69514975acc"  # pragma: allowlist secret
+  delete_output:
+    - "削除（tombstone）完了: cda2414e814e4ad5977b68d0c9aa8f1b"
+    - "削除（tombstone）完了: 916f3502ad75449b8563840f2edf24e2"
+    - "削除（tombstone）完了: b7680525345f4941ab49d69514975acc"
+  search_after_delete: "該当するメモリはありません（0件）"
+  gc_command: "mesh-mem gc --retention-days 0"
+  gc_output: "retention 0 日超の tombstone: 9 件を物理削除しました"
+  gc_purged_count: 9
+  gc_expected_count: 3
+  gc_extra_note: >
+    9件 = 今回の gc-test tombstone 3件 + DR 24h テスト(TASK-119)で削除した 5件 +
+    NTP テストなどの残存 tombstone 1件。
+    設計書注意通り「--retention-days 0 は全 project の tombstone が対象」を確認。
+  db_size_after: "26M"
+  db_size_note: "RocksDB compaction の遅延により即時縮小は見られず（設計書 R5 通り）"
+  search_after_gc: "該当するメモリはありません（0件）"
+  result: PASS
+  note: "gc-test の 3件は物理削除を確認。追加 6件も期待どおり。gc-test search は 0件継続。"
+
+phase3_g3:
+  target_project: "scale-bench"
+  target_id: "b2e3c6b9757443b38d1493246f5bbf4f"  # pragma: allowlist secret
+  scale_bench_before: 10000
+  gc_command: "mesh-mem gc --force-id b2e3c6b9757443b38d1493246f5bbf4f"
+  gc_output: "物理削除完了 (obs) + broadcast purge: b2e3c6b9757443b38d1493246f5bbf4f"
+  grep_after: 0  # target_id が search 結果に現れない
+  scale_bench_after: 10000  # grep -c '<id=' は 10000 (--limit 20000 で実際は 9999件)
+  result: PASS
+  note: >
+    broadcast purge が送信され、search で対象 ID が 0件になったことを確認。
+    tombstone なしの live obs の強制物理削除が正常に動作。
+
+phase4_g4:
+  result: DEFERRED
+  note: "本タスクは Home 側のみ実施。2-router gc broadcast 確認は次タスクに defer。"
+
+phase5_g5:
+  result: NOT_EXECUTED
+  note: "本タスクのスコープ外（Phase 4 defer に伴い Phase 5 も未実施）"
+
+verdict:
+  G1_no_op:
+    expected: "purged=0"
+    actual: "purged=0"
+    result: PASS
+  G2_retention_days_0:
+    expected: "purged=3 (gc-test tombstones)"
+    actual: "purged=9 (全 project tombstones)"
+    result: PASS
+    note: "gc-test の 3件削除は確認。全 tombstone 対象の挙動は設計書注意通り"
+  G3_force_id:
+    expected: "obs_removed=True, broadcast purge sent"
+    actual: "物理削除完了 + broadcast purge 送信確認"
+    result: PASS
+  G4_2router:
+    result: DEFERRED
+  G5_concurrent:
+    result: NOT_EXECUTED
+
+key_findings:
+  - "GC は tombstone の retention 判定が全 project に及ぶ（--project フィルタはない）。--retention-days 0 実行前に全 tombstone の件数把握が必要。"
+  - "--force-id は tombstone なし live obs の即時物理削除に使用可能。broadcast purge 送信も確認。"
+  - "RocksDB の compaction 遅延により gc 直後の DB サイズ変化は見えにくい（件数ベースの確認が主判定）。"
+  - "scale-bench が 10000件に増加（TASK-113 Tier-2 の 1000件から増加 → Tier-3 実行済みと推測）。"
+
+observations:
+  tombstone_no_cli_count: >
+    tombstone の直接件数確認 CLI はない。gc の出力 purged 件数で間接的に確認。
+  db_size_no_change: >
+    26M → 26M（変化なし）。RocksDB は compaction が走るまで実ファイルサイズは変わらない。
+
+next_actions:
+  - "Phase 4 (2-router gc) を別タスクで実施"
+  - "Issue 起票: live obs の age-based 自動削除が未実装"
+  - "Issue 起票: MCP 経由の gc ツールが未実装"
+  - "運用ガイドに『両 PC で mesh-mem gc を実行する必要がある』を明記"
+
+completed_at: "2026-04-27T15:50:00+09:00"

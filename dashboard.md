@@ -6,7 +6,7 @@
 
 | ワーカー | Pane | 状態 | 現在のタスク |
 |---------|------|------|------------|
-| Worker 1 | 1 | 待機中 | - |
+| Worker 1 | 1 | 作業中 | TASK-127 (#9 Phase 2: MCP ツール拡張) |
 | Worker 2 | 2 | 待機中 | - |
 | Worker 3 | 3 | 待機中 | - |
 
@@ -41,6 +41,7 @@
 - [#8 --project filter race after zenohd restart](https://github.com/h-wata/mesh-mem/issues/8) ← DR 24h で発見
 - [#9 Observation 構造化（長記憶向け）](https://github.com/h-wata/mesh-mem/issues/9) ← user 提起
 - [#10 NTP setup advisory (chrony recommended)](https://github.com/h-wata/mesh-mem/issues/10) ← NTP skew test で発見
+- [#11 Add --project filter to mesh-mem gc](https://github.com/h-wata/mesh-mem/issues/11) ← GC test で発見
 
 ### 解消済み（Codex レビュー対応、push 済み）
 - ~~BLOCKER: config 実 IP ハードコード~~ → commit 36c12b7
@@ -54,6 +55,9 @@
 
 | タスクID | 担当 | タイトル | 完了日時 |
 |---------|------|---------|---------|
+| TASK-126 | Worker 3 | SUMMARY.md §8.5 GC 結果追記（+92 行）、§3/§6 N-7 更新 | 2026-04-27 16:00 |
+| TASK-125 | Worker 2 | Issue #5 GC/retention 実機実行（G1-G3 PASS、G4 defer、新 Issue #11 起票） | 2026-04-27 15:51 |
+| TASK-124 | Worker 1 | Issue #9 Phase 1: Observation schema 拡張（6 フィールド、5 tests、commit 7a5ccd3） | 2026-04-27 15:53 |
 | TASK-123 | Worker 2 | SUMMARY.md §8.4 NTP skew 結果追記（+97 行）、§3/§6 更新 | 2026-04-27 15:42 |
 | TASK-122 | Dispatcher | Issue #5 NTP skew Case Re-1/2/3 実施（G2/G3 PASS、G1 NOT_VERIFIABLE、G4/G5 DEFERRED） | 2026-04-27 15:40 |
 | TASK-121 | Worker 3 | Issue #5 GC/retention 設計書（413 行、実装事実調査済み） | 2026-04-27 14:45 |
