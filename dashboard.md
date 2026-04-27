@@ -1,14 +1,26 @@
 # プロジェクトダッシュボード
 
-**最終更新**: 2026-04-25 21:48
+**最終更新**: 2026-04-27 08:58
 
 ## 現在のステータス
 
 | ワーカー | Pane | 状態 | 現在のタスク |
 |---------|------|------|------------|
 | Worker 1 | 1 | 待機中 | - |
-| Worker 2 | 2 | 待機中 | - |
+| Worker 2 | 2 | 作業中 | TASK-120 (SUMMARY.md §8.3 DR 24h 追記) |
 | Worker 3 | 3 | 待機中 | - |
+
+## DR 24h テスト 完了（24.45h）
+
+| Goal | 結果 | 備考 |
+|------|------|------|
+| G1 writer 1440 件 | PARTIAL (1192 件) | writer 起動 4h40m 遅延、システム障害ではない |
+| G2 収束 30s 以内 | **FAIL** (実測 97-282s) | cold-era step-function 一括転送、設計仮説 §5.2 の通り |
+| G3 loss 0 | **PASS** | 両側 md5 完全一致 (1194件) |
+| G4 DB<50MB / RSS<200MB | **PASS** | DB 26MB / RSS 82MB |
+| Tombstone 5件 | **PASS** | 5s 以内に Office 伝播、md5 再一致 |
+
+詳細: docs/poc-reports/raw/TASK-119-dr-1day-result.yaml
 
 ## アクティブタスク
 
@@ -39,6 +51,8 @@
 
 | タスクID | 担当 | タイトル | 完了日時 |
 |---------|------|---------|---------|
+| TASK-119 | Dispatcher | Issue #5 DR 24h Phase 3-4: 再接続 + ID diff + tombstone（G3/G4/Tombstone PASS、G2 仮説どおり FAIL） | 2026-04-27 08:58 |
+| TASK-118 | Worker 1 | Issue #5 DR 24h Phase 2: run_dr_writer.sh + nohup 起動（PID 2799943） | 2026-04-26 13:01 |
 | TASK-117 | Worker 3 | Issue #5-E: MCP integration smoke 設計書（5 Case、305 行） | 2026-04-25 18:15 |
 | TASK-116 | Worker 2 | Issue #5-D: NTP skew 100ms-600s 設計書（298 行） | 2026-04-25 18:15 |
 | TASK-115 | Worker 1 | Issue #5-C: Tier-3 ベンチ実行（save 42k ops/s、search 16k 件で 2.2s → 新 Issue #7） | 2026-04-25 18:15 |
