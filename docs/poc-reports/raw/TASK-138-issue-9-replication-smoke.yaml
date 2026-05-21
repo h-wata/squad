@@ -1,0 +1,30 @@
+task_id: TASK-138
+measured_at: '2026-04-28T00:59:38Z'
+cases:
+  A_new_fields_both_ways:
+    passed: true
+    observed: 'Router1 save → Router2 get-memory field checks: {''memory_type'': True,
+      ''importance'': True, ''subject'': True, ''summary'': True, ''source_files'':
+      True, ''supersedes'': True}
+
+      memory_type=''decision'', importance=5, subject=''replication smoke'', summary=''Router1→Router2
+      6-field replication verified'', source_files=[''scripts/smoke_issue_9_replication.py''],
+      supersedes=[]'
+  B_old_record_read:
+    passed: true
+    observed: 'Pre-Phase-1 fixture read on Router2: {''content'': True, ''memory_type_default'':
+      True, ''importance_default'': True, ''subject_default'': True, ''summary_default'':
+      True, ''source_files_default'': True, ''supersedes_default'': True}
+
+      memory_type defaulted to ''note'', importance defaulted to 2'
+  C_forward_compat_unit_test:
+    passed: true
+    observed: "from_json unknown-field skip and old-schema compat tests passed.\n\
+      6%]\ntests/test_models.py::test_observation_new_json_old_code_compat PASSED\
+      \   [100%]\n\n=============================== warnings summary ===============================\n\
+      ../../.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1434\n\
+      \  /home/gisen/.local/lib/python3.12/site-packages/_pytest/config/__init__.py:1434:\
+      \ PytestConfigWarning: Unknown config option: timeout\n  \n    self._warn_or_fail_if_strict(f\"\
+      Unknown config option: {key}\\n\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\
+      ================= 3 passed, 10 deselected, 1 warning in 0.01s ==================\n"
+conclusion: '全 case PASS — Issue #9 acceptance criteria fully met'

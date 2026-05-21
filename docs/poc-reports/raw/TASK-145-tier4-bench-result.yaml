@@ -1,0 +1,199 @@
+task_id: TASK-145
+measured_at: '2026-04-30T08:46:49+09:00'
+env:
+  python: 3.12.3
+  sqlite: 3.45.1
+  platform: Linux-6.17.0-22-generic-x86_64-with-glibc2.39
+  cpu: x86_64
+  zenoh_connect: tcp/127.0.0.1:7447
+config:
+  sizes:
+    - 100
+  - 1000
+  - 6000
+  - 16000
+  - 50000
+  project: bench-tier4
+  iterations_sqlite: 100
+  iterations_fallback: 5
+put_phase:
+  size_100:
+    elapsed_sec: 0.03
+    added: 100
+    rate_obs_per_sec: 3399.0
+  size_1000:
+    elapsed_sec: 0.21
+    added: 900
+    rate_obs_per_sec: 4338.0
+  size_6000:
+    elapsed_sec: 1.16
+    added: 5000
+    rate_obs_per_sec: 4310.0
+  size_16000:
+    elapsed_sec: 2.32
+    added: 10000
+    rate_obs_per_sec: 4315.0
+  size_50000:
+    elapsed_sec: 7.98
+    added: 34000
+    rate_obs_per_sec: 4262.0
+results:
+  sqlite_first:
+    size_100:
+      search_limit_50_p50_ms: 0.309
+      search_limit_50_p99_ms: 0.478
+      search_limit_1000_p50_ms: 6.345
+      search_limit_1000_p99_ms: 8.267
+      find_by_id_p50_ms: 0.01
+      find_by_id_p99_ms: 0.015
+      detail:
+        search_limit_50:
+          p50_ms: 0.309
+          p99_ms: 0.478
+          min_ms: 0.297
+          max_ms: 0.917
+          actual_results: 50
+          iterations: 100
+        search_limit_1000:
+          p50_ms: 6.345
+          p99_ms: 8.267
+          min_ms: 6.117
+          max_ms: 10.296
+          actual_results: 1000
+          iterations: 100
+        find_by_id:
+          p50_ms: 0.01
+          p99_ms: 0.015
+          iterations: 100
+    size_1000:
+      search_limit_50_p50_ms: 0.303
+      search_limit_50_p99_ms: 0.312
+      search_limit_1000_p50_ms: 6.375
+      search_limit_1000_p99_ms: 8.528
+      find_by_id_p50_ms: 0.01
+      find_by_id_p99_ms: 0.014
+      detail:
+        search_limit_50:
+          p50_ms: 0.303
+          p99_ms: 0.312
+          min_ms: 0.296
+          max_ms: 0.313
+          actual_results: 50
+          iterations: 100
+        search_limit_1000:
+          p50_ms: 6.375
+          p99_ms: 8.528
+          min_ms: 6.145
+          max_ms: 8.56
+          actual_results: 1000
+          iterations: 100
+        find_by_id:
+          p50_ms: 0.01
+          p99_ms: 0.014
+          iterations: 100
+    size_6000:
+      search_limit_50_p50_ms: 0.308
+      search_limit_50_p99_ms: 0.316
+      search_limit_1000_p50_ms: 6.324
+      search_limit_1000_p99_ms: 8.475
+      find_by_id_p50_ms: 0.01
+      find_by_id_p99_ms: 0.014
+      detail:
+        search_limit_50:
+          p50_ms: 0.308
+          p99_ms: 0.316
+          min_ms: 0.301
+          max_ms: 0.323
+          actual_results: 50
+          iterations: 100
+        search_limit_1000:
+          p50_ms: 6.324
+          p99_ms: 8.475
+          min_ms: 6.148
+          max_ms: 9.468
+          actual_results: 1000
+          iterations: 100
+        find_by_id:
+          p50_ms: 0.01
+          p99_ms: 0.014
+          iterations: 100
+    size_16000:
+      search_limit_50_p50_ms: 0.301
+      search_limit_50_p99_ms: 0.312
+      search_limit_1000_p50_ms: 6.363
+      search_limit_1000_p99_ms: 8.764
+      find_by_id_p50_ms: 0.01
+      find_by_id_p99_ms: 0.014
+      detail:
+        search_limit_50:
+          p50_ms: 0.301
+          p99_ms: 0.312
+          min_ms: 0.295
+          max_ms: 0.313
+          actual_results: 50
+          iterations: 100
+        search_limit_1000:
+          p50_ms: 6.363
+          p99_ms: 8.764
+          min_ms: 6.152
+          max_ms: 8.983
+          actual_results: 1000
+          iterations: 100
+        find_by_id:
+          p50_ms: 0.01
+          p99_ms: 0.014
+          iterations: 100
+    size_50000:
+      search_limit_50_p50_ms: 0.306
+      search_limit_50_p99_ms: 0.534
+      search_limit_1000_p50_ms: 6.473
+      search_limit_1000_p99_ms: 9.91
+      find_by_id_p50_ms: 0.01
+      find_by_id_p99_ms: 0.016
+      detail:
+        search_limit_50:
+          p50_ms: 0.306
+          p99_ms: 0.534
+          min_ms: 0.3
+          max_ms: 0.559
+          actual_results: 50
+          iterations: 100
+        search_limit_1000:
+          p50_ms: 6.473
+          p99_ms: 9.91
+          min_ms: 6.146
+          max_ms: 9.981
+          actual_results: 1000
+          iterations: 100
+        find_by_id:
+          p50_ms: 0.01
+          p99_ms: 0.016
+          iterations: 100
+  zenoh_fallback:
+    note: 'scan timed out: _search_via_zenoh failed after retry'
+    size_50000:
+      search_limit_50_p50_ms: '>5000ms (GET_TIMEOUT)'
+      search_limit_1000_p50_ms: '>5000ms (GET_TIMEOUT)'
+  rebuild_50k_sec: 14.24
+  rebuild_detail:
+    duration_sec: 14.24
+    rows_added: 117420
+    rows_per_sec: 8245.7
+    passed_30s_target: true
+  subscriber_lag_ms_p50: 2.571
+  subscriber_lag_detail:
+    p50_ms: 2.571
+    max_ms: 5.803
+    min_ms: 2.562
+    n: 10
+db_size:
+  sqlite_mb: 122.58
+acceptance:
+  sub_200ms_at_50k_limit_1000: true
+  p50_ms_at_50k_limit_1000: 6.473
+  no_regression_smaller_sizes: true
+verdict: PASS
+comparison_with_tier3:
+  16k_before_ms: 2243.0
+  16k_after_ms: 6.363
+  improvement_ratio: 352.5

@@ -1,0 +1,134 @@
+task_id: TASK-134
+title: "Issue #7 Phase 1 spike — SQLite rebuild + query latency at 50k obs"
+measured_at: "2026-04-27T21:32:54+09:00"
+related_issue: "https://github.com/h-wata/mesh-mem/issues/7"
+design_ref: "docs/poc-reports/design/TASK-131-search-server-side-filtering-design.md"
+spike_script: "scripts/spike_issue_7_phase1.py"
+
+env:
+  python: "3.12.3"
+  sqlite: "3.45.1"
+  platform: "Linux-6.17.0-22-generic-x86_64-with-glibc2.39"
+  machine: "x86_64"
+  cpu: "AMD Ryzen 7 7800X3D 8-Core Processor"
+  kernel: "6.17.0-22-generic"
+  disk: "/dev/nvme0n1p5 (NVMe SSD), /tmp on root fs"
+  os: "Ubuntu (glibc 2.39)"
+
+config:
+  n_obs: 50000
+  projects: 5
+  payload_per_obs_bytes: ~440  # JSON payload incl. content + metadata
+  query_iterations: 1000
+  query_limit: 50
+  pragma:
+    journal_mode: WAL
+    synchronous: NORMAL
+  schema:
+    table: obs_index
+    columns:
+      - observation_id TEXT PRIMARY KEY
+      - project TEXT
+      - created_at TEXT
+      - memory_type TEXT
+      - importance INTEGER
+      - subject TEXT
+      - summary TEXT
+      - payload_json TEXT
+    indexes:
+      - idx_project_created ON obs_index(project, created_at DESC)
+      - idx_created ON obs_index(created_at DESC)
+
+results:
+  rebuild_50k:
+    duration_sec: 0.373
+    rows_per_sec: 134059.2
+    target_sec: 30.0
+    passed_30s_target: true
+    notes: |
+      executemany with single BEGIN/COMMIT. 50k rows of ~440-byte JSON
+      finished in 0.37s — two orders of magnitude faster than the 30s
+      budget. PRAGMA journal_mode=WAL + synchronous=NORMAL.
+
+  query_p50_ms: 0.0282
+  query_p99_ms: 0.0423
+  query_max_ms: 0.0514
+  query_mean_ms: 0.0288
+  query_target_p50_ms: 5.0
+  query_target_p99_ms: 20.0
+  query_passed_p50: true
+  query_passed_p99: true
+  query_notes: |
+    SELECT observation_id, payload_json FROM obs_index
+      WHERE project = ? ORDER BY created_at DESC LIMIT 50
+    Iterated 1000 times rotating through 5 project values.
+    Sub-microsecond planning + idx_project_created seek + 50 row table
+    lookups. Cache effects play a part — see "caveats" below.
+
+  deserialize_50_ms: 0.337
+  deserialize_target_ms: 10.0
+  deserialize_passed: true
+  deserialize_notes: |
+    Observation.from_json on 50 payload_json rows. JSON parse + dataclass
+    construction. No surprises.
+
+  total_search_estimate_ms: 0.365
+  total_search_target_ms: 200.0    # Issue #7 acceptance: sub-200ms@50k
+
+  db_size_mb: 48.73
+  db_size_target_mb: 100.0
+  db_size_passed: true
+  db_size_notes: |
+    Includes WAL/SHM. Roughly ~1KB per row including indexes. Linear
+    extrapolation: 100k → ~98MB, still under target.
+
+verdict: GO
+
+verdict_rationale: |
+  All 5 measured metrics cleared their thresholds with 1–3 orders of
+  magnitude headroom:
+    - rebuild   0.37s vs 30s target   (~80× headroom)
+    - query p50 0.028ms vs 5ms target (~178× headroom)
+    - query p99 0.042ms vs 20ms target (~470× headroom)
+    - deser     0.34ms vs 10ms target (~30× headroom)
+    - db size   48.7MB vs 100MB target (~2× headroom)
+  Total estimated search latency at 50k obs: ~0.4ms — three orders of
+  magnitude under Issue #7's sub-200ms acceptance criterion.
+
+  Plan B (SQLite local index) per TASK-131 §3 is validated. The "SQLite
+  WHERE+LIMIT in 1–10ms range" assumption holds with significant margin.
+
+caveats:
+  # yamllint disable-line rule:line-length
+  - "OS page cache benefits the query phase. After warm-up the entire 49MB DB likely fits in RAM, so reported p50/p99 reflect a hot-cache scenario. Even with a cold-cache penalty of ~10ms (single random NVMe read), total search would still sit well under 200ms."
+  # yamllint disable-line rule:line-length
+  - "Spike does not exercise zenoh I/O. Real put_observation in Phase 2 will add zenoh round-trip; this spike only validates the SQLite leg."
+  # yamllint disable-line rule:line-length
+  - "Workload uses 5 projects evenly. Skewed distributions (one mega-project + many tiny ones) are not exercised here; idx_project_created should still serve them but worth re-checking in Phase 5 Tier-4."
+  # yamllint disable-line rule:line-length
+  - "No FTS5 / content query was measured. Issue #7's `query` parameter (substring match) is the next concern; FTS5 latency on 50k rows is a Phase 3 risk to reverify."
+  # yamllint disable-line rule:line-length
+  - "All rows are 'live'. tombstone-mixed datasets (deleted_at IS NULL filter) were not measured but the additional predicate is essentially free with the column being NULL for all rows."
+  # yamllint disable-line rule:line-length
+  - "Observation.to_json() was called once per row at insert time and that work is not counted in the 0.37s rebuild figure (it ran during list construction). Real Phase 4 rebuild from zenoh will incur similar serialization cost on the read side instead."
+
+next_steps:
+  # yamllint disable-line rule:line-length
+  - "Proceed to Phase 2 (TASK-131 §6 Phase 2): integrate SQLite as a write-path sidecar in src/mesh_mem/store.py — UPSERT on put_observation, UPDATE deleted_at on put_tombstone. Expect Python-side overhead per call to dominate; SQLite per-row insert latency is non-issue at the speeds measured."
+  # yamllint disable-line rule:line-length
+  - "Phase 3 (read path): swap search_observations to SQLite-first. Add property test asserting result-set equality with current zenoh full-scan path."
+  # yamllint disable-line rule:line-length
+  - "Phase 3 risk to validate: FTS5 latency for the `query` substring path. Add a follow-up spike if uncertain — current spike only covers project filter."
+  # yamllint disable-line rule:line-length
+  - "Phase 4 (subscriber + rebuild): the 0.37s rebuild figure means even pessimistic 5–10× overhead for going through zenoh get + decode keeps restart rebuild well under the 30s DoD."
+  # yamllint disable-line rule:line-length
+  - "Phase 5 (Tier-4 50k bench): re-measure end-to-end search_observations latency once Phase 2/3 land; spike result is the lower bound, real number will sit between this and the current 7s linear extrapolation."
+
+phase_2_recommendations:
+  - "Use the same schema verbatim — no changes needed from spike."
+  # yamllint disable-line rule:line-length
+  - "Keep PRAGMA journal_mode=WAL, synchronous=NORMAL. NORMAL trades durability on power loss for speed; acceptable since zenoh remains the truth source per TASK-131 §3.4."
+  # yamllint disable-line rule:line-length
+  - "Open the SQLite connection once per Store instance; reuse across put/search calls. SQLite's per-call open cost is non-trivial vs sub-millisecond query."
+  - "Wrap multi-put bulk_save in a single transaction (BEGIN..COMMIT). Per-row autocommit would give a ~100× slowdown."
+  - "Add MESH_MEM_DISABLE_INDEX=1 fallback path early — it is required for the Phase 3 property test."

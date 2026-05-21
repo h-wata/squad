@@ -1,0 +1,57 @@
+task_id: TASK-153
+builds_on: TASK-152
+measured_at: '2026-05-01T09:16:05Z'
+cleanup_change: >
+  graceful shutdown (SIGTERM → poll → SIGKILL fallback) + lsof-based port
+  lookup to kill stray processes from prior runs (e.g. TASK-138 zenohd on
+  7451/7452 that pkill -f could not reach) + RocksDB LOCK file disappearance
+  wait before rmtree.
+root_cause_of_task152_partial: >
+  TASK-138 zenohd (pid 2740082/2740372) was still listening on ports 7451/7452.
+  The old pkill -f 'tcp/127.0.0.1:74XX' could not kill these because their
+  command-line is '--config /tmp/smoke_task138/zenohd_rN.json5', not including
+  the port string. Every smoke run wrote 100 obs into that stale RocksDB,
+  which persisted across runs. lsof-based kill now catches all listeners
+  regardless of command-line.
+reruns:
+  run_1:
+    measured_at: '2026-05-01T09:12:38Z'
+    phase_1: PASS
+    phase_2:
+      verdict: PASS
+      expected_per_project: 100
+      actual_per_peer:
+        peer1: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer2: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer3: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer4: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer5: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+      passed: true
+    phase_3:
+      verdict: PASS
+      convergence_sec: 5.1
+    phase_4:
+      verdict: PASS
+      p50_ms: 67
+      p99_ms: 5315
+  run_2:
+    measured_at: '2026-05-01T09:16:05Z'
+    phase_1: PASS
+    phase_2:
+      verdict: PASS
+      expected_per_project: 100
+      actual_per_peer:
+        peer1: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer2: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer3: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer4: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+        peer5: {p1: 100, p2: 100, p3: 100, p4: 100, p5: 100}
+      passed: true
+    phase_3:
+      verdict: PASS
+      convergence_sec: 5.1
+    phase_4:
+      verdict: PASS
+      p50_ms: 66
+      p99_ms: 5728
+verdict: PASS (5-peer mesh fully verified, smoke is rerunnable)

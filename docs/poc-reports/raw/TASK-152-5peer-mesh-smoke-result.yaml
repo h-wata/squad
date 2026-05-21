@@ -1,0 +1,65 @@
+task_id: TASK-152
+measured_at: '2026-05-01T09:16:05Z'
+env:
+  routers: 5
+  topology: full mesh (each peer connects to other 4)
+  total_obs_per_run: 500
+  obs_per_peer: 100
+  ports:
+    - 7448
+  - 7449
+  - 7450
+  - 7451
+  - 7452
+phase_2_all_peers_see_all_obs:
+  verdict: PASS
+  expected_per_project: 100
+  actual:
+    peer1:
+      p1: 100
+      p2: 100
+      p3: 100
+      p4: 100
+      p5: 100
+    peer2:
+      p1: 100
+      p2: 100
+      p3: 100
+      p4: 100
+      p5: 100
+    peer3:
+      p1: 100
+      p2: 100
+      p3: 100
+      p4: 100
+      p5: 100
+    peer4:
+      p1: 100
+      p2: 100
+      p3: 100
+      p4: 100
+      p5: 100
+    peer5:
+      p1: 100
+      p2: 100
+      p3: 100
+      p4: 100
+      p5: 100
+  converged: true
+phase_3_peer_restart:
+  verdict: PASS
+  peer_restart_time_sec: 60
+  additional_writes_during_partition: 50
+  convergence_after_restart_sec: 5.1
+  final_obs_count_on_peer3_p1: 150
+  expected: peer1 に 100+50=150 件、peer3 で 150 件見える
+phase_4_latency:
+  verdict: PASS
+  search_p50_ms: 66.4
+  search_p99_ms: 5727.8
+  n: 100
+  notes: CLI subprocess overhead included; no 1-router baseline available in this
+    run
+verdict: PASS
+observations:
+  - No unexpected behavior observed

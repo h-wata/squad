@@ -1,0 +1,139 @@
+task_id: TASK-135
+measured_at: "2026-04-28T00:30:43+00:00"
+poll_ended_at: "2026-04-28T00:32:44+00:00"
+
+env:
+  routers: 2 (localhost 7448/7449)
+  zenohd_version: "v1.9.0"
+  mesh_mem_commit: "b4e9fc0"
+  save_n: 1100
+  payload_size_b: 500
+  cold_wait_s: 40
+  poll_interval_s: 1.0
+  poll_duration_s: 120
+  replication_interval_s: 2.0
+  cold_era_threshold_s: ~32
+  # hot=6, sub_intervals=5, interval=2 → hot era = 6×5×(2/5)=12s, warm=10×2=20s, cold>32s
+
+reproduction:
+  reproduced: false
+  inconsistency_window_s: null
+  pattern_examples: []
+  total_zero_responses: 0
+  total_hetero_responses: 0
+  total_polls: 120
+  observed_count_all_polls: 2200  # constant throughout, never 0
+  expected_save_n: 1100
+  count_anomaly: "2200 = 2 × 1100 — see analysis below"
+  poll_csv: /tmp/repro_issue8_poll.csv
+
+key_finding: >
+  The localhost 2-router GET query semantics differ fundamentally from the
+  single-client-to-one-router scenario observed in DR 24h (TASK-119).
+
+  In a Zenoh 2-router setup, session.get("mem/**") from a client connected
+  to Router B is routed to BOTH B's local storage AND A's local storage
+  (because both routers register a Queryable for mem/**). This means:
+    - 1100 obs from A's storage
+    - 1100 obs from B's storage (after initial_alignment completes)
+    - Total: 2200 = 2 × SAVE_N
+
+  Consequence: B's "empty" state during initial_alignment is never observable
+  from outside, because A always fills in the gap via routing. The zero-obs
+  window that H1 predicts requires querying B's local storage in isolation —
+  which does NOT happen in normal 2-router routing.
+
+  Additionally, search_observations has NO deduplication by observation_id.
+  When multiple storages reply to the same GET with the same obs keys,
+  duplicates accumulate in the results list. In a 2-router setup this causes
+  2× inflation silently.
+
+analysis:
+  why_localhost_differs_from_dr24h: |
+    DR 24h (TASK-119):
+    - Client on Office connects to tcp/localhost:7447 (Office's OWN zenohd)
+    - Office zenohd had just restarted with empty RocksDB
+    - Home zenohd was across a physical LAN (192.168.x.x)
+    - The GET_TIMEOUT (5.0s) on Office likely elapsed before Home's cross-LAN
+      response could arrive, OR Zenoh routing tables to Home's queryable were
+      not yet established right after reconnect
+    - Result: Office's storage returned 0 (empty) for 97-282s
+
+    Localhost test (this run):
+    - Client connects to tcp/127.0.0.1:7449 (Router B)
+    - Router A is tcp/127.0.0.1:7448 on the same host (sub-ms latency)
+    - B's routing table to A's queryable is established almost instantly
+    - A's storage responds within the 5.0s GET_TIMEOUT with all 1100 obs
+    - Result: always 2200 (1100 from A + 1100 from B after alignment)
+
+  deduplication_bug: |
+    search_observations (store.py) does not deduplicate Observation objects
+    by observation_id. In a multi-storage Zenoh topology, duplicate obs arrive
+    from multiple storages and all are appended to results. This is a latent
+    correctness bug that is invisible in single-router production but manifests
+    in 2-router localhost testing (2× counts).
+
+hypothesis_evidence:
+  H1_hydration_race:
+    supported: partial
+    evidence: |
+      - The step-function convergence (0 → N jump) was NOT reproduced in
+        localhost 2-router setup because routing to A masked B's empty state.
+      - H1 remains the best explanation for the DR 24h observation:
+        Office's storage was empty, A's cross-LAN response timed out or was
+        not yet routed, so search returned 0 for 97-282s.
+      - To confirm H1 with a localhost test, either:
+        (a) Introduce artificial GET_TIMEOUT < sub-ms to cut A's routing, OR
+        (b) Stop A AFTER B starts and poll B in isolation, OR
+        (c) Use a real 2-PC setup where cross-LAN GET_TIMEOUT is the
+            limiting factor (replicating DR 24h conditions exactly).
+      - Deduplication bug found: 2200 = 2×1100 shows obs are double-counted
+        when 2 storages reply to the same GET. Separate tracking issue.
+
+  H4_with_retry_side_effect:
+    supported: unknown
+    evidence: |
+      No with_retry DEBUG logging was added to store.py in this run (approach B
+      — CSV pattern analysis only). All 120 polls returned 2200 with no ERR or
+      TIMEOUT, so no with_retry firing was observed during the test. H4 cannot
+      be ruled out for the DR 24h scenario (cross-LAN, higher latency).
+
+conclusion: |
+  Localhost 2-router repro was NOT able to reproduce the (0, N, N) or
+  (0, 0, 0) inconsistency window. The root cause is that Zenoh routes GET
+  queries to ALL routers that have matching Queryables, so Router B's
+  empty-storage state is masked by Router A's response via loopback routing.
+
+  H1 (cold-era hydration snapshot race) remains the most plausible explanation
+  for the DR 24h observation, but the exact mechanism depends on:
+  1. Whether cross-LAN Zenoh GET routing was established before the 5.0s timeout
+  2. Whether initial_alignment data arrives before the routing tables are set up
+
+  New finding (not in TASK-133 design): search_observations silently inflates
+  result counts when multiple Zenoh storages reply to the same GET. In a
+  2-router setup, 1100 obs become 2200 because both storages reply.
+  This is a separate correctness issue (see recommended fix below).
+
+recommended_fix:
+  short_term: |
+    1. Add observation_id deduplication in search_observations (store.py):
+         results_by_id: dict[str, Observation] = {}
+         ...
+         results_by_id[obs.observation_id] = obs  # deduplicate by id
+         results = sorted(results_by_id.values(), ...)
+       This eliminates the 2× inflation bug in multi-storage setups.
+    2. README: document that zenohd restart requires cold-era alignment
+       to complete (~80-280s for large datasets) before --project filter
+       and other search filters are reliable.
+  long_term: |
+    Issue #7 / TASK-131: SQLite local index sidecar. Once mesh-mem maintains
+    a local SQLite snapshot via zenoh subscriber, search queries are independent
+    of zenoh storage hydration state. The race disappears entirely because
+    SQLite is the source of truth for search, not the live zenoh GET.
+
+next_steps:
+  - Add obs_id deduplication to search_observations (quick fix, high value)
+  - Investigate whether Zenoh cross-LAN GET routing differs from localhost
+    routing (open Zenoh issue or source analysis)
+  - Consider adding H4 evidence: add mesh_mem.repro DEBUG logger to with_retry
+    and run the script again on real 2-PC setup if available:

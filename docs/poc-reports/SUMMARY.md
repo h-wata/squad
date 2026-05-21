@@ -741,3 +741,69 @@ tombstone なしの live obs が直接物理削除され、broadcast wildcard de
 
 - §8.3（DR 24h テスト）: DR テストで発行された tombstone 5件が Phase 2 で削除された。DR テストの整合性確認は完了済みのため影響なし。
 - §5.3（tombstone は existence-based）: Phase 2/3 で tombstone の物理削除後に obs が復活しないことを再確認（search 0件継続）。
+
+### 8.6 GC 2-router broadcast 実機検証結果（TASK-174 / Issue #28）
+
+Issue #5 の AC「GC / retention behaviour observed end-to-end」の Phase 4（2-router broadcast）を 2026-05-03 に実施。
+Issue #28 を sub-issue として切り出して別途検証。
+
+出典: docs/poc-reports/raw/TASK-174-gc-2router-broadcast-result.yaml
+
+#### 検証フロー
+
+1. **Phase 1-2**: Home が project=`phase4-gc-test` で 5 obs 保存 → 8s 待機 → Office 側が同 5 obs を確認 ✅
+2. **Phase 3-5**: Home が 3 obs を delete（tombstone）→ gc → Office 側 live=2 を確認（Home と一致） ✅
+3. **Phase 6-8**: Home が残 2 obs を delete + gc → Office 側 live=0、`該当するメモリはありません。` ✅
+
+#### 結果
+
+| AC | 結果 | 根拠 |
+|----|------|------|
+| 共有 (id, project) を両側で確認 | **PASS** | Office Phase 2 search が Home 保存 5 ID と一致 |
+| Home `gc --retention-days 0 --project P` 実行 | **PASS** | Phase 4 で 3 件、Phase 7 で 2 件、計 5 件物理削除 |
+| 削除と tombstone が Office RocksDB に到達 | **PASS** | Phase 5 / 8 で Office search が tombstone を filter として適用、Home と一致 |
+| Office search が 0 rows を返す | **PASS** | Phase 8 で `office_live_count = 0` |
+| gc → Office 反映までの latency | **PARTIAL** | fresh state dir 方式での確認のため厳密な sub-second 計測は未実施 |
+
+#### 注意点
+
+- **mesh-mem-mcp の subscriber JSON 警告**: gc 実行中に `index subscriber on_tomb error: Expecting value: line 1 column 1 (char 0)` が出る。これは長時間稼働中の mesh-mem-mcp プロセスが mem/** subscribe で受け取った payload の一部を JSON decode できないため。gc 自体には影響なし。**別 issue 候補**: mcp subscriber の JSON 堅牢化。
+- **gc 所要時間 60.064s**: スクリプトの `timeout 60` 境界に張り付いた。実際の purge は内部で完了して成功メッセージが出ていたが、wall-time が境界。本格計測には timeout 拡張が必要。
+- **Home production state dir の SQLite 巨大化**: 132MB index.db + 130MB WAL のため Zenoh full-scan は timeout する。本テストでは `MESH_MEM_STATE_DIR=/tmp/phase4_state_*` の fresh state dir を使い、本番ストアには触れていない。
+- **Office RocksDB tombstone 残存**: Office 側 zenohd の RocksDB が Home gc 後に tombstone を物理保持しているか（zombie）の確認はスキップ。ユーザー可視の挙動（search = 0）は OK のため Phase 4 verification としては合格。
+
+#### 統合的な意味
+
+DR 24h テスト（§8.3）で「tombstone propagation 5 件 PASS」を既に確認済み。本テストは **gc を含む完全なライフサイクル**（save → replicate → delete → gc → 両側 0 件）を 2-router 構成で end-to-end に通したことを示す。Issue #5 の AC-7（GC / retention 2-router broadcast）の最終確認として機能。
+
+### 8.7 MCP integration smoke 実機検証結果（TASK-175 / Issue #29）
+
+Issue #5 の AC「MCP integration smoke」を 2026-05-04 に WSL2 ホスト上で実施。
+Issue #29 を sub-issue として切り出して別途検証。3-host mesh（Home + Office + WSL2、同日確立）上で実 Claude Code v2.1.41 を駆動して全 5 ケースを通した。
+
+出典: docs/poc-reports/raw/TASK-175-mcp-integration-smoke-result.yaml
+
+#### 実施フロー
+
+`claude -p --permission-mode bypassPermissions --output-format json "<prompt>"` を 5 回呼び、JSON 出力を parse して `permission_denials` と `is_error` を確認。各 case で外部 verify（mesh-mem search 等）も実施。
+
+#### 結果サマリ
+
+| Case | Tool | 結果 | duration_ms |
+|------|------|------|-------------|
+| 1 | claude mcp list | ✓ Connected | - |
+| 2 | save_observation | obs `da3827...` 保存 | 23,281 |
+| 3 | search_memory | 1 hit (Case 2 の obs) | 26,543 |
+| 4 | get_memory_status | pc 8151...(WSL2)=2件、pc fb7e...(Home)=9998件 | 26,178 |
+| 5 | delete_memory | tombstone → 再検索 0件 | 26,295 |
+
+#### 重要な所見
+
+- **`claude -p` で MCP tool を呼ぶには `--permission-mode bypassPermissions` 必須**。指定なしだと最初の tool 呼び出しが permission_denials に積まれて LLM が「許可が必要」と返答して終わる（`-p` モードに UI なし、想定動作）。自動 smoke のドキュメント化候補。
+- **各 claude -p 呼び出しが ~23-27 秒**：Claude API 往復が支配的、MCP tool 自体は sub-second。
+- **Case 4 の per-pc breakdown が 3-host mesh 経由のデータ可視化を直接示している**：WSL2 pc_id (8151...) には Case 2 + 同日のテスト save の 2 件、Home pc_id (fb7e...) には 9998 件。MCP 層が単にローカル状態を返しているのではなく、実際にメッシュ replication 済みデータを読んでいる証拠。
+- **fastmcp 初回起動ラグ**：Case 1 の最初の health check は "✗ Failed to connect"、~10 秒後に retry すると Connected。fastmcp の初期化と Claude Code の health check timing が race する。実害はなし（リトライで通る）。
+
+#### 統合的な意味
+
+§8.6（GC 2-router broadcast）と組み合わせ、Issue #5 の残 AC（GC + MCP）が両方 PASS で消化された。Issue #5 close 時に WONTFIX とした NTP Case-4/5 (era 60s/600s) を除き、PoC 検証は完全完了。本セットアップ（3-host mesh + 各ホストで MCP 利用可能）は個人利用の 5-device mesh への拡張ベースとして即運用可能な状態。

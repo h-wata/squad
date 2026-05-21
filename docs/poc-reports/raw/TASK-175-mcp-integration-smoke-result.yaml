@@ -1,0 +1,174 @@
+task_id: TASK-175
+issue: 29
+parent_issue: 5
+title: "MCP integration smoke test against live Claude Code MCP client"
+date: 2026-05-04
+session_time: "20:00-22:15 JST"
+verdict: PASS
+
+setup:
+  host: "WSL2 (DESKTOP-SRFBMPL, 192.168.3.29)"
+  os: "Ubuntu 24.04.1 LTS on WSL2 (kernel 6.6.87.2-microsoft-standard-WSL2)"
+  claude_code_version: "2.1.41"
+  mesh_mem_version: "0.2.1"
+  mesh_mem_mcp_path: /home/gisen/work/mesh-mem/.venv/bin/mesh-mem-mcp
+  mcp_registration:
+    scope: user
+    env:
+      ZENOH_CONNECT: "tcp/127.0.0.1:7447"
+      MESH_MEM_AGENT_FAMILY: claude
+      MESH_MEM_CLIENT_ID: claude-code-wsl
+  test_project: mcp-smoke
+  # yamllint disable-line rule:line-length
+  zenohd_topology: "WSL2 (192.168.3.29) ↔ Home (192.168.3.12 / 192.168.134.28) ↔ Office (192.168.128.12) [3-host mesh, established same day in TASK-WSL2-setup]"
+  test_methodology: |
+    `claude -p --permission-mode bypassPermissions --output-format json "<prompt>"`
+    invoked from a WSL2 shell. Each call returns a single JSON document
+    containing `result`, `permission_denials`, `is_error`, `duration_ms`.
+    bypassPermissions is required because `-p` mode has no UI for the
+    permission dialog; without it the first MCP tool call gets denied
+    and the LLM exits early with a "permission needed" message.
+
+cases:
+  case_1_registration:
+    tool: claude_mcp_list
+    goal: G1+G2 — Claude Code recognises the MCP server and reports Connected
+    result: PASS
+    evidence: |
+      $ claude mcp list
+      mesh_mem: /home/gisen/work/mesh-mem/.venv/bin/mesh-mem-mcp  - ✓ Connected
+    notes: |
+      First check failed with "✗ Failed to connect" but a retry ~10 s later
+      succeeded. fastmcp server initialization races the first health check.
+
+  case_2_save:
+    tool: mcp__mesh_mem__save_observation
+    goal: G3 — LLM picks the right tool from a natural-language save request
+    prompt_summary: |
+      "mesh-mem MCP ツールを使って次のメモを保存してください: 「設計書テスト用メモ
+      2026-05-04 - WSL2 MCP smoke Case 2」 (project=mcp-smoke)"
+    result: PASS
+    duration_ms: 23281
+    permission_denials: 0
+    is_error: false
+    observation_id: da3827967b694378aa28f66a199b6d5c
+    evidence_snippet: |
+      - **observation_id**: `da3827967b694378aa28f66a199b6d5c`
+      - **project**: `mcp-smoke`
+      - **内容**: 設計書テスト用メモ 2026-05-04 - WSL2 MCP smoke Case 2
+
+  case_3_search:
+    tool: mcp__mesh_mem__search_memory
+    goal: G4 — LLM picks the right tool from a natural-language search request
+    prompt_summary: '"search_memory ツールで project=mcp-smoke のメモを 5 件まで検索"'
+    result: PASS
+    duration_ms: 26543
+    permission_denials: 0
+    is_error: false
+    hit_count: 1
+    evidence_snippet: |
+      | 1 | `da3827967b694378aa28f66a199b6d5c` | 2026-05-04T09:03:25 | 設計書テスト用メモ ... |
+
+  case_4_status:
+    tool: mcp__mesh_mem__get_memory_status
+    goal: get_memory_status returns expected fields
+    prompt_summary: '"get_memory_status ツールで現在のメモリ状態を見せてください"'
+    result: PASS
+    duration_ms: 26178
+    permission_denials: 0
+    is_error: false
+    fields_observed:
+      - per_pc_breakdown:
+          "81514372 (WSL2)": 2
+          "fb7e1721 (Home)": 9998
+      - search_limit_hit: 10000
+    notes: |
+      Confirms the 3-host mesh is delivering Home's data into the WSL2
+      MCP session. Two observations attributed to the WSL2 pc_id are the
+      Case 2 save plus an earlier same-day "WSL2 peer joining mesh" save
+      from the topology bring-up.
+
+  case_5_delete:
+    tool: mcp__mesh_mem__delete_memory
+    goal: G5 — LLM passes the 32-char ID correctly + post-search returns 0
+    prompt_summary: '"delete_memory ツールで observation_id da38...6d5c を削除"'
+    result: PASS
+    duration_ms: 26295
+    permission_denials: 0
+    is_error: false
+    target_observation_id: da3827967b694378aa28f66a199b6d5c
+    post_delete_verification: |
+      $ .venv/bin/mesh-mem search "" --project mcp-smoke --limit 5
+      該当するメモリはありません。
+
+acceptance_criteria_check:
+  - criterion: "Claude Code に mesh-mem MCP server を登録できる (G1)"
+    result: PASS
+    evidence: "claude mcp add mesh_mem ... succeeded; ~/.claude.json contains the entry"
+  - criterion: "claude mcp list で Connected (G2)"
+    result: PASS
+    evidence: "Case 1 evidence above"
+  - criterion: "保存依頼で save_observation が呼ばれ obs に 1 件 hit (G3)"
+    result: PASS
+    evidence: "Case 2 + Case 3 cross-verification (Case 3 search returned the Case 2 ID)"
+  - criterion: "検索依頼で search_memory が呼ばれ結果が表示 (G4)"
+    result: PASS
+    evidence: "Case 3 above"
+  - criterion: "削除依頼で delete_memory が呼ばれ再検索で 0 件 (G5)"
+    result: PASS
+    evidence: "Case 5 evidence above; post-delete search returned '該当するメモリはありません'"
+
+incidental_findings:
+  - finding: "claude -p requires --permission-mode bypassPermissions for MCP tool use"
+    severity: NICE-TO-DOC
+    detail: |
+      Without --permission-mode bypassPermissions, the first MCP tool call
+      records a permission_denial entry in the JSON output and the LLM
+      replies with a "permission needed" text message. This is correct
+      behavior (no UI in -p mode) but is a friction point for automated
+      smoke testing. Worth a one-line note in the README CI/Testing section.
+  - finding: "fastmcp first-launch race: mesh-mem-mcp's first health probe can fail with 'Failed to connect'"
+    severity: NICE-TO-DOC
+    detail: |
+      Observed once during initial registration check on WSL2. Resolved by
+      a 10-second wait + retry. Likely fastmcp's initialization vs Claude's
+      health-check timing.
+  - finding: "Each claude -p call takes ~23-27 seconds even for a one-liner MCP tool call"
+    severity: BENIGN
+    detail: |
+      Most of that time is Claude API round-trip; MCP tool execution itself
+      is sub-second. Not actionable, but useful baseline for future
+      automated smoke timing budgets.
+
+caveats:
+  - |
+    Test was performed with bypassPermissions, so this verifies the tool
+    invocation mechanics but NOT the user-permission UI flow that a typical
+    interactive Claude Code user would see on first run. The interactive
+    permission flow is **out of scope / not evaluated** in this smoke and
+    must be exercised separately (e.g. interactive `claude` session) before
+    we can claim anything about it.
+  - |
+    The 3-host mesh (Home + Office + WSL2) was established earlier in the
+    same session for this test; results assume that topology. Single-host
+    MCP smoke would also pass and gives a cleaner pass/fail; the 3-host
+    arrangement just confirms the MCP layer doesn't accidentally short-circuit
+    the mesh.
+
+summary: |
+  Issue #29 (MCP integration smoke test) verifies that mesh-mem-mcp running
+  under stdio transport from a real Claude Code 2.1.41 client receives natural-
+  language prompts, picks the correct MCP tool (save / search / status /
+  delete), passes well-formed arguments including 32-char observation_ids,
+  and persists / propagates the data through the mesh.
+
+  RESULT: PASS for all 5 cases. Total wall time ~2 minutes of automated
+  claude -p calls; no human-in-the-loop interaction required once
+  bypassPermissions was discovered.
+
+  The test was run on the WSL2 host that joined the 3-host mesh earlier in
+  the same session. The Case 4 status output (pc 8151... = WSL2 with 2 obs;
+  pc fb7e... = Home with 9998 obs) is concrete evidence that the MCP layer
+  is reading real mesh-replicated data, not just local state.
+
+  Issue #5 AC-6 (MCP integration smoke) is now closed via this run.
