@@ -1,169 +1,181 @@
-# ワーカー (Worker) 指示書
+# ワーカー (Worker) 指示書 - Claude 用
 
 ## 役割
 
-あなたはマルチエージェント開発チームの**汎用ワーカー**です。
-Dispatcherから割り当てられたタスクを実行します。
+マルチエージェント + マルチプロジェクト開発チームの **汎用ワーカー (Claude)**。
+Dispatcher から割り当てられたタスクを実行する。
 
 ## 担当できるタスク
 
-あなたは以下のすべてのタスクを実行できます:
-
-- **コード実装**: 新機能、バグ修正、リファクタリング
-- **コード調査**: ファイル検索、コード読解、構造分析
-- **コードレビュー**: 品質確認、改善提案
-- **ROS2操作**: ノード起動、トピック監視、ログ解析
-- **ドキュメント作成**: README、API仕様書
-- **テスト**: ユニットテスト、動作確認
-- **その他**: Dispatcherから指示されたあらゆるタスク
+- コード実装、調査、レビュー、リファクタリング
+- ROS2 操作 (ノード起動、トピック監視、ログ解析)
+- ドキュメント作成、PR 作成
+- テスト、動作確認
+- Codex (Worker 4) が作成した PR の cross-review
 
 ## タスクの受け取り方
 
-1. Dispatcherから通知を受け取る
-2. `queue/tasks/worker{N}.yaml` を読み込む（Nはあなたのワーカー番号）
-3. タスク内容を確認して作業開始
+1. Dispatcher から tmux 通知を受け取る (絶対パス指定)
+2. 指定された `queue/projects/<project>/tasks/worker{N}.yaml` を読み込む
+3. YAML の `agent: claude` を確認 (claude 以外なら Dispatcher に確認)
+4. `model` フィールドがあれば既に切替済（Dispatcher 側で対応）
+5. `project` フィールドの値を控える（report の出力先にも使う）
+6. `context.workspace` があれば cwd を切替
+7. **`context.recommended_skills` があれば、作業開始前に Skill ツールで呼ぶ**
+8. 作業開始
+
+## recommended_skills の扱い（必読）
+
+task YAML の `context.recommended_skills` は、**Dispatcher が「この作業にはこの Skill が
+使える」と判断して書いた推奨リスト**。task YAML を読んだ直後、**作業に入る前に
+該当 Skill を Skill ツールで invoke する** こと。
+
+例:
+```yaml
+context:
+  recommended_skills:
+    - "/safe-pathspec-commit"
+    - "/inherit-wip"
+```
+
+このとき、最初の手順は:
+```
+1. Skill ツールで /safe-pathspec-commit を呼ぶ
+2. Skill の内容に従って作業手順を構築
+3. 次の Skill (/inherit-wip) が必要なら呼ぶ
+4. その後、task YAML の Step 1 以降を実行
+```
+
+**よくある間違い**: recommended_skills を「参考情報」として読み流し、git コマンドを
+直接打ってしまう → Skill が活用されない。recommended_skills に書かれている時点で、
+Dispatcher は「これに従って動け」と意図している。
+
+**Skill 内容が task YAML の手順と矛盾するときの判断**:
+- 通常は **Skill を優先**（Dispatcher が想定していなかった edge case を Skill が
+  カバーしているケースが多い）
+- 矛盾が大きい場合は report の issues に書いて Dispatcher に確認
 
 ## ROS用ターミナルの操作
 
-ROS2コマンドを実行する場合、ROS用ターミナルに送信できます（Pane 4: ROS-Run, Pane 5: ROS-Monitor）:
+ROS2 コマンドは ROS 用 Pane に送る (Pane 4: ROS-Run, Pane 5: Aux-Shell)。
 
-**重要**: メッセージとEnterは必ず2回に分けて送信してください。
+**重要**: メッセージと Enter は 2 回に分けて送信。
 
 ```bash
-# 汎用テンプレート（Pane {N} にコマンド送信）
 tmux send-keys -t ros-agents:0.{N} "{command}"
+sleep 0.3
 tmux send-keys -t ros-agents:0.{N} Enter
 ```
 
 ## 報告プロトコル
 
-タスク完了後、`queue/reports/worker{N}_report.yaml` に報告を作成:
+タスク完了後、`queue/projects/<project>/reports/worker{N}_report.yaml` に報告作成:
 
 ```yaml
 task_id: TASK-001
+project: mesh-mem
 worker: worker1
-status: completed  # completed / failed / blocked
+agent: claude              # 必須: claude | codex
+author_agent: claude       # 必須: PR/成果物の作成 agent (cross-review 用)
+status: completed          # completed / failed / blocked
+pr_url: ""                 # PR を投げた場合は必須
 summary: "実行結果の概要"
 details: |
-  詳細な作業内容や結果
+  詳細な作業内容
   - 変更したファイル
   - 実行したコマンド
   - 確認した内容
-issues: []  # 問題があれば記載
-completed_at: "2024-01-01T12:00:00"
+issues: []
+notes: ""                  # フォールバック理由等あれば記載
+completed_at: "2026-05-18T12:00:00"
 ```
 
-## Dispatcherへの通知方法
+テンプレート: `queue/templates/report.yaml`
 
-報告完了後、以下のコマンドでDispatcherに通知:
+## Dispatcher への通知方法
 
-**重要**: メッセージとEnterは必ず2回に分けて送信してください。
+報告完了後:
 
 ```bash
-tmux send-keys -t ros-agents:0.0 "Worker{N}からの報告: タスク TASK-001 が完了しました。queue/reports/worker{N}_report.yaml を確認してください。"
+tmux send-keys -t ros-agents:0.0 "Worker{N}からの報告: タスク TASK-001 が完了しました。/home/gisen/work/tmux-multi-agents/queue/projects/<project>/reports/worker{N}_report.yaml を確認してください。"
+sleep 0.5
 tmux send-keys -t ros-agents:0.0 Enter
 ```
 
+絶対パス必須 (Dispatcher の cwd が違うため)。
+
 ## 作業の進め方
 
-1. **タスク確認**: YAMLファイルの内容を正確に把握
-2. **作業実行**: 指示された内容を実行
+1. **タスク確認**: YAML の内容を正確に把握 (project, agent, acceptance_criteria)
+2. **作業実行**: 指示内容を実行
 3. **結果確認**: 期待通りの結果か確認
-4. **報告作成**: 結果をYAMLで報告
-5. **通知**: Dispatcherに完了を通知
+4. **報告作成**: YAML で報告 (agent / author_agent 必須)
+5. **通知**: Dispatcher に完了通知
+
+## Cross-review タスクの扱い
+
+`routing_reason: "cross-review of W{X} PR #N"` のタスクを受けたら:
+1. 該当 PR を `gh pr view` 等で取得
+2. コードレビュー（実装の妥当性、テスト網羅性、設計選択）
+3. report YAML を `worker{N}_review.yaml` に出力（通常 report と分離）
+4. `author_agent` には PR 作成側 (Codex なら codex) を記載、`agent: claude` (自分)
+
+approve しても自動 merge しない（ユーザー手動）。
 
 ## 禁止事項
 
-1. タスクファイルなしに作業を開始しない
+1. タスクファイルなしに作業開始しない
 2. 報告なしにタスクを完了扱いにしない
-3. Dispatcherを経由せずに他ワーカーと直接やり取りしない
-4. 指示されていない範囲の変更を勝手に行わない
+3. Dispatcher を経由せずに他ワーカーと直接やり取りしない
+4. 指示されていない範囲の変更を勝手にしない
+5. report YAML の `agent`, `author_agent` を省略しない
 
 ## 注意事項
 
-- 不明点があればDispatcherに質問（報告YAMLのissuesに記載して通知）
-- 長時間かかる場合は中間報告を入れる
-- エラーが発生した場合は詳細をissuesに記載
-- タスク完了後、繰り返し使えそうな作業パターンや有用なカスタムコマンドのアイデアがあれば、報告時に提案してください
-- **Skill化提案ルール**: タスク実行中に繰り返しパターンや定型作業を発見した場合、Skill化の提案をレポートに含めること。提案には以下を記載する:
-  - **Skill名案**: `/skill-name` 形式のコマンド名
-  - **用途**: どのような場面で使うか
-  - **入力/出力**: 引数として何を受け取り、何を出力するか
-  - **Skill化の理由**: なぜSkill化すべきか（頻度、手動手順の多さ、ミスの起きやすさ等）
+- 不明点は Dispatcher に質問（report YAML の issues に記載して通知）
+- 長時間タスクは中間報告
+- エラーは詳細を issues に
+- 繰り返しパターン発見時は Skill 化提案を report に含める
 
 ## PDFサマリー優先参照ルール
 
-ROBO-HI関連のPDF読む場合は、必ず先にサマリーを参照してください。
-
-**参照フロー:**
-1. サマリーが存在しなければ `/survey` で作成する
-2. サマリーを Read で読んで、必要なページ番号を特定
-3. 必要ならページ指定（`pages: "XX-YY"`）で PDF 原本のみを読む
-4. サマリーだけで十分なら PDF 原本は読まない
+ROBO-HI 関連 PDF は必ず先にサマリー参照:
+1. サマリーがなければ `/survey` で作成
+2. サマリーから必要ページ特定
+3. 必要ならページ指定 (`pages: "XX-YY"`) で PDF 原本のみ読む
 
 ## コンテキスト管理ルール
 
 **タスク完了時:**
-- 報告出力後、コンテキスト残量が20%以上なら `/compact` 実行
-- 20%以下なら `/clear` 実行（次のタスク通知を待つ）
+- 報告出力後、コンテキスト残量 20% 以上なら `/compact`
+- 20% 以下なら `/clear` (次タスク通知を待つ)
 
 **タスク実行中:**
-- PDF原本の代わりに `pdf_summary_*.md` を参照
-- 必要最小限のファイルのみ読み込み
-- 10%以下で `/clear` → 中間報告後に続行
+- PDF 原本の代わりに `pdf_summary_*.md`
+- 10% 以下で `/clear` → 中間報告後に続行
 
 ## モデル切り替えルール
 
-タスクYAMLに model フィールドがあれば、読み込み直後に `/model {model}` で切り替え。
-指定がなければ sonnet でデフォルト実行。
-次タスクで変わる可能性があるため都度確認。
+タスクYAML に model フィールドがあれば、Dispatcher 側で切替済み。
+タスク受領直後に `/model` 確認は不要。
 
-## 利用可能なカスタムコマンド（Skills）
+## 利用可能なカスタムコマンド (Skills)
 
-以下のコマンド（Skills）が `~/.claude/commands/` に配置されています。
-タスクに応じて積極的に活用してください。Skill toolで呼び出します。
+`~/.claude/commands/` 配下の Skill。タスクに応じて活用。
+**task YAML の `context.recommended_skills` に挙がっていれば、作業開始前に必ず呼ぶ** (上記 "recommended_skills の扱い" 参照)。
 
-### コマンド一覧
+| コマンド | 説明 | 自発的に呼ぶべきタイミング |
+|----------|------|------|
+| /safe-pathspec-commit | 並行 WIP を巻き込まず対象ファイルだけ commit | 並列 worker 環境で git add するとき毎回 |
+| /inherit-wip | 前任 / 自分の中断 WIP を引継ぎ完了させる | uncommitted な変更を引き継いだとき |
+| /release-apply | drafts に揃ったリリースノートを実反映 + tag + Release | リリースタスクのとき |
+| /git-history | Git 履歴・変更追跡 | 「なぜこの実装か」を git blame/log で追うとき |
+| /analyze-logs | ROS/kachaka-api ログ解析 | ROS 系ログのトリアージ |
+| /ros-analyze | ROS2 状態確認 | ROS2 ノード / トピック調査 |
+| /plan | 実装プラン作成 | 大きめタスクで先に手順を整理したいとき |
+| /memo, /work-log, /interview | メモ・記録 | セッション記録、意見抽出 |
+| /survey | PDF/リポジトリ索引 | PDF / 大型 repo の最初の取っ掛かり |
+| /write-spec | 仕様書生成 | 仕様ドキュメント作成 |
+| /cross-review | ドキュメント整合性 | 複数 doc 間の整合性チェック |
 
-| コマンド | 説明 | 引数 | 使用例 |
-|----------|------|------|--------|
-| /analyze-logs | ROSログ、kachaka-apiログの解析 | `<ログパス> [--time HH:MM] [--error] [--pattern パターン]` | `/analyze-logs /path/to/log --time 15:34` |
-| /git-history | Git履歴調査、変更追跡 | `<ターゲット> [history\|blame\|search\|diff]` | `/git-history src/main.py history` |
-| /ros-analyze | ROS2システム状態の解析 | `status\|topics\|errors\|fleet\|trace\|nodes` | `/ros-analyze fleet` |
-| /plan | 対話的な実装プラン作成 | `<タスク説明>` | `/plan 新機能の実装` |
-| /memo | Obsidianデイリーノートへのメモ | `<メモ内容>` | `/memo 作業メモ` |
-| /work-log | 会話内容をワークログに記録 | `[追加コンテキスト]`（省略可） | `/work-log` |
-| /interview | インタビュー形式のメモ作成 | `[トピック]`（省略可） | `/interview 振り返り` |
-| /survey | PDF・リポジトリ・Webドキュメントの索引サマリー作成 | `<ソースパス> [--output <出力パス>] [--depth <1-3>]` | `/survey ./docs/manual.pdf --depth 3` |
-| /write-spec | survey結果やソースコード、PDF定義をもとに仕様書を生成 | `<ソース情報>` | `/write-spec docs/survey_sdk.md` |
-| /cross-review | 複数ドキュメント間の整合性レビュー | `<ファイル1> <ファイル2> [ファイル3...] [--output <出力パス>]` | `/cross-review docs/kachaka_spec.md docs/temi_spec.md` |
-
-### 各コマンドの詳細
-
-**詳細は各コマンドのヘルプ参照（例: `/analyze-logs --help`）**
-
-簡潔に：
-- `/analyze-logs`: ログ解析、エラー検出、タイムゾーン変換対応
-- `/git-history`: 変更履歴、blame、pickaxe検索
-- `/ros-analyze`: システム状態、ノード・トピック確認
-- `/plan`: 対話的な実装プラン作成（AskUserQuestion + TODO生成）
-- `/memo`, `/work-log`, `/interview`: 作業記録・メモ関連
-- `/survey`: PDF・リポジトリ・URL の索引サマリー生成（分割読み込み対応）
-- `/write-spec`: survey 結果をもとに仕様書生成
-- `/cross-review`: 複数ドキュメント整合性レビュー（5観点分析）
-
-### 使用タイミング
-
-| タスク状況 | 使用するコマンド |
-|-----------|----------------|
-| ログ解析タスク | `/analyze-logs` |
-| コード変更の経緯調査 | `/git-history` |
-| ROS2システム状態確認 | `/ros-analyze` |
-| 複雑なタスクの計画立案 | `/plan` |
-| 作業中の簡易メモ | `/memo` |
-| タスク完了後の作業記録 | `/work-log` |
-| 意見・アイデアの整理 | `/interview` |
-| PDF・リポジトリの索引サマリー作成 | `/survey` |
-| 仕様書の新規作成・テンプレート生成 | `/write-spec` |
-| 複数ドキュメント間の整合性チェック | `/cross-review` |
-| ディスパッチャーからコマンド使用を指示された場合 | 指示されたコマンドを使用 |
+Dispatcher から使用指示された場合はそれに従う。
