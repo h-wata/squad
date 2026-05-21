@@ -1,0 +1,48 @@
+{
+    "permissions": {
+        "additionalDirectories": [
+            "/home/gisen/work/kachaka-api-for-openrmf",
+            "/home/gisen/Documents/v2t",
+            "/home/gisen/work/claude-skills"
+        ],
+        "allow": [
+            "Bash(chmod:*)",
+            "Bash(tmux list-sessions:*)",
+            "Bash(tmux send-keys:*)",
+            "Bash(ros2 interface show:*)",
+            "Bash(grep:*)",
+            "Bash(source:*)",
+            "Bash(colcon build:*)",
+            "Bash(bash:*)",
+            "Bash(find:*)",
+            "WebSearch",
+            "Bash(gh search issues:*)",
+            "WebFetch(domain:raw.githubusercontent.com)",
+            "WebFetch(domain:github.com)",
+            "Bash(tmux capture-pane:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh api:*)",
+            "Bash(ros2 bag info:*)",
+            "Bash(for dir in /mnt/HDD-DISK/gisen/bag_files/DataCenter/handy_scanner_*/)",
+            "Bash(do echo '=== $\\(basename $dir\\) ===')",
+            "Bash(done)",
+            "Bash(python3:*)",
+            "Bash(curl:*)",
+            "Bash(ls:*)",
+            "Bash(git commit:*)",
+            "Bash(git add:*)",
+            "Bash(git push:*)",
+            "Bash(python -c:*)",
+            "Bash(ruff check:*)",
+            "Bash(yapf:*)",
+            "mcp__plugin_claude-mem_mem-search__get_observations",
+            "Bash(mkdir -p queue/projects/mesh-mem/tasks queue/projects/mesh-mem/reports queue/templates)",
+            "Bash(git mv *)",
+            "Bash(mkdir -p queue/projects/mesh-mem/tasks queue/projects/mesh-mem/reports queue/templates queue/archive)",
+            "Bash(mv queue/tasks/worker1.yaml queue/projects/mesh-mem/tasks/worker1.yaml)",
+            "Bash(mv queue/tasks/worker2.yaml queue/projects/mesh-mem/tasks/worker2.yaml)",
+            "Bash(mv queue/tasks/worker3.yaml queue/projects/mesh-mem/tasks/worker3.yaml)",
+            "Bash(mv queue/tasks/documenter.yaml queue/projects/mesh-mem/tasks/documenter.yaml)"
+        ]
+    }
+}
