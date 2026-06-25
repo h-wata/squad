@@ -23,6 +23,8 @@ DISCOVERY_MAX="${WATCH_DISCOVERY_MAX:-10}"             # 1サイクルで inbox 
 SWEEP_INTERVAL="${WATCH_SWEEP_INTERVAL:-14400}"        # 新規ゼロ時の周回レビュー間隔 (既定 4h)
 SEEN_FILE="$QUEUE_DIR/.discovery_seen"                 # 既知候補のキー集合 (再起動跨ぎで永続)
 INBOX_FILE="$QUEUE_DIR/_inbox.md"                      # triage inbox
+GC_INTERVAL="${WATCH_GC_INTERVAL:-1800}"               # merged worktree GC の間隔 (既定 30分)
+WORKTREE_GLOB="${WATCH_WORKTREE_GLOB:-/home/gisen/work/*-wt-*}"  # GC 対象 worktree の glob
 
 # worker 番号 -> tmux pane
 pane_for() {
@@ -196,17 +198,51 @@ run_discovery() {
     fi
 }
 
+# ---- worktree GC: merged かつ clean な専用 worktree だけ自動掛除 ----
+# dirty(未コミット変更) / 未merge / 判定不能(fetch失敗) は絶対に触らない。
+gc_worktrees() {
+    local wt main branch removed=0 skipped=0
+    for wt in $WORKTREE_GLOB; do
+        wt="${wt%/}"
+        [ -d "$wt" ] || continue
+        git -C "$wt" rev-parse --git-dir >/dev/null 2>&1 || continue
+        main=$(git -C "$wt" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+        [ -z "$main" ] && continue
+        [ "$(realpath "$wt" 2>/dev/null)" = "$(realpath "$main" 2>/dev/null)" ] && continue  # main worktree は対象外
+        # 未コミット変更があれば触らない
+        if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+            skipped=$((skipped+1)); log "gc skip (dirty): $wt"; continue
+        fi
+        branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        # origin/main を更新できなければ merged 判定不能 → skip
+        if ! git -C "$main" fetch -q origin main 2>/dev/null; then
+            skipped=$((skipped+1)); log "gc skip (fetch fail): $wt"; continue
+        fi
+        if git -C "$main" branch --merged origin/main --format '%(refname:short)' 2>/dev/null | grep -qx "$branch"; then
+            if git -C "$main" worktree remove "$wt" 2>/dev/null; then
+                removed=$((removed+1)); log "gc removed (merged+clean): $wt [$branch]"
+            else
+                skipped=$((skipped+1)); log "gc skip (remove failed): $wt"
+            fi
+        else
+            skipped=$((skipped+1)); log "gc skip (not merged): $wt [$branch]"
+        fi
+    done
+    [ "$removed" -gt 0 ] && log "gc: ${removed} worktree を掛除 (skip ${skipped})"
+}
+
 declare -A REPORT_SEEN     # report path -> mtime
 declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 
-log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
+log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
 sleep "$BOOT_DELAY"
 
 FIRST=1
 LAST_DISCOVERY=0
 LAST_SWEEP=0
+LAST_GC=0
 while true; do
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
         log "session '$SESSION' が無いので終了"
@@ -286,6 +322,12 @@ while true; do
     if [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
         run_discovery
         LAST_DISCOVERY="$now_ts"
+    fi
+
+    # --- 5. worktree GC: merged+clean な専用 worktree を掛除 ---
+    if [ $(( now_ts - LAST_GC )) -ge "$GC_INTERVAL" ]; then
+        gc_worktrees
+        LAST_GC="$now_ts"
     fi
 
     FIRST=0

@@ -30,8 +30,10 @@ Dispatcher から渡される **ルーティング決定** に基づいて、
   - `cleanup` / `meta`: その他
 - **target**: Issue 番号 / PR 番号 / 自由テキスト
 - **worktree key**: 専用 worktree の suffix（例: `issue75` → `mesh-mem-wt-issue75`）
-  - 並列タスクが無い場合でも、Dispatcher の方針として基本は専用 worktree を切る
-  - 単独・main で OK な場合は `main` を指定
+  - **コードを変更するタスクは必ず専用 worktree を切る**（並列衝突回避。`main` 不可）
+  - 純レビュー / ドキュメント閲覧など書き込みの無いタスクのみ `main` を許容
+  - マージ済み worktree は watcher が自動 GC（merged+clean のみ remove）するため、
+    worker 側で `git worktree remove` する必要はない
 - **routing_reason**: なぜこの worker / agent に振ったか（1-2 行）
 - **任意**: priority (default `high`), parallel_tasks（並列で動く他 worker タスク）
 
