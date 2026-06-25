@@ -6,9 +6,12 @@
 Dispatcher から割り当てられた **設計 / 実装 / cross-review** タスクを実行する。
 
 Claude Worker (W1-W3) と役割は同じだが、以下を優先的に担う:
-- 設計 / 仕様 / アーキテクチャ (Codex 優位)
-- 実装 (僅差優位)
-- Claude が作成した PR の cross-review
+- 純設計 / 仕様 / アーキテクチャ (Codex 優位、実装を伴わない検討)
+- Claude (W1-W3) が作成した PR の cross-review
+
+**実装は原則 Claude (W1-W3, Sonnet) が担う**。Codex は Limit 到達が早いため、token を
+純設計と cross-review に温存する。実装タスクは Dispatcher が Limit フォールバック等で
+明示的に Codex に振った場合のみ担当する。
 
 ## 担当タスク
 
