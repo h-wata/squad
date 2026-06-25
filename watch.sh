@@ -18,6 +18,11 @@ DISPATCHER="$SESSION:0.0"
 INTERVAL="${WATCH_INTERVAL:-15}"
 STALL_CYCLES="${WATCH_STALL_CYCLES:-4}"   # 無変化がこの回数続いたら停止疑い (既定: 15s*4=60s)
 BOOT_DELAY="${WATCH_BOOT_DELAY:-12}"      # agent 起動待ち
+DISCOVERY_INTERVAL="${WATCH_DISCOVERY_INTERVAL:-900}"  # 仕事の発見走査の間隔 (既定 15分)
+DISCOVERY_MAX="${WATCH_DISCOVERY_MAX:-10}"             # 1サイクルで inbox に積む新規上限
+SWEEP_INTERVAL="${WATCH_SWEEP_INTERVAL:-14400}"        # 新規ゼロ時の周回レビュー間隔 (既定 4h)
+SEEN_FILE="$QUEUE_DIR/.discovery_seen"                 # 既知候補のキー集合 (再起動跨ぎで永続)
+INBOX_FILE="$QUEUE_DIR/_inbox.md"                      # triage inbox
 
 # worker 番号 -> tmux pane
 pane_for() {
@@ -63,15 +68,145 @@ newest_mtime() {
     find "$QUEUE_DIR/projects" "$@" -printf '%T@\n' 2>/dev/null | sort -nr | head -n1
 }
 
+# ---- Discovery: 定期的に仕事を発見 → triage inbox → Dispatcher 自動起票 ----
+# 注: watcher(bash) は「発見 + dedup + inbox 積み + Dispatcher nudge」まで。
+# task YAML 生成と空き worker 割当は Dispatcher(Claude) が nudge を受けて自律処理する。
+# 以下 disc_* は run_discovery の local (pj/repo/gh_repo/labels/todo_paths/added/baseline)
+# を bash の動的スコープ経由で参照する。
+
+add_candidate() {
+    local key="$1" source="$2" pj="$3" desc="$4"
+    grep -qxF "$key" "$SEEN_FILE" 2>/dev/null && return 1
+    if [ "${baseline:-0}" -eq 1 ]; then
+        echo "$key" >> "$SEEN_FILE"        # 既存 backlog は既知化のみ (通知しない)
+        return 0
+    fi
+    [ "${added:-0}" -ge "$DISCOVERY_MAX" ] && return 1
+    echo "$key" >> "$SEEN_FILE"
+    echo "- [ ] $(date '+%Y-%m-%dT%H:%M:%S%z') [$source] ${pj}: ${desc}  \`${key}\`" >> "$INBOX_FILE"
+    added=$(( ${added:-0} + 1 ))
+    return 0
+}
+
+disc_issues() {
+    local label_args=() l
+    if [ -n "$labels" ]; then
+        IFS=',' read -ra _L <<< "$labels"
+        for l in "${_L[@]}"; do label_args+=(--label "$l"); done
+    fi
+    local num title
+    while IFS=$'\t' read -r num title; do
+        [ -z "$num" ] && continue
+        add_candidate "${pj}:issue:${gh_repo}#${num}" issue "$pj" "Issue #${num}: ${title}"
+    done < <(timeout 30 gh issue list -R "$gh_repo" --state open "${label_args[@]}" --limit 30 --json number,title 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+  for i in json.load(sys.stdin): print(str(i["number"])+"\t"+i["title"])
+except Exception: pass' 2>/dev/null)
+}
+
+disc_pr() {
+    local num rd draft title
+    while IFS=$'\t' read -r num rd draft title; do
+        [ -z "$num" ] && continue
+        [ "$draft" = "True" ] && continue
+        case "$rd" in APPROVED|CHANGES_REQUESTED) continue ;; esac   # レビュー未完のみ
+        add_candidate "${pj}:pr:${gh_repo}#${num}:review" pr "$pj" "PR #${num} レビュー待ち: ${title}"
+    done < <(timeout 30 gh pr list -R "$gh_repo" --state open --limit 30 --json number,title,reviewDecision,isDraft 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+  for i in json.load(sys.stdin): print(str(i["number"])+"\t"+(i.get("reviewDecision") or "")+"\t"+str(i.get("isDraft"))+"\t"+i["title"])
+except Exception: pass' 2>/dev/null)
+}
+
+disc_ci() {
+    local id wf br
+    while IFS=$'\t' read -r id wf br; do
+        [ -z "$id" ] && continue
+        add_candidate "${pj}:ci:${id}" ci "$pj" "CI 失敗: ${wf} (${br})"
+    done < <(timeout 30 gh run list -R "$gh_repo" --status failure --limit 10 --json databaseId,workflowName,headBranch 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+  for i in json.load(sys.stdin): print(str(i["databaseId"])+"\t"+i["workflowName"]+"\t"+(i.get("headBranch") or ""))
+except Exception: pass' 2>/dev/null)
+}
+
+disc_todo() {
+    local p f rest line text h _P
+    IFS=',' read -ra _P <<< "$todo_paths"
+    for p in "${_P[@]}"; do
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            f=${m%%:*}; rest=${m#*:}; line=${rest%%:*}; text=${rest#*:}
+            text=$(printf '%s' "$text" | sed -E 's/^[[:space:]]*//; s/[[:space:]]+$//')
+            h=$(printf '%s|%s' "$f" "$text" | cksum | cut -d' ' -f1)
+            add_candidate "${pj}:todo:${h}" todo "$pj" "${f}:${line} ${text}"
+        done < <(grep -rnE 'TODO|FIXME|XXX' "$repo/$p" 2>/dev/null | head -n 50)
+    done
+}
+
+run_discovery() {
+    local cfgs
+    cfgs=$(find "$QUEUE_DIR/projects" -maxdepth 2 -name discovery.yaml 2>/dev/null)
+    if [ -z "$cfgs" ]; then
+        log "discovery: 設定なし (queue/projects/*/discovery.yaml を置くと有効化)"
+        return
+    fi
+    mkdir -p "$QUEUE_DIR"
+    local baseline=0
+    [ ! -f "$SEEN_FILE" ] && baseline=1       # 初回 (SEEN 無し) は既存 backlog を黙って既知化
+    touch "$SEEN_FILE"
+    [ -f "$INBOX_FILE" ] || printf '# Discovery Triage Inbox\n\nwatcher が発見した未処理候補。Dispatcher が起票したら [x] にする。\n\n' > "$INBOX_FILE"
+    local added=0 cfg
+
+    while read -r cfg; do
+        [ -z "$cfg" ] && continue
+        local pj repo gh_repo labels todo_paths sources enabled
+        pj=$(basename "$(dirname "$cfg")")
+        dcfg() { grep -m1 -E "^$1:" "$cfg" 2>/dev/null | sed -E "s/^$1:[[:space:]]*//" | tr -d "\"'" ; }
+        enabled=$(dcfg enabled); [ "$enabled" = "false" ] && continue
+        repo=$(dcfg repo); gh_repo=$(dcfg gh_repo)
+        labels=$(dcfg issue_labels); todo_paths=$(dcfg todo_paths)
+        sources=$(dcfg sources); [ -z "$sources" ] && sources="issues,pr,ci,todo"
+
+        case ",$sources," in *,issues,*) [ -n "$gh_repo" ] && disc_issues ;; esac
+        case ",$sources," in *,pr,*)     [ -n "$gh_repo" ] && disc_pr ;; esac
+        case ",$sources," in *,ci,*)     [ -n "$gh_repo" ] && disc_ci ;; esac
+        case ",$sources," in *,todo,*)   [ -n "$repo" ] && [ -n "$todo_paths" ] && disc_todo ;; esac
+    done <<< "$cfgs"
+
+    if [ "$baseline" -eq 1 ]; then
+        log "discovery: baseline 完了 (既存 backlog を既知化、通知なし)"
+        return
+    fi
+    if [ "$added" -gt 0 ]; then
+        log "discovery: 新規候補 ${added} 件 -> inbox + Dispatcher 通知"
+        notify_dispatcher "[DISCOVERY] 新規候補 ${added} 件を ${INBOX_FILE} に追加。空き worker に自動起票してください (task-yaml-author → 通知)。merge gate は人間が維持。"
+        return
+    fi
+    # 新規ゼロ: idle を遊ばせず、throttle 付きで「一通りレビュー(sweep)」を投げる
+    local now2; now2=$(date +%s)
+    if [ $(( now2 - LAST_SWEEP )) -ge "$SWEEP_INTERVAL" ]; then
+        echo "- [ ] $(date '+%Y-%m-%dT%H:%M:%S%z') [sweep] all: 新規タスクなし。既存コード/open PR/backlog の一通りレビュー・監査  \`sweep:${now2}\`" >> "$INBOX_FILE"
+        log "discovery: 新規なし -> [SWEEP] 周回レビューを inbox 投入"
+        notify_dispatcher "[SWEEP] 新規タスクなし。空き worker がいれば既存コード/open PR/backlog の一通りレビュー・監査を1件だけ割り当ててください (全員稼働中なら何もしない)。"
+        LAST_SWEEP="$now2"
+    else
+        log "discovery: 新規なし (self-archive, 次 sweep まで約 $(( (SWEEP_INTERVAL - (now2 - LAST_SWEEP)) / 60 )) 分)"
+    fi
+}
+
 declare -A REPORT_SEEN     # report path -> mtime
 declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 
-log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} boot_delay=${BOOT_DELAY}s)"
+log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
 sleep "$BOOT_DELAY"
 
 FIRST=1
+LAST_DISCOVERY=0
+LAST_SWEEP=0
 while true; do
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
         log "session '$SESSION' が無いので終了"
@@ -145,6 +280,13 @@ while true; do
             STALL_NOTIFIED[$N]="$task_m"
         fi
     done
+
+    # --- 4. Discovery: 低頻度で仕事を発見し inbox へ (新規ゼロ時は throttle 付き sweep) ---
+    now_ts=$(date +%s)
+    if [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
+        run_discovery
+        LAST_DISCOVERY="$now_ts"
+    fi
 
     FIRST=0
     sleep "$INTERVAL"
