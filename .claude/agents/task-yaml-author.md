@@ -120,6 +120,13 @@ acceptance_criteria:
   - "..."
   - "..."
 
+verify:                      # コードタスクは必須。verifier が実走する機械検証
+  commands:                  # worktree で 1 行ずつ実行されるコマンド
+    - "pytest tests/ -q"
+    - "ruff check ."
+  expect: "all tests pass, lint clean"   # 期待結果（自然言語）
+  max_attempts: 3            # fail 時の author 差し戻し上限（省略時 3）
+
 context:
   workspace: /home/gisen/work/<repo>-wt-<key>
   issue_url: <if implement>
@@ -131,6 +138,15 @@ context:
 
 created_at: "YYYY-MM-DDTHH:MM:SS+09:00"
 ```
+
+## verify ブロックの付け方
+
+- `implement` / `fix-from-review` など **コードを変更するタスクには必ず `verify:` を付ける**。
+  `commands` は worktree で機械実行できる具体コマンド（テスト/lint/ビルド）にする。
+  worker は verifier（独立検証）が pass を返すまで completed を名乗れない。
+- `design-review` / `pr-cross-review` / ドキュメント整理など **成果物が判断・文書のタスクは
+  `verify:` を付けない**（worker 側で `verify_status: skipped` になる）。
+- `commands` は acceptance_criteria を機械検証に翻訳したもの。両者がズレないように書く。
 
 ## task type 別の追加ポイント
 
