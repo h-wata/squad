@@ -67,6 +67,28 @@ sleep 0.3
 tmux send-keys -t ros-agents:0.{N} Enter
 ```
 
+## 検証ゲート（report 前の必須ステップ）
+
+task YAML に `verify:` ブロックがあるタスクは、`status: completed` を名乗る前に
+**必ず独立検証を通す**こと。自分でテストを流した結果だけで完了を名乗ってはいけない
+（自己採点の禁止）。
+
+1. 実装が一段落したら、**verifier サブエージェントを Task ツールで起動**する。
+   - 渡す情報: `task_yaml`（タスク YAML 絶対パス）、`worktree`（作業ディレクトリ）、
+     `attempt`（試行回数, 1 始まり）、`worker_num`（自分の N）
+   - verifier は `verify.commands` を worktree で実走し、acceptance_criteria と照合して
+     `reports/worker{N}_verdict.yaml`（result: pass|fail|inconclusive + 証拠）を書く。
+2. verdict を Read して分岐:
+   - **result: pass** → 報告プロトコルへ。`status: completed`、`verify_status: pass`。
+   - **result: fail / inconclusive** → verdict の `recommendations` / `unmet_acceptance_criteria`
+     を読み、**自分で修正** → verifier を `attempt+1` で再起動。
+3. これを **最大 `verify.max_attempts`（既定 3）回**まで繰り返す。
+   - 3 回試して pass しなければ諦め、`status: blocked`、`verify_status: fail` で報告し、
+     `notes` に verdict の絶対パスと残課題を記載する。watch.sh が human inbox に回す。
+
+`verify:` ブロックが無いタスク（ドキュメント整理等）は `verify_status: skipped` とし、
+このゲートは省略してよい。
+
 ## 報告プロトコル
 
 タスク完了後、`queue/projects/<project>/reports/worker{N}_report.yaml` に報告作成:
@@ -78,6 +100,8 @@ worker: worker1
 agent: claude              # 必須: claude | codex
 author_agent: claude       # 必須: PR/成果物の作成 agent (cross-review 用)
 status: completed          # completed / failed / blocked
+verify_status: pass        # 必須: pass / fail / skipped (検証ゲートの結果)
+verdict_path: ""           # verify した場合は worker{N}_verdict.yaml の絶対パス
 pr_url: ""                 # PR を投げた場合は必須
 summary: "実行結果の概要"
 details: |
@@ -86,7 +110,7 @@ details: |
   - 実行したコマンド
   - 確認した内容
 issues: []
-notes: ""                  # フォールバック理由等あれば記載
+notes: ""                  # blocked 時は verdict パス + 残課題を必ず記載
 completed_at: "2026-05-18T12:00:00"
 ```
 
@@ -106,11 +130,12 @@ tmux send-keys -t ros-agents:0.0 Enter
 
 ## 作業の進め方
 
-1. **タスク確認**: YAML の内容を正確に把握 (project, agent, acceptance_criteria)
+1. **タスク確認**: YAML の内容を正確に把握 (project, agent, acceptance_criteria, verify)
 2. **作業実行**: 指示内容を実行
 3. **結果確認**: 期待通りの結果か確認
-4. **報告作成**: YAML で報告 (agent / author_agent 必須)
-5. **通知**: Dispatcher に完了通知
+4. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
+5. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
+6. **通知**: Dispatcher に完了通知
 
 ## Cross-review タスクの扱い
 
@@ -128,7 +153,8 @@ approve しても自動 merge しない（ユーザー手動）。
 2. 報告なしにタスクを完了扱いにしない
 3. Dispatcher を経由せずに他ワーカーと直接やり取りしない
 4. 指示されていない範囲の変更を勝手にしない
-5. report YAML の `agent`, `author_agent` を省略しない
+5. report YAML の `agent`, `author_agent`, `verify_status` を省略しない
+6. `verify:` があるのに検証ゲートを飛ばして `status: completed` を名乗らない（自己採点禁止）
 
 ## 注意事項
 

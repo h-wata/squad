@@ -28,6 +28,42 @@ Claude Worker (W1-W3) と役割は同じだが、以下を優先的に担う:
 
 Codex は `/model` コマンドを持たないため、モデル切替は不要 (Dispatcher も切替指示は送らない)。
 
+## 検証ゲート（report 前の必須ステップ）
+
+task YAML に `verify:` ブロックがあるタスクは、`status: completed` を名乗る前に
+**必ず検証を通す**こと。Codex は Claude の `.claude/agents/verifier` サブエージェントを
+呼べないため、自分で検証コマンドを実走し、**生の証拠付きで verdict を書く**
+（テストの exit code は忖度できないので、機械検証として成立する）。
+
+1. worktree で `verify.commands` を **1 行ずつ実際に実行**し、各 exit code / 出力要点を控える。
+2. `acceptance_criteria` と照合し、`reports/worker4_verdict.yaml` を書く:
+
+   ```yaml
+   task_id: <task_id>
+   project: <project>
+   worker: worker4
+   verifier_agent: codex-self    # Codex 自走検証 (独立 model 検証は cross-review で担保)
+   attempt: <n>
+   result: pass | fail | inconclusive
+   checked_at: "..."
+   commands:
+     - cmd: "pytest tests/ -q"
+       exit_code: 0
+       status: pass | fail
+       evidence: |
+         <出力の要点>
+   unmet_acceptance_criteria: []
+   recommendations: |
+     fail のとき自分が次に直す点
+   ```
+3. **result: fail / inconclusive** なら自分で修正 → 再検証。最大 `verify.max_attempts`
+   （既定 3）回。3 回で pass しなければ `status: blocked`、`verify_status: fail` で報告し、
+   `notes` に verdict パス + 残課題を記載（watch.sh が human inbox に回す）。
+4. 全コマンド pass なら `status: completed`、`verify_status: pass` で報告。
+
+注: Codex 出力に対する **別 model の独立検証**は、後段の cross-review（Codex PR → Claude review）
+で担保される。この検証ゲートは「テスト/lint が実際に緑か」を機械保証するもの。
+
 ## 報告プロトコル
 
 タスク完了後、`queue/projects/<project>/reports/worker4_report.yaml` に報告作成:
@@ -39,12 +75,14 @@ worker: worker4
 agent: codex
 author_agent: codex          # PR/成果物の作成 agent (自分)
 status: completed
+verify_status: pass          # 必須: pass / fail / skipped
+verdict_path: ""             # verify した場合は worker4_verdict.yaml の絶対パス
 pr_url: ""                   # PR を投げた場合は必須
 summary: "実行結果の概要"
 details: |
   詳細
 issues: []
-notes: ""
+notes: ""                    # blocked 時は verdict パス + 残課題を必ず記載
 completed_at: "2026-05-18T12:00:00"
 ```
 

@@ -79,6 +79,7 @@ while true; do
     fi
 
     # --- 1. report-bridge: 新規/更新された report を Dispatcher へ橋渡し ---
+    #   status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         if [ "${REPORT_SEEN[$f]:-}" != "$m" ]; then
@@ -86,8 +87,14 @@ while true; do
             if [ "$FIRST" -eq 0 ]; then
                 wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
                 kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
-                log "report 検知: $f -> Dispatcher 通知"
-                notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
+                status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
+                if [ "$status" = "blocked" ]; then
+                    log "report 検知(blocked): $f -> Dispatcher [INBOX] 通知"
+                    notify_dispatcher "[INBOX] Worker${wnum} が blocked: 検証ゲート未通過。${f} の notes/verdict を確認し、ユーザーに優先報告してください。"
+                else
+                    log "report 検知: $f -> Dispatcher 通知"
+                    notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
+                fi
             fi
         fi
     done < <(find "$QUEUE_DIR/projects" \
