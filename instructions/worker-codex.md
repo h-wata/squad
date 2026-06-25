@@ -64,6 +64,16 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
 注: Codex 出力に対する **別 model の独立検証**は、後段の cross-review（Codex PR → Claude review）
 で担保される。この検証ゲートは「テスト/lint が実際に緑か」を機械保証するもの。
 
+## プロジェクト知識 (kioku-mesh, 必読)
+
+Codex は kioku_mesh MCP を持つ。ループがゼロから推測しないよう共有知識を使う:
+- **着手前**: `search_memory(project="<project>", limit=30)` で規約 / build・test 手順 /
+  既知の落とし穴 / 設計不変条件を引き、`get_memory` で全文確認。再発明・規約違反をしない。
+  (語句クエリは現状 FTS が不安定なので project 指定の一覧で引く)
+- **作業中/完了時**: 非自明な学び (bug 根本原因 / pattern / decision / config) を
+  その場で `save_observation(project="<project>", importance=4-5)` する。append-only なので
+  更新は `supersedes` で繋ぐ。identity 引数は渡さない (サーバー側解決, ADR-0004)。
+
 ## 報告プロトコル
 
 タスク完了後、`queue/projects/<project>/reports/worker4_report.yaml` に報告作成:

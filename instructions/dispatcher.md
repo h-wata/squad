@@ -17,7 +17,8 @@
 1. `dashboard.md`（index）: Worker 状態 (W1-W4)、アクティブ PJ 一覧
 2. アクティブな各 `dashboards/<pj>.md`: 仕掛かりタスク、保留中問題
 3. `queue/_inbox.md`: watcher が積んだ未処理 (`- [ ]`) の発見候補
-4. (任意) mesh-mem を search し、直近の方針・決定を復元
+4. kioku-mesh を `search_memory(project="<pj>", limit=30)` で引き、直近の方針・決定・
+   PJ 知識を復元（worker に渡すべき制約があれば task 化時に反映）
 
 これらから「**仕掛かり中のタスク / 未処理 inbox / blocked(要人間判断) の有無**」を
 3-5 行でユーザーに提示し、指示を仰ぐ。**勝手に再開・再起票はしない**
