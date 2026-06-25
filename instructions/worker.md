@@ -55,6 +55,29 @@ Dispatcher は「これに従って動け」と意図している。
   カバーしているケースが多い）
 - 矛盾が大きい場合は report の issues に書いて Dispatcher に確認
 
+## プロジェクト知識の参照と蓄積 (kioku-mesh, 必読)
+
+ループが毎回ゼロから推測しないよう、プロジェクト知識は共有メモリ kioku-mesh に集約する。
+
+### 着手前: 必ず引く
+task YAML を読んだら、**実装に入る前に** kioku-mesh で当該 PJ の知識を確認する:
+- `search_memory(project="<project>", limit=30)` で規約 / build・test 手順 / 既知の落とし穴 /
+  設計不変条件を引く（語句クエリは現状 FTS が不安定なので、まず project 指定の一覧で引く）。
+- 関連しそうな件は `get_memory(observation_id=...)` で全文を読む。
+- 得た build/test コマンドや「やってはいけない」を必ず守る（再発明・規約違反をしない）。
+
+### 作業中/完了時: 学びを保存する
+非自明な学びが出たら **その場で** `save_observation` する（後回しにしない）:
+- バグの根本原因 → `memory_type=bug` / 規約・命名・構造・手順の確立 → `pattern`
+- 設計判断 → `decision` / 設定変更の理由 → `config`
+- `project="<project>"` を必ず付ける。importance は PJ 全体に効くもの = 4-5。
+- 既存知識を更新する場合は `supersedes=[古いid]` で繋ぐ（kioku-mesh は append-only）。
+- identity 引数 (user_id/agent_family 等) は渡さない（サーバー側解決, ADR-0004）。
+- PR/Issue ライフサイクルや「テスト通った」等の定型は保存しない（ノイズ回避）。
+
+注: save 直後は FTS 検索に即時反映されないことがある（recency 一覧には出る）。
+次タスク開始時には反映済みなので運用上は問題ない。
+
 ## ROS用ターミナルの操作
 
 ROS2 コマンドは ROS 用 Pane に送る (Pane 4: ROS-Run, Pane 5: Aux-Shell)。
@@ -131,11 +154,13 @@ tmux send-keys -t ros-agents:0.0 Enter
 ## 作業の進め方
 
 1. **タスク確認**: YAML の内容を正確に把握 (project, agent, acceptance_criteria, verify)
-2. **作業実行**: 指示内容を実行
-3. **結果確認**: 期待通りの結果か確認
-4. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
-5. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
-6. **通知**: Dispatcher に完了通知
+2. **知識確認**: kioku-mesh で当該 PJ の規約・手順・落とし穴を引く (上記「プロジェクト知識」参照)
+3. **作業実行**: 指示内容を実行
+4. **結果確認**: 期待通りの結果か確認
+5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
+6. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
+7. **知識保存**: 非自明な学びを kioku-mesh に save_observation
+8. **通知**: Dispatcher に完了通知
 
 ## Cross-review タスクの扱い
 
@@ -161,7 +186,7 @@ approve しても自動 merge しない（ユーザー手動）。
 - 不明点は Dispatcher に質問（report YAML の issues に記載して通知）
 - 長時間タスクは中間報告
 - エラーは詳細を issues に
-- 繰り返しパターン発見時は Skill 化提案を report に含める
+- 繰り返しパターン・規約・落とし穴を発見したら kioku-mesh に save_observation (上記参照)
 
 ## PDFサマリー優先参照ルール
 

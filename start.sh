@@ -21,8 +21,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROS_SETUP="/opt/ros/jazzy/setup.bash"
 
 # 各エージェントのパーミッション設定
-DISPATCHER_TOOLS="Read Write Edit Bash(tmux:*)"
-WORKER_TOOLS="Read Write Edit Grep Glob Bash Task"
+# kioku-mesh MCP (共有プロジェクト知識) を摩擦なく使えるよう allowlist に含める
+KIOKU_TOOLS="mcp__kioku_mesh__search_memory mcp__kioku_mesh__get_memory mcp__kioku_mesh__save_observation"
+DISPATCHER_TOOLS="Read Write Edit Bash(tmux:*) mcp__kioku_mesh__search_memory mcp__kioku_mesh__get_memory"
+WORKER_TOOLS="Read Write Edit Grep Glob Bash Task $KIOKU_TOOLS"
 
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then

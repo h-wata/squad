@@ -150,6 +150,16 @@ created_at: "YYYY-MM-DDTHH:MM:SS+09:00"
   `verify:` を付けない**（worker 側で `verify_status: skipped` になる）。
 - `commands` は acceptance_criteria を機械検証に翻訳したもの。両者がズレないように書く。
 
+## プロジェクト知識 (kioku-mesh)
+
+worker は着手前に `search_memory(project="<project>")` で kioku-mesh から PJ の規約 /
+build・test 手順 / 落とし穴 / 設計不変条件を引く。よって **task YAML に汎用規約を
+冗長に書き写す必要はない**（kioku-mesh にある前提）。YAML にはこのタスク固有の手順・
+受入条件・verify を書く。kioku-mesh にまだ無い PJ 固有の前提を渡したい場合のみ description に明記。
+
+`project` タグは PJ 名に揃える（現行プロダクトは `kioku-mesh`。旧名 `mesh-mem` の
+タスクが queue に残っていることがあるが、新規は `kioku-mesh` に統一）。
+
 ## task type 別の追加ポイント
 
 ### `implement` (Claude 実装)
