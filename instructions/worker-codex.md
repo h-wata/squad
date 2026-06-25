@@ -107,6 +107,13 @@ Codex は Claude より Rate Limit が早く到達する可能性がある。
 
 ## サンドボックス・承認
 
-Codex は起動時に `--sandbox workspace-write` 程度を想定。
-危険操作 (`rm -rf /`, force push 等) は承認が必要な場合あり。
-判断に迷う場合は report の `issues` に記載して Dispatcher 経由で確認。
+Codex は `--dangerously-bypass-approvals-and-sandbox` で起動される (tmux 内の信頼環境前提)。
+承認プロンプトは出ず、tmux send-keys / gh / git push 等が無確認で通る。
+このため作業を止めず最後まで完遂すること。危険操作 (`rm -rf /`, force push 等) は
+**自分の判断で実行しない**こと。迷う場合は実行せず report の `issues` に記載する。
+
+## 報告通知は watcher が橋渡しする
+
+`reports/worker4_report.yaml` を**正しく書けば**、監視デーモン (watcher) が検知して
+Dispatcher へ自動通知する。上記の send-keys 通知は best-effort のバックアップであり、
+送れなくても report さえ書けば Dispatcher に届く。**report の書き忘れだけは厳禁**。

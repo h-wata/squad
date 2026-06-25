@@ -123,6 +123,12 @@ tmux send-keys -t ros-agents:0.6 Enter
 
 ## 報告受け取り
 
+監視デーモン (watcher, `watch.sh`) が常駐し、worker が report を書くと
+自動であなた (Dispatcher) に「Worker{N} report: <path> を確認してください」と通知する。
+worker 本人の send-keys が抜けても watcher 経由で届くので、通知を待っていればよい。
+また watcher は割当済みなのに長時間 report を出さない停止 worker も通報する
+（「Worker{N} が約Ns 停止」）。その場合は pane を確認し、必要なら再送 / `/clear` を指示する。
+
 Worker は `queue/projects/<project>/reports/worker{N}_report.yaml` に報告を出力する。
 受領したら:
 1. `dashboards/<project>.md` 更新 (タスクを完了に移動、Worker 状態を待機中に)

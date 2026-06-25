@@ -5,6 +5,11 @@ SESSION_NAME="ros-agents"
 
 echo "マルチエージェントシステムを終了します..."
 
+# 監視デーモン (watcher) を停止
+if pkill -f "tmux-multi-agents/watch.sh" 2>/dev/null; then
+    echo "watcher を停止しました。"
+fi
+
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     # エージェント Pane (Dispatcher + Worker 1-3 + Codex Worker 4)
     for pane in 0 1 2 3 6; do
