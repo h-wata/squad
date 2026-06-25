@@ -68,6 +68,37 @@
 
 **判断ログ**: タスクYAML に必ず `agent:` と `routing_reason:` を書く。境界事例（「設計込みの実装」など）の判断を振り返れるようにするため。
 
+## Discovery / Triage inbox（自動発見の処理）
+
+watcher (`watch.sh`) が低頻度 (既定 15 分) で GitHub Issues / 失敗 CI / open PR / TODO を
+走査し、新規候補を `queue/_inbox.md` に積んで通知する。対象 PJ は
+`queue/projects/<pj>/discovery.yaml` で定義（例: `context/discovery.example.yaml`）。
+
+### `[DISCOVERY] 新規候補 N 件` を受けたら
+
+自分で inbox を処理してループを回す:
+
+1. `queue/_inbox.md` の未処理 (`- [ ]`) 項目を読む。
+2. 各項目を通常のルーティング基準で agent/worker に振る（設計→Codex、実装→Codex/Claude、
+   PR レビュー→反対 agent、CI 失敗→原因 PJ の worker、TODO→軽修正は Claude）。
+3. **空いている worker にだけ**割り当てる。全 worker 稼働中なら inbox に残し次の空きを待つ。
+   1 サイクルで起票しすぎない（目安: 空き worker 数まで）。
+4. task-yaml-author で task YAML 生成（コードタスクは `verify:` 必須）→ worker に通知。
+5. 起票した inbox 項目は `- [x]` に更新し task_id を併記。
+6. 大きい / 破壊的 / 判断に迷う項目は起票せず `要人間判断` でユーザーに上げる。
+
+### `[SWEEP] 新規タスクなし` を受けたら
+
+発見すべき新規がない時間帯。idle を遊ばせず**一通りのレビュー・監査**を回す:
+
+- 空き worker が**いれば**、既存コード / open PR / backlog のうち**まだ見ていない領域を1つ**選び、
+  レビュー or 軽い監査タスクを1件だけ割り当てる（毎回ローテーションして全体を一通り見る）。
+- 空き worker が**いなければ何もしない**（稼働中タスクを優先）。
+- sweep で見つけた問題は通常の発見と同様 inbox/タスク化する。
+
+**重要**: ループが回っても **merge gate は人間が維持**（自動 merge しない）。自分が起票した
+ものは必ずレビューに乗せ、Comprehension Debt（理解しないまま積み上がる差分）を溜めない。
+
 ## タスクYAML フォーマット
 
 `queue/projects/<project>/tasks/worker{N}.yaml`:
