@@ -79,8 +79,17 @@ tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE && claude --allowedTools \"
 tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE && claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/3/g')\"" Enter
 
 # Pane 6: Worker 4 (Codex, ワークスペースで起動)
-# Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す
-tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE && codex --cd $WORKSPACE --add-dir $SCRIPT_DIR --sandbox workspace-write \"\$(cat $SCRIPT_DIR/instructions/worker-codex.md)\"" Enter
+# Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
+# --dangerously-bypass-approvals-and-sandbox: tmux 内の信頼環境で完全自律実行 (承認なし)。
+#   tmux send-keys / gh / git push 等が無確認で通り、毎ステップの承認待ち停止を解消する。
+tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE && codex --cd $WORKSPACE --add-dir $SCRIPT_DIR --dangerously-bypass-approvals-and-sandbox \"\$(cat $SCRIPT_DIR/instructions/worker-codex.md)\"" Enter
+
+# 監視デーモン (watcher) をバックグラウンド起動
+#   - worker の report YAML を検知して Dispatcher へ自動橋渡し (send-keys 抜けの保険)
+#   - 残存承認プロンプトの自動受理 / 停止 worker の Dispatcher 通報
+WATCH_LOG="/tmp/${SESSION_NAME}-watch.log"
+nohup "$SCRIPT_DIR/watch.sh" >"$WATCH_LOG" 2>&1 &
+echo "watcher 起動 (PID $!, log: $WATCH_LOG)"
 
 echo ""
 echo "=========================================="
