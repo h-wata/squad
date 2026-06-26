@@ -135,8 +135,8 @@ context:
   pr_url: <if review/fix>
   parent_issue: <optional>
   wave: <optional>
-  recommended_skills:
-    - "/safe-pathspec-commit"
+  recommended_skills: []  # worktree 運用前提のため通常 git commit を既定とする。
+                           # 環境に safe-pathspec-commit が実在する場合のみ任意で使用可。
 
 created_at: "YYYY-MM-DDTHH:MM:SS+09:00"
 ```
