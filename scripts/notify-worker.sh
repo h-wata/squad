@@ -9,15 +9,19 @@
 # 送信後に pane 末尾を capture して呼び出し側が着手を確認できるようにする。
 #
 # 使い方:
-#   scripts/notify-worker.sh <W1|W2|W3|W4|pane> "<message>" [--model <opus|sonnet|haiku>] [--clear]
+#   scripts/notify-worker.sh <W1|W2|W3|W4|pane> "<message>" [--model <opus|sonnet|haiku>] [--clear] [--no-new]
 #
 # 例:
 #   scripts/notify-worker.sh W2 "新しいタスクがあります。.../worker2.yaml を確認してください。"
 #   scripts/notify-worker.sh W1 "....worker1.yaml を確認してください。" --model sonnet
 #   scripts/notify-worker.sh W2 "....worker2.yaml を確認してください。" --clear --model sonnet
+#   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。"          # /new 自動送信
+#   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。" --no-new  # /new をスキップ
 #
 # 環境変数:
 #   TMUX_SESSION  tmux セッション名 (既定: ros-agents)
+#
+# W4(Codex): 毎回 /new でフレッシュ会話を開始しクレジット累積を抑制。--no-new で抑制可。
 set -euo pipefail
 
 SESSION="${TMUX_SESSION:-ros-agents}"
@@ -33,11 +37,13 @@ WORKER="$1"; shift
 MESSAGE="$1"; shift
 MODEL=""
 DO_CLEAR=0
+NO_NEW=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL="${2:-}"; shift 2 ;;
     --clear) DO_CLEAR=1; shift ;;
+    --no-new) NO_NEW=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown arg: $1" >&2; usage 1 ;;
   esac
@@ -89,6 +95,14 @@ if [ -n "$MODEL" ]; then
     # 切替反映前にタスク通知を送ると drop するため十分待つ (経験則: 2.5s)
     sleep 2.5
   fi
+fi
+
+# /new (Codex のみ。--no-new 指定時はスキップ)
+# 独立タスクごとにフレッシュ会話を開始しクレジット累積を抑制する
+if [ "$IS_CODEX" -eq 1 ] && [ "$NO_NEW" -eq 0 ]; then
+  send_line "/new" 0.5
+  # /new 後に新規会話への切替完了を待つ (/clear 後と同等以上、2.5s)
+  sleep 2.5
 fi
 
 # 本文通知
