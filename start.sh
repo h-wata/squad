@@ -76,15 +76,18 @@ tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE && echo 'Aux-Shell ready (S
 tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR && claude --allowedTools \"$DISPATCHER_TOOLS\" --add-dir \"$WORKSPACE\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/dispatcher.md)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
-tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE && claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/1/g')\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE && claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/2/g')\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE && claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/3/g')\"" Enter
+# SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
+# 無指定でも $TMUX_PANE → config.json 逆引きで動くが、明示する方が確実。
+tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE && SQUAD_WORKER_ID=w1 claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/1/g')\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE && SQUAD_WORKER_ID=w2 claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/2/g')\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE && SQUAD_WORKER_ID=w3 claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/worker.md | sed 's/{N}/3/g')\"" Enter
 
 # Pane 6: Worker 4 (Codex, ワークスペースで起動)
 # Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
 # --dangerously-bypass-approvals-and-sandbox: tmux 内の信頼環境で完全自律実行 (承認なし)。
 #   tmux send-keys / gh / git push 等が無確認で通り、毎ステップの承認待ち停止を解消する。
-tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE && codex --cd $WORKSPACE --add-dir $SCRIPT_DIR --dangerously-bypass-approvals-and-sandbox \"\$(cat $SCRIPT_DIR/instructions/worker-codex.md)\"" Enter
+# SQUAD_WORKER_ID は Codex の hook 機構があれば squad と連携するための識別子 (将来用、Claude hook には未対応)。
+tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE --add-dir $SCRIPT_DIR --dangerously-bypass-approvals-and-sandbox \"\$(cat $SCRIPT_DIR/instructions/worker-codex.md)\"" Enter
 
 # 監視デーモン (watcher) をバックグラウンド起動
 #   - worker の report YAML を検知して Dispatcher へ自動橋渡し (send-keys 抜けの保険)
