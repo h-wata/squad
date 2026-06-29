@@ -1,0 +1,20 @@
+{
+    "workers": {
+        "w1": {
+            "agent": "claude",
+            "pane": "ros-agents:0.1"
+        },
+        "w2": {
+            "agent": "claude",
+            "pane": "ros-agents:0.2"
+        },
+        "w3": {
+            "agent": "claude",
+            "pane": "ros-agents:0.3"
+        },
+        "w4": {
+            "agent": "codex",
+            "pane": "ros-agents:0.6"
+        }
+    }
+}
