@@ -311,8 +311,38 @@ while true; do
 
         if [ "${PANE_STALL[$N]}" -ge "$STALL_CYCLES" ] && [ "${STALL_NOTIFIED[$N]:-}" != "$task_m" ]; then
             secs=$(( INTERVAL * STALL_CYCLES ))
-            log "Worker${N}: 約${secs}s 停止 (タスク未報告) -> Dispatcher 通報"
-            notify_dispatcher "Worker${N} が約${secs}s 停止しています (タスク割当済・report 未出力)。pane ${pane#"$SESSION":} を確認し、必要なら再送/clear してください。"
+            # squad hook の直近イベントで「停止」と「完了・report書き忘れ」を区別。
+            # state/w{N}.json の last_event_at が直近 5 分以内なら、worker は hook を出している
+            # = 応答可能な状態 = 「停止」ではなく「完了 (or 入力待ち) で report 未出」とみなす。
+            # event 種別 (Stop / Notification / etc.) には依存しない (Claude Code バージョン間で
+            # type field 名が揺れるため、鮮度ベースで判定する)。
+            state_file="$SCRIPT_DIR/squad/state/w${N}.json"
+            hook_event=""
+            if [ -f "$state_file" ]; then
+                hook_event=$(python3 -c "
+import json
+from datetime import datetime
+from datetime import timezone
+try:
+    d = json.load(open('$state_file'))
+    ev = d.get('last_event', '')
+    ts = d.get('last_event_at', '')
+    if ev and ts:
+        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        age = (datetime.now(timezone.utc) - dt).total_seconds()
+        if 0 <= age <= 300:
+            print(ev)
+except Exception:
+    pass
+" 2>/dev/null)
+            fi
+            if [ -n "$hook_event" ]; then
+                log "Worker${N}: stall 検知だが hook=$hook_event のため完了通報に分類"
+                notify_dispatcher "Worker${N} は完了 (hook=$hook_event) していますが task が pending のままです (約${secs}s 経過)。pane ${pane#"$SESSION":} を確認し、report を書くよう促してください。"
+            else
+                log "Worker${N}: 約${secs}s 停止 (タスク未報告) -> Dispatcher 通報"
+                notify_dispatcher "Worker${N} が約${secs}s 停止しています (タスク割当済・report 未出力)。pane ${pane#"$SESSION":} を確認し、必要なら再送/clear してください。"
+            fi
             STALL_NOTIFIED[$N]="$task_m"
         fi
     done
