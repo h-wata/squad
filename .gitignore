@@ -3,3 +3,9 @@ output/
 __pycache__/
 dashboard.md
 dashboards/
+
+# Local-only settings (個人パス・MCP allow リスト等を含む)
+.claude/settings.local.json
+
+# PoC reports (内部ネットワーク IP / 個人ホスト名を含むため public 化非対象)
+docs/poc-reports/
