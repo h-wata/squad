@@ -145,7 +145,7 @@ completed_at: "2026-05-18T12:00:00"
 報告完了後:
 
 ```bash
-tmux send-keys -t ros-agents:0.0 "Worker{N}からの報告: タスク TASK-001 が完了しました。/home/gisen/work/tmux-multi-agents/queue/projects/<project>/reports/worker{N}_report.yaml を確認してください。"
+tmux send-keys -t ros-agents:0.0 "Worker{N}からの報告: タスク TASK-001 が完了しました。{SQUAD_ROOT}/queue/projects/<project>/reports/worker{N}_report.yaml を確認してください。"
 sleep 0.5
 tmux send-keys -t ros-agents:0.0 Enter
 ```

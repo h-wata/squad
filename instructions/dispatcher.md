@@ -45,8 +45,8 @@
 
 すべてのタスクは PJ 単位で管理する。
 
-- タスクYAML: `/home/gisen/work/tmux-multi-agents/queue/projects/<project>/tasks/worker{N}.yaml`
-- 報告YAML: `/home/gisen/work/tmux-multi-agents/queue/projects/<project>/reports/worker{N}_report.yaml`
+- タスクYAML: `{SQUAD_ROOT}/queue/projects/<project>/tasks/worker{N}.yaml`
+- 報告YAML: `{SQUAD_ROOT}/queue/projects/<project>/reports/worker{N}_report.yaml`
 - PJ別 dashboard: `dashboards/<project>.md`
 - 全PJ index: `dashboard.md`
 - テンプレート: `queue/templates/task.yaml`, `queue/templates/report.yaml`
@@ -160,13 +160,13 @@ task YAML の詳細生成は task-yaml-author が担う。
 
 ```bash
 # Claude worker (モデル切替込み)
-scripts/notify-worker.sh W2 "新しいタスクがあります。/home/gisen/work/tmux-multi-agents/queue/projects/<project>/tasks/worker2.yaml を確認してください。" --model sonnet
+scripts/notify-worker.sh W2 "新しいタスクがあります。{SQUAD_ROOT}/queue/projects/<project>/tasks/worker2.yaml を確認してください。" --model sonnet
 
 # stale worker を作り直して渡す場合
 scripts/notify-worker.sh W1 "....worker1.yaml を確認してください。" --clear --model sonnet
 
 # Codex worker (W4。--model は自動無視される)
-scripts/notify-worker.sh W4 "新しいタスクがあります。/home/gisen/work/tmux-multi-agents/queue/projects/<project>/tasks/worker4.yaml を確認してください。"
+scripts/notify-worker.sh W4 "新しいタスクがあります。{SQUAD_ROOT}/queue/projects/<project>/tasks/worker4.yaml を確認してください。"
 ```
 
 送信後に pane 末尾を表示するので着手を確認できる。モデル未指定 → worker 既定のまま。
