@@ -38,8 +38,8 @@
 
 | Pane | 用途 |
 |------|------|
-| 4 | ROS-Run (ROS2 コマンド実行) |
-| 5 | Aux-Shell (汎用 SSH / mesh-mem CLI 等) |
+| 4 | Terminal (汎用シェル) |
+| 5 | Aux-Shell (汎用 SSH 等) |
 
 ## マルチプロジェクト運用
 
@@ -127,7 +127,7 @@ watcher (`watch.sh`) が低頻度 (既定 15 分) で GitHub Issues / 失敗 CI 
 
 ```yaml
 task_id: TASK-001
-project: mesh-mem
+project: my-app
 assigned_to: worker1
 agent: claude            # claude | codex
 routing_reason: "実装メイン、Codex は別タスクで並列のためここは Claude"

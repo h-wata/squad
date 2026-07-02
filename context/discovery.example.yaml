@@ -6,8 +6,8 @@
 # 値はカンマ区切り。クォートは付けても付けなくてもよい。
 
 enabled: true                      # false で無効化
-repo: /home/gisen/work/mesh-mem    # ローカル checkout（todo 走査に使用。todo を使わないなら省略可）
-gh_repo: h-wata/mesh-mem           # gh 用 owner/repo（issues / ci / pr に使用）
+repo: /path/to/my-app              # ローカル checkout（todo 走査に使用。todo を使わないなら省略可）
+gh_repo: owner/my-app              # gh 用 owner/repo（issues / ci / pr に使用）
 sources: issues,pr,ci,todo         # 走査する種別（カンマ区切り。省略時は全部）
 issue_labels: ready                # issues: このラベルだけ拾う（カンマ区切り。空なら全 open）
 todo_paths: src,tests              # todo: 走査するサブパス（repo 相対。カンマ区切り）

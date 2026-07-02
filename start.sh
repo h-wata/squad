@@ -1,6 +1,6 @@
 #!/bin/bash
 # Tmux マルチエージェントシステム起動スクリプト
-# ROS2 Jazzy + Claude (W1-W3) + Codex (W4) 対応
+# Claude (W1-W3) + Codex (W4) 対応
 
 set -e
 
@@ -18,7 +18,6 @@ WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
 
 SESSION_NAME="ros-agents"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROS_SETUP="/opt/ros/jazzy/setup.bash"
 
 # 各エージェントのパーミッション設定
 # kioku-mesh MCP (共有プロジェクト知識) を摩擦なく使えるよう allowlist に含める
@@ -39,7 +38,7 @@ tmux new-session -d -s "$SESSION_NAME" -x 220 -y 60
 
 # Pane を追加して 4 列構成を作る (合計 7 pane)
 # 配置 (tiled 後にレイアウト自動調整):
-#   Pane 0: Dispatcher | Pane 1: Worker 1 | Pane 4: ROS-Run
+#   Pane 0: Dispatcher | Pane 1: Worker 1 | Pane 4: Terminal
 #   Pane 2: Worker 2   | Pane 3: Worker 3 | Pane 5: Aux-Shell
 #                                          | Pane 6: Worker 4 (Codex)
 tmux split-window -h -t "$SESSION_NAME:0"      # Pane 1
@@ -57,20 +56,15 @@ tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
 tmux select-pane -t "$SESSION_NAME:0.1" -T "Worker1 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
-tmux select-pane -t "$SESSION_NAME:0.4" -T "ROS-Run"
+tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
 tmux select-pane -t "$SESSION_NAME:0.5" -T "Aux-Shell"
 tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
 
-# ROS-Run (Pane 4) は ROS2 環境を read
-if [ -f "$ROS_SETUP" ]; then
-    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE && source $ROS_SETUP && echo 'ROS2 Jazzy loaded (Run) - $WORKSPACE'" Enter
-else
-    echo "警告: ROS2 Jazzy が見つかりません ($ROS_SETUP)"
-    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE && echo 'ROS2 not found - install ROS2 Jazzy'" Enter
-fi
+# Terminal (Pane 4) は汎用シェル
+tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE && echo 'Terminal ready - $WORKSPACE'" Enter
 
 # Aux-Shell (Pane 5) は汎用シェル
-tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE && echo 'Aux-Shell ready (SSH / mesh-mem CLI 等の汎用利用)'" Enter
+tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE && echo 'Aux-Shell ready (SSH 等の汎用利用)'" Enter
 
 # Pane 0: Dispatcher (Claude, スクリプトディレクトリで起動)
 tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR && claude --allowedTools \"$DISPATCHER_TOOLS\" --add-dir \"$WORKSPACE\" --settings \"$SCRIPT_DIR/.claude/settings.local.json\" --append-system-prompt \"\$(cat $SCRIPT_DIR/instructions/dispatcher.md)\"" Enter
@@ -111,9 +105,9 @@ echo "  Pane 0: Dispatcher (Claude, タスク分配)"
 echo "  Pane 1: Worker 1 (Claude)"
 echo "  Pane 2: Worker 2 (Claude)"
 echo "  Pane 3: Worker 3 (Claude)"
-echo "  Pane 4: ROS-Run (ROS2コマンド実行用)"
-echo "  Pane 5: Aux-Shell (汎用 SSH / mesh-mem CLI 等)"
-echo "  Pane 6: Worker 4 (Codex, 設計・実装担当)"
+echo "  Pane 4: Terminal (汎用シェル)"
+echo "  Pane 5: Aux-Shell (汎用 SSH 等)"
+echo "  Pane 6: Worker 4 (Codex, 設計・cross-review 担当)"
 echo ""
 echo "接続コマンド: tmux attach -t $SESSION_NAME"
 echo "終了コマンド: ./stop.sh"

@@ -20,7 +20,7 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         sleep 0.2
     done
 
-    # ROS-Run / Aux-Shell
+    # Terminal / Aux-Shell
     for pane in 4 5; do
         echo "Pane $pane (Aux) を終了中..."
         tmux send-keys -t "$SESSION_NAME:0.$pane" C-c

@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
 done
 
 # worker ラベル → pane 番号 (start.sh の構成に追従)
-#   W1=0.1 W2=0.2 W3=0.3  Codex W4=0.6  (0.4=ROS-Run, 0.5=Aux-Shell は worker ではない)
+#   W1=0.1 W2=0.2 W3=0.3  Codex W4=0.6  (0.4=Terminal, 0.5=Aux-Shell は worker ではない)
 case "${WORKER,,}" in
   w1) PANE="0.1"; IS_CODEX=0 ;;
   w2) PANE="0.2"; IS_CODEX=0 ;;
