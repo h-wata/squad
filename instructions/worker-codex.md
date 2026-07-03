@@ -67,9 +67,10 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
 注: Codex 出力に対する **別 model の独立検証**は、後段の cross-review（Codex PR → Claude review）
 で担保される。この検証ゲートは「テスト/lint が実際に緑か」を機械保証するもの。
 
-## プロジェクト知識 (kioku-mesh, 必読)
+## プロジェクト知識 (kioku-mesh)
 
-Codex は kioku_mesh MCP を持つ。ループがゼロから推測しないよう共有知識を使う:
+**kioku-mesh 等のメモリ MCP が設定されている場合のみ実行する。設定が無ければこの節全体を
+スキップしてよい。** 設定されている環境では、ループがゼロから推測しないよう共有知識を使う:
 - **着手前**: `search_memory(project="<project>", limit=30)` で規約 / build・test 手順 /
   既知の落とし穴 / 設計不変条件を引き、`get_memory` で全文確認。再発明・規約違反をしない。
   (語句クエリは現状 FTS が不安定なので project 指定の一覧で引く)

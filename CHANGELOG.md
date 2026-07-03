@@ -21,6 +21,11 @@
 
 ### Fixed
 
+- `instructions/worker-codex.md` の kioku-mesh 節が「必読」と書かれ、他の指示書
+  (`instructions/worker.md` 等) と異なり未設定環境でのスキップ条件が書かれていなかった
+  不整合を修正。設定が無ければスキップしてよい旨を明記。
+- `context/project.md` テンプレートに残っていた ROS2/Jazzy 固有の既定値を、squad が
+  技術スタック非依存であることに合わせて汎用プレースホルダに置き換え。
 - start.sh 内の instructions/*.md プレースホルダ展開 (`{SQUAD_ROOT}` / `{N}`) を
   sed から `scripts/render_prompt.py` (python3 str.replace) に置き換え。クローン先
   パスに `&` `|` `"` 等の特殊文字が含まれても正しく展開されるようになった
