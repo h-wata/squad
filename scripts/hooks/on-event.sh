@@ -40,10 +40,10 @@ import json, os, sys
 try:
     cfg = json.load(open(os.environ["CONFIG"]))
     target = os.environ["TARGET"]
-    target_suffix = target.split(":", 1)[-1]
+    target_suffix = target.rsplit(":", 1)[-1]
     for name, meta in cfg.get("workers", {}).items():
         pane = meta.get("pane", "")
-        pane_suffix = pane.split(":", 1)[-1]
+        pane_suffix = pane.rsplit(":", 1)[-1]
         if pane_suffix == target_suffix:
             print(name); sys.exit(0)
 except Exception:
