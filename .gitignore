@@ -1,8 +1,11 @@
-queue/
+queue/*
+!queue/templates/
+!queue/templates/**
 output/
 __pycache__/
 dashboard.md
-dashboards/
+dashboards/*
+!dashboards/_template.md
 
 # Local-only settings (個人パス・MCP allow リスト等を含む)
 .claude/settings.local.json

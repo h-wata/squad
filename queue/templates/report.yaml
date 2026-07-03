@@ -1,0 +1,38 @@
+# 報告テンプレート
+# コピーして queue/projects/<project>/reports/worker{N}_report.yaml として使用する。
+# 詳細な運用ルールは instructions/dispatcher.md 参照。
+
+# 対応する task.yaml の task_id
+task_id: TASK-XXX
+# 例: my-app
+project: <project>
+# 例: worker1 / worker2 / worker3 / worker4
+worker: worker1
+# 必須: claude | codex (実際に作業した agent 種別)
+agent: claude
+# 必須: 成果物 (PR 等) を作成した agent。
+# cross-review タスクではレビュー対象の作者を指す
+author_agent: claude
+# completed / failed / blocked
+status: completed
+# 必須: pass / fail / skipped
+# (検証ゲートの結果。verify: が無いタスクは skipped)
+verify_status: pass
+# 例: /path/to/worktree/reports/worker1_verdict.yaml
+# (verify した場合の verifier 出力先)
+verdict_path: ""
+# 例: https://github.com/owner/repo/pull/123 (PR を投げた場合は必須)
+pr_url: ""
+summary: "作業結果の概要を1-2文で"
+details: |
+  詳細な作業内容や結果をここに記述。
+  - 変更したファイル
+  - 実行したコマンド
+  - 確認した内容
+# ブロッカーや懸念点があれば記述
+issues: []
+# - "issue の説明"
+# blocked 時は verdict の絶対パスと残課題を必ず記載
+notes: ""
+# ISO8601形式
+completed_at: "2026-01-01T12:00:00+09:00"

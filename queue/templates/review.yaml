@@ -1,0 +1,32 @@
+# cross-review 報告テンプレート
+# コピーして queue/projects/<project>/reports/worker{N}_review.yaml として使用する。
+# 通常の report.yaml とは分離し、混ざらないようにする (instructions/dispatcher.md 参照)。
+
+# レビュー対象の元 task_id (例: cross-review 発注時の task_id)
+task_id: TASK-XXX
+# 例: my-app
+project: <project>
+# 必須: claude | codex (レビューを行った agent)
+agent: claude
+# 必須: claude | codex (レビュー対象の PR を作成した agent。
+# agent と反対の agent になる想定)
+author_agent: codex
+# 例: https://github.com/owner/repo/pull/123
+pr_url: ""
+# 例: 8a1be05... (レビュー時点の PR head SHA。
+# 発注前に `gh pr view` で鮮度確認したもの)
+pr_head_sha: ""
+# approve / approve_with_comments / request_changes
+verdict: approve_with_comments
+# 指摘事項のリスト。無ければ空配列
+findings:
+  - severity: minor
+    # major / minor / nit
+    file: "path/to/file.py"
+    line: 10
+    description: "指摘内容の説明"
+summary: "レビュー結果の概要を1-2文で"
+# ISO8601形式
+completed_at: "2026-01-01T12:00:00+09:00"
+
+# 注意: approve でも自動 merge しない。merge gate は人間 (ユーザー) が握る。
