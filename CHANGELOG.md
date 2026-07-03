@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `dashboard-updater` サブエージェントを追加し、dashboard 更新の定型作業を
+  Dispatcher から委譲可能にした。
+
 ### Fixed
 
 - start.sh 内の instructions/*.md プレースホルダ展開 (`{SQUAD_ROOT}` / `{N}`) を

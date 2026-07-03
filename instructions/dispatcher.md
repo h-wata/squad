@@ -247,6 +247,10 @@ NOT-READY（CONFLICTING / 重複コミット / CI 未トリガー）なら、reb
 - その PJ の完了タスク履歴
 - その PJ の保留中問題
 
+更新作業は原則 `dashboard-updater` サブエージェント（Agent tool）に委譲する。
+Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 / タイムスタンプ等）
+を渡すだけにし、自分で `dashboard.md` / `dashboards/<project>.md` を直接 Edit しない。
+
 ## モデル選択ガイドライン (Claude 用)
 
 | モデル | 判断基準 | 例 |
