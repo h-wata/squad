@@ -132,7 +132,7 @@ SETTINGS_FILE_Q="$(printf '%q' "$SETTINGS_FILE")"
 # 既存 tmux server では新規 pane に client の環境変数が継承されないため、
 # pane 側 shell に ${SQUAD_DISPATCHER_MODEL:-sonnet} をリテラルのまま渡すと
 # SQUAD_DISPATCHER_MODEL の上書きが効かない (PR #8 cross-review F1 対応)。
-DISPATCHER_MODEL="${SQUAD_DISPATCHER_MODEL:-sonnet}"
+DISPATCHER_MODEL="${SQUAD_DISPATCHER_MODEL:-opus}"
 DISPATCHER_MODEL_Q="$(printf '%q' "$DISPATCHER_MODEL")"
 
 # 既存セッションがあれば終了

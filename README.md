@@ -66,11 +66,12 @@ tmux attach -t myproj
 
 ## Dispatcher 起動モデルのカスタマイズ
 
-Dispatcher (Pane 0) の起動モデルは既定で `sonnet`（token 消費削減のため）。`SQUAD_DISPATCHER_MODEL`
-環境変数で変更できる。
+Dispatcher (Pane 0) の起動モデルは既定で `opus`（曖昧な指示の明確化・複雑な判断を担うため）。
+token 節約は report のスリム化等、他の手段で行う方針。`SQUAD_DISPATCHER_MODEL` 環境変数で
+変更できる。
 
 ```bash
-SQUAD_DISPATCHER_MODEL=opus ./start.sh <workspace_path>
+SQUAD_DISPATCHER_MODEL=sonnet ./start.sh <workspace_path>
 ```
 
 ## 主なコンポーネント

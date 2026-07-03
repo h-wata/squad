@@ -16,6 +16,8 @@
   (`instructions/worker.md`, `instructions/worker-codex.md`, `queue/templates/report.yaml`)。
 - Dispatcher のセッション開始時復元を軽量化: `dashboards/<pj>.md` はアクティブタスクが
   ある PJ のみ読み、`search_memory` の `limit` を 30→10 に削減 (`instructions/dispatcher.md`)。
+- Dispatcher 起動モデルのデフォルトを sonnet から opus に変更（曖昧指示の明確化を優先する
+  ユーザー判断）。
 
 ### Fixed
 
