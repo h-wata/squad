@@ -64,6 +64,15 @@ tmux attach -t myproj
 `squad` CLI (`squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
 `squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
 
+## Dispatcher 起動モデルのカスタマイズ
+
+Dispatcher (Pane 0) の起動モデルは既定で `sonnet`（token 消費削減のため）。`SQUAD_DISPATCHER_MODEL`
+環境変数で変更できる。
+
+```bash
+SQUAD_DISPATCHER_MODEL=opus ./start.sh <workspace_path>
+```
+
 ## 主なコンポーネント
 
 | ファイル | 役割 |
