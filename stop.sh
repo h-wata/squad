@@ -2,11 +2,12 @@
 # Tmux マルチエージェントシステム終了スクリプト
 
 SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "マルチエージェントシステムを終了します..."
 
 # 監視デーモン (watcher) を停止
-if pkill -f "tmux-multi-agents/watch.sh" 2>/dev/null; then
+if pkill -f "$SCRIPT_DIR/watch.sh" 2>/dev/null; then
     echo "watcher を停止しました。"
 fi
 
