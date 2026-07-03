@@ -32,13 +32,19 @@ if [ -z "$worker" ] && [ -n "${TMUX_PANE:-}" ]; then
     target=$(tmux display-message -p -t "$TMUX_PANE" \
         '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
     if [ -n "$target" ] && [ -f "$CONFIG" ]; then
+        # config.json の pane は session 非依存のサフィックス (例 "0.1") で
+        # 持っているため、target ("session:0.1") からもサフィックス側だけを
+        # 切り出して比較する (squad.py load_config() と同じ設計)。
         worker=$(CONFIG="$CONFIG" TARGET="$target" python3 -c '
 import json, os, sys
 try:
     cfg = json.load(open(os.environ["CONFIG"]))
     target = os.environ["TARGET"]
+    target_suffix = target.rsplit(":", 1)[-1]
     for name, meta in cfg.get("workers", {}).items():
-        if meta.get("pane") == target:
+        pane = meta.get("pane", "")
+        pane_suffix = pane.rsplit(":", 1)[-1]
+        if pane_suffix == target_suffix:
             print(name); sys.exit(0)
 except Exception:
     pass

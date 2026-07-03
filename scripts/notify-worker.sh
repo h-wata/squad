@@ -19,12 +19,12 @@
 #   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。" --no-new  # /new をスキップ
 #
 # 環境変数:
-#   TMUX_SESSION  tmux セッション名 (既定: ros-agents)
+#   SQUAD_SESSION  tmux セッション名 (既定: ros-agents)
 #
 # W4(Codex): 毎回 /new でフレッシュ会話を開始しクレジット累積を抑制。--no-new で抑制可。
 set -euo pipefail
 
-SESSION="${TMUX_SESSION:-ros-agents}"
+SESSION="${SQUAD_SESSION:-ros-agents}"
 
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'

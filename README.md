@@ -26,6 +26,22 @@ Dispatcher はコードを書かない。ユーザー指示を受けて `queue/p
 tmux attach -t ros-agents     # 再アタッチ
 ```
 
+## tmux session 名のカスタマイズ
+
+tmux session 名は既定で `ros-agents` だが、`SQUAD_SESSION` 環境変数で変更できる。
+同一マシンで複数の squad インスタンスを並行稼働させたい場合などに使う。
+
+```bash
+SQUAD_SESSION=myproj ./start.sh <workspace_path>
+SQUAD_SESSION=myproj ./watch.sh &        # start.sh 経由でなく手動起動する場合も同様
+SQUAD_SESSION=myproj scripts/notify-worker.sh W2 "..."
+SQUAD_SESSION=myproj ./stop.sh
+tmux attach -t myproj
+```
+
+`squad` CLI (`squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
+`squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
+
 ## 主なコンポーネント
 
 | ファイル | 役割 |

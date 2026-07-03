@@ -19,6 +19,7 @@ import argparse
 from datetime import datetime
 from datetime import timezone
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -35,10 +36,27 @@ CAPTURE_TAIL_LINES = 25
 # ---------- config ----------
 
 
+def resolve_session(cfg: dict) -> str:
+    """Tmux session 名解決: SQUAD_SESSION env → 既定 'ros-agents'.
+
+    start.sh / stop.sh / watch.sh / notify-worker.sh と同じ優先順位に揃える
+    (config.json の 'session' キーは参照しない)。
+    """
+    return os.environ.get('SQUAD_SESSION') or 'ros-agents'
+
+
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         sys.exit(f'config not found: {CONFIG_PATH}')
-    return json.loads(CONFIG_PATH.read_text())
+    cfg = json.loads(CONFIG_PATH.read_text())
+    session = resolve_session(cfg)
+    # pane は config.json 上 session 非依存のサフィックス (例 "0.1") で持つ。ここで
+    # 解決済み session 名と結合し、以降の呼び出し元は meta['pane'] をそのまま使える。
+    for meta in cfg.get('workers', {}).values():
+        pane = meta.get('pane', '')
+        if pane and ':' not in pane:
+            meta['pane'] = f'{session}:{pane}'
+    return cfg
 
 
 def resolve_worker(cfg: dict, name: str) -> dict:
