@@ -91,9 +91,8 @@ status: completed
 verify_status: pass          # 必須: pass / fail / skipped
 verdict_path: ""             # verify した場合は worker4_verdict.yaml の絶対パス
 pr_url: ""                   # PR を投げた場合は必須
-summary: "実行結果の概要"
-details: |
-  詳細
+summary: "実行結果の概要"     # 10行以内
+details_path: ""             # 詳細を書いた場合のみ worker4_details.md の絶対パスを入れる (通常は空文字のまま)
 issues: []
 notes: ""                    # blocked 時は verdict パス + 残課題を必ず記載
 completed_at: "2026-05-18T12:00:00"

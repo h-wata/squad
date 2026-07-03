@@ -7,6 +7,18 @@
 - `dashboard-updater` サブエージェントを追加し、dashboard 更新の定型作業を
   Dispatcher から委譲可能にした。
 
+### Changed
+
+- Dispatcher pane (Pane 0) の起動モデルを `SQUAD_DISPATCHER_MODEL` 環境変数（デフォルト
+  `sonnet`）で指定できるようにし、Dispatcher の token 消費を削減。
+- worker report 様式をスリム化: `summary` は 10 行以内、`details` ブロックを廃止し
+  必要な場合のみ `details_path` で詳細ファイルを参照する方式に変更
+  (`instructions/worker.md`, `instructions/worker-codex.md`, `queue/templates/report.yaml`)。
+- Dispatcher のセッション開始時復元を軽量化: `dashboards/<pj>.md` はアクティブタスクが
+  ある PJ のみ読み、`search_memory` の `limit` を 30→10 に削減 (`instructions/dispatcher.md`)。
+- Dispatcher 起動モデルのデフォルトを sonnet から opus に変更（曖昧指示の明確化を優先する
+  ユーザー判断）。
+
 ### Fixed
 
 - start.sh 内の instructions/*.md プレースホルダ展開 (`{SQUAD_ROOT}` / `{N}`) を

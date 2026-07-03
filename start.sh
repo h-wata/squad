@@ -128,6 +128,13 @@ SCRIPT_DIR_Q="$(printf '%q' "$SCRIPT_DIR")"
 WORKSPACE_Q="$(printf '%q' "$WORKSPACE")"
 SETTINGS_FILE_Q="$(printf '%q' "$SETTINGS_FILE")"
 
+# Dispatcher 起動モデルも同様に client (start.sh 実行時) 側で解決してから %q で埋め込む。
+# 既存 tmux server では新規 pane に client の環境変数が継承されないため、
+# pane 側 shell に ${SQUAD_DISPATCHER_MODEL:-sonnet} をリテラルのまま渡すと
+# SQUAD_DISPATCHER_MODEL の上書きが効かない (PR #8 cross-review F1 対応)。
+DISPATCHER_MODEL="${SQUAD_DISPATCHER_MODEL:-opus}"
+DISPATCHER_MODEL_Q="$(printf '%q' "$DISPATCHER_MODEL")"
+
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "既存のセッション '$SESSION_NAME' を終了します..."
@@ -171,7 +178,7 @@ tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 
 # Pane 0: Dispatcher (Claude, スクリプトディレクトリで起動)
 # instructions/*.md 内の {SQUAD_ROOT} プレースホルダは起動時に実パスへ展開する
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && claude --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
