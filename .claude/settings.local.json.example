@@ -46,16 +46,11 @@
             "Bash(tmux capture-pane:*)",
             "Bash(grep:*)",
             "Bash(find:*)",
-            "Bash(bash:*)",
             "Bash(ls:*)",
             "Bash(python3:*)",
             "Bash(git commit:*)",
             "Bash(git add:*)",
-            "Bash(git push:*)",
-            "Bash(gh pr view:*)",
-            "Bash(gh api:*)",
-            "WebSearch",
-            "WebFetch(domain:github.com)"
+            "Bash(gh pr view:*)"
         ]
     }
 }

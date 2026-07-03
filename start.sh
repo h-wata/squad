@@ -29,7 +29,39 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     if [ -f "$SETTINGS_EXAMPLE" ]; then
         echo "初回起動: $SETTINGS_EXAMPLE から $SETTINGS_FILE を生成します（{SQUAD_ROOT} を実パスに置換）..."
         mkdir -p "$(dirname "$SETTINGS_FILE")"
-        sed "s|{SQUAD_ROOT}|$SCRIPT_DIR|g" "$SETTINGS_EXAMPLE" > "$SETTINGS_FILE"
+        # sed は clone 先パス ($SCRIPT_DIR) に & | " 等の特殊文字が含まれると壊れるため
+        # python3/json で置換する。テンプレート自体は {SQUAD_ROOT} を含む plain な
+        # 文字列のまま json.load でパースし、パース後の Python オブジェクトツリー上で
+        # 文字列置換してから json.dump で書き戻す（生テキストに対する置換だと、置換後の
+        # パスに " が含まれる場合 JSON の引用符と衝突して invalid JSON になるため、
+        # 必ずパース後に置換すること — json.dump が改めて正しくエスケープする）
+        SETTINGS_EXAMPLE_PATH="$SETTINGS_EXAMPLE" SETTINGS_FILE_PATH="$SETTINGS_FILE" SQUAD_ROOT_PATH="$SCRIPT_DIR" python3 -c "
+import json
+import os
+
+src = os.environ['SETTINGS_EXAMPLE_PATH']
+dst = os.environ['SETTINGS_FILE_PATH']
+root = os.environ['SQUAD_ROOT_PATH']
+
+def substitute(obj):
+    if isinstance(obj, str):
+        return obj.replace('{SQUAD_ROOT}', root)
+    if isinstance(obj, list):
+        return [substitute(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: substitute(v) for k, v in obj.items()}
+    return obj
+
+with open(src, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+data = substitute(data)
+with open(dst, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=4, ensure_ascii=False)
+    f.write('\n')
+" || {
+            echo "エラー: settings.local.json.example の生成に失敗しました（python3/json を確認してください）"
+            exit 1
+        }
     else
         echo "エラー: $SETTINGS_FILE も $SETTINGS_EXAMPLE も見つかりません。"
         echo "  .claude/settings.local.json.example を確認してください。"

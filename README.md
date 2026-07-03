@@ -23,6 +23,8 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
    足したい場合）は生成後の `.claude/settings.local.json` を直接編集すればよい。
 3. `./start.sh <workspace_path>` で起動
 
+初期 allowlist (`.claude/settings.local.json.example`) は起動に必要な最小セットです。`git push` や `gh api` 等の追加権限が必要になった場合は、利用者が `.claude/settings.local.json` に明示的に追記してください。
+
 ## 構成
 
 ```
