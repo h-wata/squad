@@ -55,22 +55,26 @@ Dispatcher は「これに従って動け」と意図している。
   カバーしているケースが多い）
 - 矛盾が大きい場合は report の issues に書いて Dispatcher に確認
 
-## プロジェクト知識の参照と蓄積 (kioku-mesh, 必読)
+## プロジェクト知識の参照と蓄積 (kioku-mesh)
 
-ループが毎回ゼロから推測しないよう、プロジェクト知識は共有メモリ kioku-mesh に集約する。
+**kioku-mesh 等のメモリ MCP が設定されている場合のみ実行する。設定が無ければこの節全体を
+スキップしてよい。** ループが毎回ゼロから推測しないよう、設定されている環境では
+プロジェクト知識を共有メモリ kioku-mesh に集約する。
 
-### 着手前: 必ず引く
-task YAML を読んだら、**実装に入る前に** kioku-mesh で当該 PJ の知識を確認する:
+### 着手前: 引けるなら引く
+kioku-mesh が使える場合、task YAML を読んだら**実装に入る前に** kioku-mesh で当該 PJ の
+知識を確認するとよい:
 - `search_memory(project="<project>", limit=30)` で規約 / build・test 手順 / 既知の落とし穴 /
   設計不変条件を引く（語句クエリは現状 FTS が不安定なので、まず project 指定の一覧で引く）。
 - 関連しそうな件は `get_memory(observation_id=...)` で全文を読む。
-- 得た build/test コマンドや「やってはいけない」を必ず守る（再発明・規約違反をしない）。
+- 得た build/test コマンドや「やってはいけない」があれば守る（再発明・規約違反をしない）。
 
 ### 作業中/完了時: 学びを保存する
-非自明な学びが出たら **その場で** `save_observation` する（後回しにしない）:
+kioku-mesh が使える場合、非自明な学びが出たら**その場で** `save_observation` するとよい
+（後回しにしない）:
 - バグの根本原因 → `memory_type=bug` / 規約・命名・構造・手順の確立 → `pattern`
 - 設計判断 → `decision` / 設定変更の理由 → `config`
-- `project="<project>"` を必ず付ける。importance は PJ 全体に効くもの = 4-5。
+- `project="<project>"` を付ける。importance は PJ 全体に効くもの = 4-5。
 - 既存知識を更新する場合は `supersedes=[古いid]` で繋ぐ（kioku-mesh は append-only）。
 - identity 引数 (user_id/agent_family 等) は渡さない（サーバー側解決, ADR-0004）。
 - PR/Issue ライフサイクルや「テスト通った」等の定型は保存しない（ノイズ回避）。
@@ -155,12 +159,12 @@ tmux send-keys -t ros-agents:0.0 Enter
 ## 作業の進め方
 
 1. **タスク確認**: YAML の内容を正確に把握 (project, agent, acceptance_criteria, verify)
-2. **知識確認**: kioku-mesh で当該 PJ の規約・手順・落とし穴を引く (上記「プロジェクト知識」参照)
+2. **知識確認**: kioku-mesh 等のメモリ MCP が使えれば、当該 PJ の規約・手順・落とし穴を引く (上記「プロジェクト知識」参照。未設定ならスキップ)
 3. **作業実行**: 指示内容を実行
 4. **結果確認**: 期待通りの結果か確認
 5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
 6. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
-7. **知識保存**: 非自明な学びを kioku-mesh に save_observation
+7. **知識保存**: kioku-mesh 等が使えれば、非自明な学びを save_observation (未設定ならスキップ)
 8. **通知**: Dispatcher に完了通知
 
 ## Cross-review タスクの扱い
@@ -187,14 +191,12 @@ approve しても自動 merge しない（ユーザー手動）。
 - 不明点は Dispatcher に質問（report YAML の issues に記載して通知）
 - 長時間タスクは中間報告
 - エラーは詳細を issues に
-- 繰り返しパターン・規約・落とし穴を発見したら kioku-mesh に save_observation (上記参照)
+- 繰り返しパターン・規約・落とし穴を発見したら、kioku-mesh 等のメモリ MCP が使えれば save_observation (上記参照。未設定ならスキップ)
 
-## PDFサマリー優先参照ルール
+## PJ 固有の参照ルール
 
-ROBO-HI 関連 PDF は必ず先にサマリー参照:
-1. サマリーがなければ `/survey` で作成
-2. サマリーから必要ページ特定
-3. 必要ならページ指定 (`pages: "XX-YY"`) で PDF 原本のみ読む
+特定 PJ にだけ適用される参照ルール（例: 「特定ドキュメントは要約を先に読む」等）は
+このファイルではなく各 PJ の `context/project.md` に書く。
 
 ## コンテキスト管理ルール
 
@@ -203,7 +205,7 @@ ROBO-HI 関連 PDF は必ず先にサマリー参照:
 - 20% 以下なら `/clear` (次タスク通知を待つ)
 
 **タスク実行中:**
-- PDF 原本の代わりに `pdf_summary_*.md`
+- 大きな入力ファイル（PDF 等）の原本の代わりに要約ファイル（`*_summary.md` 等）を使う
 - 10% 以下で `/clear` → 中間報告後に続行
 
 ## モデル切り替えルール
