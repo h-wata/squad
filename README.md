@@ -3,6 +3,28 @@
 tmux 上で Claude Code (複数) + Codex CLI を並行稼働させ、Dispatcher 1体がタスクを
 YAML で振り分けて進捗を回すマルチエージェント開発環境。
 
+## Prerequisites
+
+- **tmux** — 各エージェントの pane を管理する。ディストリのパッケージマネージャで
+  インストール可（例: `apt install tmux`）。公式: https://github.com/tmux/tmux
+- **Claude Code CLI (`claude`)** — Dispatcher / Worker 1-3 に必須。
+  https://docs.claude.com/en/docs/claude-code
+- **Codex CLI (`codex`)** — Worker 4 (Codex 担当) を使う場合のみ必須。使わない場合は
+  `start.sh` の Pane 6 起動部分を省略してよい。
+- **Python 3** — `squad/squad.py` は標準ライブラリのみで動作し、追加パッケージの
+  インストールは不要。
+
+### 初回セットアップ
+
+1. `git clone` する
+2. `.claude/settings.local.json.example` は手動コピー不要。`./start.sh` の初回起動時に
+   自動生成される（`{SQUAD_ROOT}` プレースホルダは実パスに置換される）。カスタマイズ
+   したい場合（例: 追加で参照したい他リポジトリのパスを `additionalDirectories` に
+   足したい場合）は生成後の `.claude/settings.local.json` を直接編集すればよい。
+3. `./start.sh <workspace_path>` で起動
+
+初期 allowlist (`.claude/settings.local.json.example`) は起動に必要な最小セットです。`git push` や `gh api` 等の追加権限が必要になった場合は、利用者が `.claude/settings.local.json` に明示的に追記してください。
+
 ## 構成
 
 ```

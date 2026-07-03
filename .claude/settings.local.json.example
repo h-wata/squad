@@ -1,0 +1,56 @@
+{
+    "hooks": {
+        "Notification": [
+            {
+                "hooks": [
+                    {
+                        "command": "{SQUAD_ROOT}/scripts/hooks/on-event.sh",
+                        "timeout": 5,
+                        "type": "command"
+                    }
+                ],
+                "matcher": ""
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "command": "{SQUAD_ROOT}/scripts/hooks/on-event.sh",
+                        "timeout": 5,
+                        "type": "command"
+                    }
+                ],
+                "matcher": ""
+            }
+        ],
+        "StopFailure": [
+            {
+                "hooks": [
+                    {
+                        "command": "{SQUAD_ROOT}/scripts/hooks/on-event.sh",
+                        "timeout": 5,
+                        "type": "command"
+                    }
+                ],
+                "matcher": ""
+            }
+        ]
+    },
+    "permissions": {
+        "additionalDirectories": [],
+        "allow": [
+            "Bash(chmod:*)",
+            "Bash(tmux list-sessions:*)",
+            "Bash(tmux send-keys:*)",
+            "Bash(tmux capture-pane:*)",
+            "Bash(grep:*)",
+            "Bash(find:*)",
+            "Bash(ls:*)",
+            "Bash(python3:*)",
+            "Bash(git commit:*)",
+            "Bash(git add:*)",
+            "Bash(gh pr view:*)"
+        ]
+    }
+}
