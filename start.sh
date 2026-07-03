@@ -119,6 +119,15 @@ WORKER_MD_Q="$(printf '%q' "$SCRIPT_DIR/instructions/worker.md")"
 CODEX_MD_Q="$(printf '%q' "$SCRIPT_DIR/instructions/worker-codex.md")"
 SQUAD_ROOT_ARG_Q="$(printf '%q' "SQUAD_ROOT=$SCRIPT_DIR")"
 
+# tmux send-keys が pane に送るコマンド行そのものに埋め込まれる $SCRIPT_DIR / $WORKSPACE
+# / settings ファイルパスも、render_prompt.py 引数と同様に printf '%q' で
+# エスケープしてから使う（raw のままだと & | " ; や改行を含むパスで pane 側シェルの
+# パースが壊れる）。%q の出力はそれ自体で shell-safe な1トークンなので、
+# 埋め込み側で追加の \"..\" 二重引用符化はしない。
+SCRIPT_DIR_Q="$(printf '%q' "$SCRIPT_DIR")"
+WORKSPACE_Q="$(printf '%q' "$WORKSPACE")"
+SETTINGS_FILE_Q="$(printf '%q' "$SETTINGS_FILE")"
+
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "既存のセッション '$SESSION_NAME' を終了します..."
@@ -155,30 +164,30 @@ tmux select-pane -t "$SESSION_NAME:0.5" -T "Aux-Shell"
 tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
 
 # Terminal (Pane 4) は汎用シェル
-tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE && echo 'Terminal ready - $WORKSPACE'" Enter
+tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
 
 # Aux-Shell (Pane 5) は汎用シェル
-tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE && echo 'Aux-Shell ready (SSH 等の汎用利用)'" Enter
+tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready (SSH 等の汎用利用)'" Enter
 
 # Pane 0: Dispatcher (Claude, スクリプトディレクトリで起動)
 # instructions/*.md 内の {SQUAD_ROOT} プレースホルダは起動時に実パスへ展開する
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR && claude --allowedTools \"$DISPATCHER_TOOLS\" --add-dir \"$WORKSPACE\" --settings \"$SCRIPT_DIR/.claude/settings.local.json\" --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && claude --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
 # 無指定でも $TMUX_PANE → config.json 逆引きで動くが、明示する方が確実。
 # --settings: worker の cwd が任意の WORKSPACE のため、project hooks が読まれない。
 #   SCRIPT_DIR/.claude/settings.local.json を明示ロードして squad の hook を有効化。
-tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE && SQUAD_WORKER_ID=w1 claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --settings \"$SCRIPT_DIR/.claude/settings.local.json\" --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE && SQUAD_WORKER_ID=w2 claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --settings \"$SCRIPT_DIR/.claude/settings.local.json\" --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE && SQUAD_WORKER_ID=w3 claude --allowedTools \"$WORKER_TOOLS\" --add-dir \"$SCRIPT_DIR\" --settings \"$SCRIPT_DIR/.claude/settings.local.json\" --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w1 claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w2 claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q)\"" Enter
 
 # Pane 6: Worker 4 (Codex, ワークスペースで起動)
 # Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
 # --dangerously-bypass-approvals-and-sandbox: tmux 内の信頼環境で完全自律実行 (承認なし)。
 #   tmux send-keys / gh / git push 等が無確認で通り、毎ステップの承認待ち停止を解消する。
 # SQUAD_WORKER_ID は Codex の hook 機構があれば squad と連携するための識別子 (将来用、Claude hook には未対応)。
-tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE --add-dir $SCRIPT_DIR --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
 
 # 監視デーモン (watcher) をバックグラウンド起動
 #   - worker の report YAML を検知して Dispatcher へ自動橋渡し (send-keys 抜けの保険)
