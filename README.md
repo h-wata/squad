@@ -76,6 +76,7 @@ tmux attach -t myproj
 | `instructions/dispatcher.md` / `worker.md` / `worker-codex.md` | 各エージェントの役割定義。Claude には `--append-system-prompt`、Codex (W4) には同等フラグが無いため初期プロンプトとして渡す |
 | `queue/projects/<project>/` | PJ 単位のタスク/報告 YAML 置き場 |
 | `dashboard.md` / `dashboards/<project>.md` | 全体 index / PJ 別の進捗ダッシュボード |
+| `.claude/agents/dashboard-updater.md` | report 受領後に dashboard.md / dashboards/<pj>.md を更新するサブエージェント (haiku) |
 
 ## squad CLI
 
