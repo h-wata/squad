@@ -1,0 +1,47 @@
+# タスク指示テンプレート
+# コピーして queue/projects/<project>/tasks/worker{N}.yaml として使用する。
+# 詳細な運用ルールは instructions/dispatcher.md、最小形の例は README.md 参照。
+
+# 例: TASK-001 (PJ 内で一意な連番)
+task_id: TASK-XXX
+# 例: my-app (queue/projects/<project>/ のディレクトリ名と一致させる)
+project: <project>
+# worker1 / worker2 / worker3 (Claude) / worker4 (Codex)
+assigned_to: worker1
+# claude | codex
+agent: claude
+# なぜこの agent/worker に振ったか (判断ログとして必須)
+routing_reason: "実装メインのため Claude"
+# Claude 時のみ: opus / sonnet / haiku。Codex (worker4) 時は無視される
+model: "sonnet"
+# critical / high / medium / low
+priority: medium
+title: "タスクのタイトル"
+description: |
+  タスクの詳細説明をここに記述。
+  - 具体的な要件
+  - 期待される成果物
+  - 参考にすべき既存ファイル・過去タスクがあれば明記
+acceptance_criteria:
+  - 完了条件1
+  - 完了条件2
+# コード変更タスクは必須。省略時 (非コードタスク) は worker 側で
+# report.yaml の verify_status: skipped とする
+verify:
+  commands:
+    # 例: worktree 内で実走可能なコマンドを列挙
+    - "pytest tests/ -q"
+    - "ruff check ."
+  # 期待される結果を一言で
+  expect: "all pass, lint clean"
+  # fail 時に worker が自力で直して再検証する上限回数 (既定 3)
+  max_attempts: 3
+context:
+  # 例: 専用 git worktree の絶対パス (並列タスクは共有 main worktree 禁止)
+  workspace: "{WORK_DIR}/<project>-wt-<feature>"
+  # 例: 42 (GitHub Issue 番号があれば。無ければ null)
+  parent_issue: null
+  # 例: ["/safe-pathspec-commit", "/inherit-wip"]
+  recommended_skills: []
+# ISO8601形式
+created_at: "2026-01-01T10:00:00+09:00"
