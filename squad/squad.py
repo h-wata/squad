@@ -37,8 +37,12 @@ CAPTURE_TAIL_LINES = 25
 
 
 def resolve_session(cfg: dict) -> str:
-    """Tmux session 名解決: SQUAD_SESSION env → config.json の 'session' キー →既定 'ros-agents'."""
-    return os.environ.get('SQUAD_SESSION') or cfg.get('session') or 'ros-agents'
+    """Tmux session 名解決: SQUAD_SESSION env → 既定 'ros-agents'.
+
+    start.sh / stop.sh / watch.sh / notify-worker.sh と同じ優先順位に揃える
+    (config.json の 'session' キーは参照しない)。
+    """
+    return os.environ.get('SQUAD_SESSION') or 'ros-agents'
 
 
 def load_config() -> dict:
