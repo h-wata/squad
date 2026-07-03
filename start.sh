@@ -19,6 +19,54 @@ WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
 SESSION_NAME="ros-agents"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- fresh clone 対応: settings.local.json の自動生成 ---
+# .claude/settings.local.json は個人パス・MCP allow リストを含むため gitignore 対象。
+# fresh clone には存在しないため、無ければ .example から生成する。
+# (claude CLI は --settings に存在しないパスを渡すと即エラー終了するため必須)
+SETTINGS_FILE="$SCRIPT_DIR/.claude/settings.local.json"
+SETTINGS_EXAMPLE="$SCRIPT_DIR/.claude/settings.local.json.example"
+if [ ! -f "$SETTINGS_FILE" ]; then
+    if [ -f "$SETTINGS_EXAMPLE" ]; then
+        echo "初回起動: $SETTINGS_EXAMPLE から $SETTINGS_FILE を生成します（{SQUAD_ROOT} を実パスに置換）..."
+        mkdir -p "$(dirname "$SETTINGS_FILE")"
+        sed "s|{SQUAD_ROOT}|$SCRIPT_DIR|g" "$SETTINGS_EXAMPLE" > "$SETTINGS_FILE"
+    else
+        echo "エラー: $SETTINGS_FILE も $SETTINGS_EXAMPLE も見つかりません。"
+        echo "  .claude/settings.local.json.example を確認してください。"
+        exit 1
+    fi
+fi
+
+# --- fresh clone 対応: queue/ dashboards/ の scaffold ---
+# queue/ dashboards/ dashboard.md は .gitignore 対象のため fresh clone には存在しない。
+# queue/templates 配下の中身（task.yaml, report.yaml）はここでは生成しない（別管理）。
+mkdir -p "$SCRIPT_DIR/queue/projects" "$SCRIPT_DIR/queue/templates"
+mkdir -p "$SCRIPT_DIR/dashboards"
+if [ ! -f "$SCRIPT_DIR/dashboard.md" ]; then
+    cat > "$SCRIPT_DIR/dashboard.md" <<'DASHEOF'
+# マルチPJ ダッシュボード (Index)
+
+このファイルは全プロジェクトの俯瞰用 index。各 PJ の詳細は `dashboards/<project>.md` を参照。
+squad 起動時に自動生成された初期ファイルです。Dispatcher が実タスク開始時に更新します。
+
+## Worker ステータス
+
+| Worker | Pane | Agent | 現在のPJ | 状態 | 直近の完了タスク |
+|--------|------|-------|----------|------|------------|
+| Worker 1 | 1 | Claude (Sonnet) | - | 待機 | - |
+| Worker 2 | 2 | Claude (Sonnet) | - | 待機 | - |
+| Worker 3 | 3 | Claude (Sonnet) | - | 待機 | - |
+| Worker 4 | 6 | Codex | - | 待機 | - |
+DASHEOF
+fi
+
+# SQUAD_DRY_RUN=1: settings/scaffold の pre-flight のみ実行して tmux には触れずに終了
+# (fresh clone 検証・CI での再利用向け。既存の tmux 起動セッションを巻き込まずに検証できる)
+if [ "${SQUAD_DRY_RUN:-0}" = "1" ]; then
+    echo "SQUAD_DRY_RUN=1: pre-flight (settings/scaffold) のみ実行して終了します"
+    exit 0
+fi
+
 # 各エージェントのパーミッション設定
 # kioku-mesh MCP (共有プロジェクト知識) を摩擦なく使えるよう allowlist に含める
 KIOKU_TOOLS="mcp__kioku_mesh__search_memory mcp__kioku_mesh__get_memory mcp__kioku_mesh__save_observation"
