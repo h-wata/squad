@@ -1,7 +1,7 @@
 #!/bin/bash
 # Tmux マルチエージェントシステム終了スクリプト
 
-SESSION_NAME="ros-agents"
+SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
 
 echo "マルチエージェントシステムを終了します..."
 

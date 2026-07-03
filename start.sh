@@ -16,7 +16,7 @@ WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
     exit 1
 }
 
-SESSION_NAME="ros-agents"
+SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 各エージェントのパーミッション設定

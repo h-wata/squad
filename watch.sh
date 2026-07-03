@@ -12,7 +12,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSION="${SESSION_NAME:-ros-agents}"
+SESSION="${SQUAD_SESSION:-${SESSION_NAME:-ros-agents}}"
 QUEUE_DIR="$SCRIPT_DIR/queue"
 DISPATCHER="$SESSION:0.0"
 INTERVAL="${WATCH_INTERVAL:-15}"
