@@ -5,12 +5,17 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
 
 ## Prerequisites
 
+- **git** — このリポジトリの clone・worker のブランチ操作に必須。
 - **tmux** — 各エージェントの pane を管理する。ディストリのパッケージマネージャで
   インストール可（例: `apt install tmux`）。公式: https://github.com/tmux/tmux
+- **GitHub CLI (`gh`)** — worker が PR 作成・レビュー・`watch.sh` の Issue/PR/CI
+  discovery を行うために必須。https://cli.github.com/ 。`gh auth login` で認証済みで
+  あること。
 - **Claude Code CLI (`claude`)** — Dispatcher / Worker 1-3 に必須。
   https://docs.claude.com/en/docs/claude-code
 - **Codex CLI (`codex`)** — Worker 4 (Codex 担当) を使う場合のみ必須。使わない場合は
-  `start.sh` の Pane 6 起動部分を省略してよい。
+  `SQUAD_ENABLE_CODEX=0` を指定して起動すれば Pane 6 (Codex) を起動せずに済む
+  （詳細は下記「起動 / 終了」参照）。
 - **Python 3** — `squad/squad.py` は標準ライブラリのみで動作し、追加パッケージの
   インストールは不要。
 
@@ -21,7 +26,10 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
    自動生成される（`{SQUAD_ROOT}` プレースホルダは実パスに置換される）。カスタマイズ
    したい場合（例: 追加で参照したい他リポジトリのパスを `additionalDirectories` に
    足したい場合）は生成後の `.claude/settings.local.json` を直接編集すればよい。
-3. `./start.sh <workspace_path>` で起動
+3. `./start.sh <workspace_path>` で起動。`workspace_path` は Worker 1-3/4 が実際に
+   作業する対象リポジトリ（群）を置く親ディレクトリで、squad 自体のディレクトリとは
+   別の場所を指す（例: `~/work`）。Worker はこのディレクトリを起点に各タスクの
+   `context.workspace` (worktree 等) へ `cd` する。
 
 初期 allowlist (`.claude/settings.local.json.example`) は起動に必要な最小セットです。`git push` や `gh api` 等の追加権限が必要になった場合は、利用者が `.claude/settings.local.json` に明示的に追記してください。
 
@@ -46,6 +54,20 @@ Dispatcher はコードを書かない。ユーザー指示を受けて `queue/p
 ./start.sh <workspace_path>   # tmux session 起動 + watch.sh をバックグラウンド起動
 ./stop.sh                     # 全 pane 終了 + watch.sh 停止
 tmux attach -t ros-agents     # 再アタッチ
+```
+
+Codex CLI を使わない場合は Pane 6 (Worker 4/Codex) の起動自体をスキップできる:
+
+```bash
+SQUAD_ENABLE_CODEX=0 ./start.sh <workspace_path>   # 既定は 1 (Codex を起動する)
+```
+
+`watch.sh`（常駐監視デーモン）は `start.sh` が自動でバックグラウンド起動し、`stop.sh`
+が自動で停止する。個別に起動・停止したい場合（`start.sh` を介さない場合等）は:
+
+```bash
+./watch.sh &             # 手動起動 (SQUAD_SESSION 環境変数を見る。詳細は次節)
+pkill -f "$(pwd)/watch.sh"   # 手動停止
 ```
 
 ## tmux session 名のカスタマイズ
@@ -87,6 +109,12 @@ SQUAD_DISPATCHER_MODEL=sonnet ./start.sh <workspace_path>
 | `queue/projects/<project>/` | PJ 単位のタスク/報告 YAML 置き場 |
 | `dashboard.md` / `dashboards/<project>.md` | 全体 index / PJ 別の進捗ダッシュボード |
 | `.claude/agents/dashboard-updater.md` | report 受領後に dashboard.md / dashboards/<pj>.md を更新するサブエージェント (haiku) |
+| `.claude/agents/task-yaml-author.md` | Dispatcher が worker への task YAML を生成する際に使うサブエージェント定義 |
+| `.claude/agents/verifier.md` | worker の実装完了後、`verify:` ブロックを独立検証するサブエージェント定義 |
+
+`queue/templates/task.yaml` 等に登場する `{WORK_DIR}` プレースホルダは、各リポジトリの
+checkout / git worktree を置く親ディレクトリ（`{SQUAD_ROOT}` の親ディレクトリに相当）を指す。
+詳細は `.claude/agents/task-yaml-author.md` を参照。
 
 ## squad CLI
 
@@ -148,3 +176,8 @@ cp queue/templates/discovery.yaml queue/projects/<project>/discovery.yaml
 
 cross-review が必要になったら `queue/templates/review.yaml` を、通常の完了報告には
 `queue/templates/report.yaml` を、その都度 `queue/projects/<project>/reports/` にコピーして使う。
+
+`context/project.md` は PJ ごとにコピーするテンプレートではなく、リポジトリ直下に
+単一ファイルとして存在する運用ルールメモ。squad 全体（または現在動かしている PJ 群
+共通）の技術スタック・コーディング規約・設計決定など、Dispatcher/Worker が前提として
+知っておくべき内容を直接編集して書き込む。

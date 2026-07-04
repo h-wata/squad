@@ -7,7 +7,7 @@ set -e
 # 引数チェック
 if [ $# -lt 1 ]; then
     echo "使用方法: $0 <workspace_path>"
-    echo "例: $0 ~/my_ws"
+    echo "例: $0 ~/work"
     exit 1
 fi
 
@@ -18,6 +18,9 @@ WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
 
 SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SQUAD_ENABLE_CODEX=0 で Pane 6 (Worker 4 / Codex) の起動を丸ごとスキップできる
+# (codex CLI を使わない環境向け)。既定は 1 (従来通り Codex を起動)。
+ENABLE_CODEX="${SQUAD_ENABLE_CODEX:-1}"
 
 # --- fresh clone 対応: settings.local.json の自動生成 ---
 # .claude/settings.local.json は個人パス・MCP allow リストを含むため gitignore 対象。
@@ -156,7 +159,9 @@ tmux split-window -v -t "$SESSION_NAME:0.0"    # Pane 2
 tmux split-window -v -t "$SESSION_NAME:0.1"    # Pane 3
 tmux split-window -v -t "$SESSION_NAME:0.2"    # Pane 4
 tmux split-window -v -t "$SESSION_NAME:0.3"    # Pane 5
-tmux split-window -v -t "$SESSION_NAME:0.4"    # Pane 6
+if [ "$ENABLE_CODEX" = "1" ]; then
+    tmux split-window -v -t "$SESSION_NAME:0.4"    # Pane 6 (Codex)
+fi
 
 # レイアウトを調整
 tmux select-layout -t "$SESSION_NAME:0" tiled
@@ -168,7 +173,9 @@ tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
 tmux select-pane -t "$SESSION_NAME:0.5" -T "Aux-Shell"
-tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
+if [ "$ENABLE_CODEX" = "1" ]; then
+    tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
+fi
 
 # Terminal (Pane 4) は汎用シェル
 tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
@@ -194,7 +201,10 @@ tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 cla
 # --dangerously-bypass-approvals-and-sandbox: tmux 内の信頼環境で完全自律実行 (承認なし)。
 #   tmux send-keys / gh / git push 等が無確認で通り、毎ステップの承認待ち停止を解消する。
 # SQUAD_WORKER_ID は Codex の hook 機構があれば squad と連携するための識別子 (将来用、Claude hook には未対応)。
-tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+# SQUAD_ENABLE_CODEX=0 の場合、codex CLI を使わない環境向けに Pane 6 自体を起動しない。
+if [ "$ENABLE_CODEX" = "1" ]; then
+    tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+fi
 
 # 監視デーモン (watcher) をバックグラウンド起動
 #   - worker の report YAML を検知して Dispatcher へ自動橋渡し (send-keys 抜けの保険)
