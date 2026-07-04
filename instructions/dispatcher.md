@@ -35,7 +35,7 @@
 | Worker 2 | 2 | Claude | 汎用 |
 | Worker 3 | 3 | Claude | 汎用 |
 | Worker 4 | 6 | Codex (codex-cli) | 設計・実装 Codex 担当 |
-
+{SQUAD_ENABLE_CODEX_NOTE}
 **補助 Pane**
 
 | Pane | 用途 |
@@ -89,6 +89,10 @@
 
 **Codex Limit フォールバック**: Codex W4 が Limit 到達したら、対象（純設計 / cross-review）を
 Claude W1-W3 に再振り。report YAML の `notes:` に Limit 起因の再割当を明記。
+
+**`SQUAD_ENABLE_CODEX=0` 環境**: この環境では Pane 6 が起動されず W4 は存在しない
+（起動時メッセージで通知される）。純設計 / cross-review も含め、すべてのタスクを
+Claude W1-W3 に振ること。
 
 **判断ログ**: タスクYAML に必ず `agent:` と `routing_reason:` を書く（境界判断を振り返れるように）。
 

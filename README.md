@@ -62,6 +62,9 @@ Codex CLI を使わない場合は Pane 6 (Worker 4/Codex) の起動自体をス
 SQUAD_ENABLE_CODEX=0 ./start.sh <workspace_path>   # 既定は 1 (Codex を起動する)
 ```
 
+この場合 W4 (Worker 4/Codex) は起動されず、Dispatcher にもその旨が起動時メッセージで
+通知される（設計レビュー / cross-review も Claude W1-W3 に振る運用になる）。
+
 `watch.sh`（常駐監視デーモン）は `start.sh` が自動でバックグラウンド起動し、`stop.sh`
 が自動で停止する。個別に起動・停止したい場合（`start.sh` を介さない場合等）は:
 
