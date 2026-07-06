@@ -21,6 +21,13 @@
 
 ### Fixed
 
+- fresh clone 実走テスト (SQUAD-011) で見つかった onboarding friction を修正
+  (SQUAD-012): Prerequisites に `gh`/`git` を明記、`context/project.md` の
+  単一テンプレート運用を README/`instructions/worker.md` に整合、`start.sh` に
+  `SQUAD_ENABLE_CODEX`（既定 1）を追加し Pane 6/Codex 起動をスキップ可能に、
+  README のコンポーネント表に `task-yaml-author.md`/`verifier.md` と
+  `{WORK_DIR}` の定義を追加、`workspace_path` の説明追記と usage 例の非ROS化、
+  `watch.sh` の自動/手動起動・停止の説明を一箇所に整理。
 - `instructions/worker-codex.md` の kioku-mesh 節が「必読」と書かれ、他の指示書
   (`instructions/worker.md` 等) と異なり未設定環境でのスキップ条件が書かれていなかった
   不整合を修正。設定が無ければスキップしてよい旨を明記。

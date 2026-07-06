@@ -289,6 +289,12 @@ while true; do
             continue
         fi
 
+        # pane が存在しない場合 (例: SQUAD_ENABLE_CODEX=0 で Pane 6/W4 が無い) は
+        # capture-pane が空を返し続けて停止通報ループに入るため、このサイクルはスキップする。
+        if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -qx "$pane"; then
+            continue
+        fi
+
         cap="$(tmux capture-pane -p -t "$pane" 2>/dev/null | tail -n 40)"
 
         # 承認プロンプトがあれば自動受理

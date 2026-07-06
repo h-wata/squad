@@ -7,7 +7,7 @@ set -e
 # 引数チェック
 if [ $# -lt 1 ]; then
     echo "使用方法: $0 <workspace_path>"
-    echo "例: $0 ~/my_ws"
+    echo "例: $0 ~/work"
     exit 1
 fi
 
@@ -18,6 +18,9 @@ WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
 
 SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SQUAD_ENABLE_CODEX=0 で Pane 6 (Worker 4 / Codex) の起動を丸ごとスキップできる
+# (codex CLI を使わない環境向け)。既定は 1 (従来通り Codex を起動)。
+ENABLE_CODEX="${SQUAD_ENABLE_CODEX:-1}"
 
 # --- fresh clone 対応: settings.local.json の自動生成 ---
 # .claude/settings.local.json は個人パス・MCP allow リストを含むため gitignore 対象。
@@ -74,11 +77,16 @@ fi
 # queue/templates 配下の中身（task.yaml, report.yaml）はここでは生成しない（別管理）。
 mkdir -p "$SCRIPT_DIR/queue/projects" "$SCRIPT_DIR/queue/templates"
 mkdir -p "$SCRIPT_DIR/dashboards"
+if [ "$ENABLE_CODEX" = "1" ]; then
+    WORKER4_ROW="| Worker 4 | 6 | Codex | - | 待機 | - |"
+else
+    WORKER4_ROW="| Worker 4 | 6 | Codex | - | 無効 (SQUAD_ENABLE_CODEX=0) | - |"
+fi
 if [ ! -f "$SCRIPT_DIR/dashboard.md" ]; then
-    cat > "$SCRIPT_DIR/dashboard.md" <<'DASHEOF'
+    cat > "$SCRIPT_DIR/dashboard.md" <<DASHEOF
 # マルチPJ ダッシュボード (Index)
 
-このファイルは全プロジェクトの俯瞰用 index。各 PJ の詳細は `dashboards/<project>.md` を参照。
+このファイルは全プロジェクトの俯瞰用 index。各 PJ の詳細は \`dashboards/<project>.md\` を参照。
 squad 起動時に自動生成された初期ファイルです。Dispatcher が実タスク開始時に更新します。
 
 ## Worker ステータス
@@ -88,7 +96,7 @@ squad 起動時に自動生成された初期ファイルです。Dispatcher が
 | Worker 1 | 1 | Claude (Sonnet) | - | 待機 | - |
 | Worker 2 | 2 | Claude (Sonnet) | - | 待機 | - |
 | Worker 3 | 3 | Claude (Sonnet) | - | 待機 | - |
-| Worker 4 | 6 | Codex | - | 待機 | - |
+$WORKER4_ROW
 DASHEOF
 fi
 
@@ -135,6 +143,16 @@ SETTINGS_FILE_Q="$(printf '%q' "$SETTINGS_FILE")"
 DISPATCHER_MODEL="${SQUAD_DISPATCHER_MODEL:-opus}"
 DISPATCHER_MODEL_Q="$(printf '%q' "$DISPATCHER_MODEL")"
 
+# dispatcher.md の {SQUAD_ENABLE_CODEX_NOTE} プレースホルダ用。
+# SQUAD_ENABLE_CODEX=0 のときのみ、Pane 6 (W4) が存在しない旨を Dispatcher の
+# system prompt に埋め込む (既定=1 の場合は空文字で何も追記しない)。
+if [ "$ENABLE_CODEX" = "1" ]; then
+    DISPATCHER_CODEX_NOTE=""
+else
+    DISPATCHER_CODEX_NOTE="この環境では Codex W4 は無効です (SQUAD_ENABLE_CODEX=0)。設計レビュー / cross-review も Claude W1-W3 に振ってください。"
+fi
+DISPATCHER_CODEX_NOTE_ARG_Q="$(printf '%q' "SQUAD_ENABLE_CODEX_NOTE=$DISPATCHER_CODEX_NOTE")"
+
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "既存のセッション '$SESSION_NAME' を終了します..."
@@ -156,7 +174,9 @@ tmux split-window -v -t "$SESSION_NAME:0.0"    # Pane 2
 tmux split-window -v -t "$SESSION_NAME:0.1"    # Pane 3
 tmux split-window -v -t "$SESSION_NAME:0.2"    # Pane 4
 tmux split-window -v -t "$SESSION_NAME:0.3"    # Pane 5
-tmux split-window -v -t "$SESSION_NAME:0.4"    # Pane 6
+if [ "$ENABLE_CODEX" = "1" ]; then
+    tmux split-window -v -t "$SESSION_NAME:0.4"    # Pane 6 (Codex)
+fi
 
 # レイアウトを調整
 tmux select-layout -t "$SESSION_NAME:0" tiled
@@ -168,7 +188,9 @@ tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
 tmux select-pane -t "$SESSION_NAME:0.5" -T "Aux-Shell"
-tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
+if [ "$ENABLE_CODEX" = "1" ]; then
+    tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
+fi
 
 # Terminal (Pane 4) は汎用シェル
 tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
@@ -178,7 +200,7 @@ tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 
 # Pane 0: Dispatcher (Claude, スクリプトディレクトリで起動)
 # instructions/*.md 内の {SQUAD_ROOT} プレースホルダは起動時に実パスへ展開する
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
@@ -194,7 +216,10 @@ tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 cla
 # --dangerously-bypass-approvals-and-sandbox: tmux 内の信頼環境で完全自律実行 (承認なし)。
 #   tmux send-keys / gh / git push 等が無確認で通り、毎ステップの承認待ち停止を解消する。
 # SQUAD_WORKER_ID は Codex の hook 機構があれば squad と連携するための識別子 (将来用、Claude hook には未対応)。
-tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+# SQUAD_ENABLE_CODEX=0 の場合、codex CLI を使わない環境向けに Pane 6 自体を起動しない。
+if [ "$ENABLE_CODEX" = "1" ]; then
+    tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q)\"" Enter
+fi
 
 # 監視デーモン (watcher) をバックグラウンド起動
 #   - worker の report YAML を検知して Dispatcher へ自動橋渡し (send-keys 抜けの保険)
@@ -218,7 +243,11 @@ echo "  Pane 2: Worker 2 (Claude)"
 echo "  Pane 3: Worker 3 (Claude)"
 echo "  Pane 4: Terminal (汎用シェル)"
 echo "  Pane 5: Aux-Shell (汎用 SSH 等)"
-echo "  Pane 6: Worker 4 (Codex, 設計・cross-review 担当)"
+if [ "$ENABLE_CODEX" = "1" ]; then
+    echo "  Pane 6: Worker 4 (Codex, 設計・cross-review 担当)"
+else
+    echo "  Pane 6: (無効 — SQUAD_ENABLE_CODEX=0。設計・cross-review は Claude W1-W3 に振ってください)"
+fi
 echo ""
 echo "接続コマンド: tmux attach -t $SESSION_NAME"
 echo "終了コマンド: ./stop.sh"

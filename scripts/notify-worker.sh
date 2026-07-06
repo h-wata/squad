@@ -64,7 +64,11 @@ TARGET="${SESSION}:${PANE}"
 
 # pane の存在確認
 if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -qx "$TARGET"; then
-  echo "pane not found: $TARGET (session=$SESSION)。tmux 起動済みか確認してください。" >&2
+  if [ "$IS_CODEX" -eq 1 ]; then
+    echo "W4 は無効化されています (SQUAD_ENABLE_CODEX=0 で起動された可能性があります)。設計レビュー / cross-review は Claude W1-W3 に振ってください。" >&2
+  else
+    echo "pane not found: $TARGET (session=$SESSION)。tmux 起動済みか確認してください。" >&2
+  fi
   exit 1
 fi
 
