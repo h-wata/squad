@@ -8,7 +8,7 @@
 #   3. 停止検知: タスク未報告かつ pane 無変化が続いたら Dispatcher へ通報。
 #
 # 起動: start.sh が nohup で自動起動。手動: ./watch.sh &
-# 設定 (env): WATCH_INTERVAL(s) / WATCH_STALL_CYCLES / WATCH_BOOT_DELAY(s)
+# 設定 (env): WATCH_INTERVAL(s) / WATCH_STALL_CYCLES / WATCH_STALL_RESUME_CYCLES / WATCH_BOOT_DELAY(s)
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +17,7 @@ QUEUE_DIR="$SCRIPT_DIR/queue"
 DISPATCHER="$SESSION:0.0"
 INTERVAL="${WATCH_INTERVAL:-15}"
 STALL_CYCLES="${WATCH_STALL_CYCLES:-4}"   # 無変化がこの回数続いたら停止疑い (既定: 15s*4=60s)
+STALL_RESUME_CYCLES="${WATCH_STALL_RESUME_CYCLES:-2}"  # 再停止再通報の解禁に必要な連続活動再開サイクル数 (既定: 15s*2=30s。初回停止判定60sの半分、かつ1サイクルの偶然の揺れでは解禁されない値)
 BOOT_DELAY="${WATCH_BOOT_DELAY:-12}"      # agent 起動待ち
 DISCOVERY_INTERVAL="${WATCH_DISCOVERY_INTERVAL:-900}"  # 仕事の発見走査の間隔 (既定 15分)
 DISCOVERY_MAX="${WATCH_DISCOVERY_MAX:-10}"             # 1サイクルで inbox に積む新規上限
@@ -235,8 +236,9 @@ declare -A REPORT_SEEN     # report path -> mtime
 declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
+declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
 
-log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
+log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
 sleep "$BOOT_DELAY"
 
 FIRST=1
@@ -286,6 +288,7 @@ while true; do
 
         if [ "$pending" -eq 0 ]; then
             PANE_STALL[$N]=0
+            RESUME_COUNT[$N]=0
             continue
         fi
 
@@ -310,9 +313,19 @@ while true; do
         h="$(printf '%s' "$cap" | cksum | cut -d' ' -f1)"
         if [ "${PANE_HASH[$N]:-}" = "$h" ]; then
             PANE_STALL[$N]=$(( ${PANE_STALL[$N]:-0} + 1 ))
+            RESUME_COUNT[$N]=0
         else
             PANE_HASH[$N]="$h"
             PANE_STALL[$N]=0
+            # 通報済みタスクのみ再開カウントを進める (未通報タスクでは無駄にカウントしない)
+            if [ -n "${STALL_NOTIFIED[$N]:-}" ] && [ "${STALL_NOTIFIED[$N]}" = "$task_m" ]; then
+                RESUME_COUNT[$N]=$(( ${RESUME_COUNT[$N]:-0} + 1 ))
+                if [ "${RESUME_COUNT[$N]}" -ge "$STALL_RESUME_CYCLES" ]; then
+                    unset "STALL_NOTIFIED[$N]"
+                    RESUME_COUNT[$N]=0
+                    log "Worker${N}: 活動再開を検知 → 再停止時の再通報を有効化"
+                fi
+            fi
         fi
 
         if [ "${PANE_STALL[$N]}" -ge "$STALL_CYCLES" ] && [ "${STALL_NOTIFIED[$N]:-}" != "$task_m" ]; then
