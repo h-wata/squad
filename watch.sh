@@ -8,7 +8,7 @@
 #   3. 停止検知: タスク未報告かつ pane 無変化が続いたら Dispatcher へ通報。
 #
 # 起動: start.sh が nohup で自動起動。手動: ./watch.sh &
-# 設定 (env): WATCH_INTERVAL(s) / WATCH_STALL_CYCLES / WATCH_BOOT_DELAY(s)
+# 設定 (env): WATCH_INTERVAL(s) / WATCH_STALL_CYCLES / WATCH_STALL_RESUME_CYCLES / WATCH_BOOT_DELAY(s)
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -288,6 +288,7 @@ while true; do
 
         if [ "$pending" -eq 0 ]; then
             PANE_STALL[$N]=0
+            RESUME_COUNT[$N]=0
             continue
         fi
 
