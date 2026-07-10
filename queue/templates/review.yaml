@@ -18,6 +18,11 @@ pr_url: ""
 pr_head_sha: ""
 # approve / approve_with_comments / request_changes
 verdict: approve_with_comments
+# 必須: pass | fail | skipped
+# コード変更を伴う PR のレビューで検証を実走した場合は pass/fail、
+# 設計レビューやドキュメントのみなど非コードレビューで機械検証を
+# 行わなかった場合は skipped とする
+verify_status: skipped
 # 指摘事項のリスト。無ければ空配列
 findings:
   - severity: minor
