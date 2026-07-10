@@ -12,3 +12,6 @@ dashboards/*
 
 # PoC reports (内部ネットワーク IP / 個人ホスト名を含むため public 化非対象)
 docs/poc-reports/
+
+# CodeGraph local index (ローカル生成物、commit 不要)
+.codegraph/
