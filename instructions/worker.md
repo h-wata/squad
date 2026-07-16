@@ -110,9 +110,14 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
    - **result: pass** → 報告プロトコルへ。`status: completed`、`verify_status: pass`。
    - **result: fail / inconclusive** → verdict の `recommendations` / `unmet_acceptance_criteria`
      を読み、**自分で修正** → verifier を `attempt+1` で再起動。
+     修正に入る前に `systematic-debugging` skill（利用可能な場合）に従うこと:
+     当てずっぽうのパッチを積まず、根本原因を特定してから単一の修正を入れる。
 3. これを **最大 `verify.max_attempts`（既定 3）回**まで繰り返す。
    - 3 回試して pass しなければ諦め、`status: blocked`、`verify_status: fail` で報告し、
      `notes` に verdict の絶対パスと残課題を記載する。watch.sh が human inbox に回す。
+   - **3 回失敗は仮説の失敗ではなく設計起因のサインであることが多い。** blocked 報告の
+     `notes` には「試した仮説」と「なぜアーキテクチャ起因と考えるか」も書く。それが
+     次の担当者（人間 or 再発注 worker）の調査の出発点になる。
 
 `verify:` ブロックが無いタスク（ドキュメント整理等）は `verify_status: skipped` とし、
 このゲートは省略してよい。
