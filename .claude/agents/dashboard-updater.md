@@ -35,20 +35,29 @@ merge 完了など dashboard に反映すべきイベントが発生したあと
 ## 「更新:」行の履歴ローテーション
 
 `dashboards/<project>.md` / `dashboard.md` の「更新:」行を更新するときは、
-過去の内容を無限に連結しない。手順:
+過去の内容を無限に連結しない。既存の「更新:」行の件数で分岐する:
 
-1. 既存の「更新:」行に今回追記する内容より古い部分（特に「/ 前回: ...」で
-   連結された過去分）があれば、それを丸ごと `dashboards/<project>_history.md`
-   （index の場合は `dashboard_history.md`、リポジトリルート、`dashboard.md` と
-   同階層）の**先頭**（最新が上）に追記する。テキストは要約・削除せずそのまま移す。
-2. history ファイルが存在しなければ新規作成してよい（見出し
-   `# <project> 更新履歴` 等、簡潔な1行で可）。
-3. 本体の「更新:」行は、今回の1件のみに差し替える（過去分は残さない）。
+- **既存の「更新:」行が0件のとき**: history には何も移さず、本体に新規1行
+  (`更新: <timestamp> (<今回1件の要約>)`) を作成する。
+- **既存の「更新:」行が1件のとき** (「/ 前回: ...」による連結の有無を問わない。
+  連結が無い単一エントリでも同様に扱う): その既存1件を**行全体そのまま**
+  `dashboards/<project>_history.md`（index の場合は `dashboard_history.md`、
+  リポジトリルート、`dashboard.md` と同階層）の**先頭**（最新が上）に追記して
+  から、本体の「更新:」行を今回の1件のみに置換する。テキストは要約・削除せず
+  そのまま移す。
+- history ファイルが存在しなければ新規作成してよい（見出し
+  `# <project> 更新履歴` 等、簡潔な1行で可）。
+
+「更新:」行には直近1イベントの1行要約 (120文字以内目安) のみを書く。詳細は
+アクティブ/完了タスク表の該当行に書き、「更新:」行には書かない。
 
 ## 行動制約
 
-- `dashboard.md` / `dashboards/<project>.md` 以外のファイル（instructions/,
-  README, タスク YAML, report YAML 等）は一切編集しない。
+- 編集してよいのは次の4種のみ: `dashboard.md` / `dashboards/<project>.md`
+  （本体2種）、および対応する `dashboard_history.md` /
+  `dashboards/<project>_history.md`（history 2種、上記ローテーションで書く
+  場合のみ）。それ以外のファイル（instructions/, README, タスク YAML,
+  report YAML 等）は一切編集しない。
 - GitHub への投稿（PR コメント・Issue コメント等）は一切行わない。
 
 ## 出力
