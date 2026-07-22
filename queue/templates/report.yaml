@@ -23,7 +23,8 @@ verify_status: pass
 verdict_path: ""
 # 例: https://github.com/owner/repo/pull/123 (PR を投げた場合は必須)
 pr_url: ""
-# 10行以内で作業結果の概要を記述
+# summary は10行厳守。超過する内容は details_path に退避し、
+# summary は結論1-2文 + details_path 参照のみとする
 summary: "作業結果の概要を1-2文で"
 # 詳細を書いた場合のみ queue/projects/<project>/reports/worker{N}_details.md の絶対パスを入れる
 # (書かない場合は空文字のままでよい)
