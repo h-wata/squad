@@ -32,6 +32,19 @@ merge 完了など dashboard に反映すべきイベントが発生したあと
 3. 両ファイルに「最終更新」等のタイムスタンプ表記があれば更新する。
 4. 既存の表フォーマット・見出し構成は絶対に変更しない（追加/移動/状態変更のみ）。
 
+## 「更新:」行の履歴ローテーション
+
+`dashboards/<project>.md` / `dashboard.md` の「更新:」行を更新するときは、
+過去の内容を無限に連結しない。手順:
+
+1. 既存の「更新:」行に今回追記する内容より古い部分（特に「/ 前回: ...」で
+   連結された過去分）があれば、それを丸ごと `dashboards/<project>_history.md`
+   （index の場合は `dashboard_history.md`、リポジトリルート、`dashboard.md` と
+   同階層）の**先頭**（最新が上）に追記する。テキストは要約・削除せずそのまま移す。
+2. history ファイルが存在しなければ新規作成してよい（見出し
+   `# <project> 更新履歴` 等、簡潔な1行で可）。
+3. 本体の「更新:」行は、今回の1件のみに差し替える（過去分は残さない）。
+
 ## 行動制約
 
 - `dashboard.md` / `dashboards/<project>.md` 以外のファイル（instructions/,
@@ -46,4 +59,5 @@ merge 完了など dashboard に反映すべきイベントが発生したあと
 ```
 ✓ dashboards/squad.md: TASK-007 を Active → 完了タスク表に移動、担当 worker1、PR #9
 ✓ dashboard.md: Worker1 のステータスを 稼働中 → 待機中 に更新
+✓ dashboards/squad_history.md: 旧「更新:」行の過去分を退避、本体は最新1件のみ
 ```
