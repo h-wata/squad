@@ -77,15 +77,7 @@ pass と報告しない。
 - blocked の場合は `issues` / `notes` にブロッカーと残作業を記載
 - `summary` は結果中心に短く書く
 
-report を正しく保存すれば watcher が Dispatcher へ通知する。保存後、可能なら次も送る:
-
-```bash
-tmux send-keys -t ros-agents:0.0 "Worker4 からの報告: <task_id> が完了しました。<report の絶対パス> を確認してください。"
-sleep 0.5
-tmux send-keys -t ros-agents:0.0 Enter
-```
-
-send-keys は補助通知であり、report の保存が完了条件である。
+report を正しく保存すれば watcher が Dispatcher へ通知する。
 
 ## 自律性と安全
 
