@@ -257,6 +257,14 @@ NOT-READY（CONFLICTING / 重複コミット / CI 未トリガー）なら、reb
 Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 / タイムスタンプ等）
 を渡すだけにし、自分で `dashboard.md` / `dashboards/<project>.md` を直接 Edit しない。
 
+### 「更新:」行のフォーマット制約
+
+更新: 行は直近1イベントの1行要約 (120文字以内目安) のみとする。過去の
+「前回: ...」を連結してはいけない。過去履歴は `dashboards/<project>_history.md`
+(index の場合は `dashboard_history.md`) に追記し、本体の「更新:」行は常に
+最新1件のみを残す。イベントが増えるたびに本体ファイルが肥大化し、Dispatcher の
+セッション開始時の固定読み込みコストが際限なく増えるのを防ぐため。
+
 ## モデル選択ガイドライン (Claude 用)
 
 | モデル | 判断基準 | 例 |
