@@ -163,7 +163,7 @@ details_path への参照のみを書く。
 
 report を正しい場所 (`queue/projects/<project>/reports/worker{N}_report.yaml`)
 に保存すれば、`watch.sh` が自動的に検知して Dispatcher に届ける。手動での
-send-keys 通知は不要。
+追加連絡は不要（`tmux send-keys` を自分で叩く必要はない）。
 
 ## 作業の進め方
 
