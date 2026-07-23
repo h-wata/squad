@@ -101,9 +101,14 @@ description: |
       {WORK_DIR}/<repo>-wt-<key> origin/main
   fi
   cd {WORK_DIR}/<repo>-wt-<key>
-  # codegraph index を構築 (CLI が無い/失敗する環境では fail-soft でスキップ可)
+  # codegraph index を構築/更新 (CLI が無い/失敗する環境では fail-soft でスキップ可)
   if command -v codegraph >/dev/null 2>&1; then
-    codegraph init -i || echo "codegraph init failed, skipping (non-fatal)"
+    if [ -d .codegraph ]; then
+      # 既存 worktree 再利用: init -i は "Already initialized" で再indexしないため sync を使う
+      codegraph sync || echo "codegraph sync failed, continuing (non-fatal)"
+    else
+      codegraph init -i || echo "codegraph init failed, continuing (non-fatal)"
+    fi
   else
     echo "codegraph CLI not found, skipping index init (non-fatal)"
   fi

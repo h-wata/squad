@@ -27,7 +27,8 @@
   計時源・境界演算子統一 + advisor 確認）を追加。
 - `task-yaml-author.md` の worktree セットアップ (Step 0) テンプレートに
   codegraph index 構築手順を追記し、以後発行されるタスクの worktree で
-  `.codegraph/` が自動的に init されるようにした（CLI が無い/失敗する
+  `.codegraph/` が未初期化なら `codegraph init -i` で自動的に init、既存 worktree
+  再利用時は `codegraph sync` で index を更新するようにした（CLI が無い/失敗する
   環境では fail-soft でスキップ）。
 
 ### Fixed
