@@ -18,6 +18,13 @@
   ある PJ のみ読み、`search_memory` の `limit` を 30→10 に削減 (`instructions/dispatcher.md`)。
 - Dispatcher 起動モデルのデフォルトを sonnet から opus に変更（曖昧指示の明確化を優先する
   ユーザー判断）。
+- squad 運用のトークン消費監査 (ORCH-005) の上位提案5件を実装 (ORCH-006):
+  `dashboard.md`/`dashboards/<pj>.md` の「更新:」行を直近1件のみ保持し過去履歴を
+  `*_history.md` にローテーションする運用を明文化・`dashboard-updater` サブエージェントに
+  実装、worker 側の report 保存後の手動 send-keys 通知を廃止して `watch.sh` 自動通知に一本化、
+  `report.yaml` の `summary` 10行厳守と超過時の `details_path` 必須化を強化、
+  Plan/設計文書の cross-review 提出前 author セルフチェックリスト（時間上限・優先順位・
+  計時源・境界演算子統一 + advisor 確認）を追加。
 
 ### Fixed
 

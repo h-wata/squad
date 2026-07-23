@@ -4,6 +4,7 @@ queue/*
 output/
 __pycache__/
 dashboard.md
+dashboard_history.md
 dashboards/*
 !dashboards/_template.md
 

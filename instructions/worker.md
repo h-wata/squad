@@ -122,6 +122,18 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
 `verify:` ブロックが無いタスク（ドキュメント整理等）は `verify_status: skipped` とし、
 このゲートは省略してよい。
 
+## Plan/設計文書レビュー提出前のセルフチェック
+
+Plan/設計文書を Codex の cross-review に出す前に、author 自身で以下を確認する:
+
+1. 待機・継続処理すべてに時間上限（タイムアウト）が明記されているか
+2. 複数条件が同時成立した場合の優先順位・タイブレークルールが明記されているか
+3. 計時源（monotonic clock / wall clock）が明記されているか
+4. 境界演算子（`>=` / `>` / `<=` / `<`）が文書全体で統一されているか
+
+提出直前に advisor へ「見落としている境界条件・タイムアウト・優先順位の欠落は
+ないか」を1回尋ね、指摘があれば反映してから提出する。
+
 ## 報告プロトコル
 
 タスク完了後、`queue/projects/<project>/reports/worker{N}_report.yaml` に報告作成:
@@ -145,17 +157,17 @@ completed_at: "2026-05-18T12:00:00"
 
 テンプレート: `queue/templates/report.yaml`
 
-## Dispatcher への通知方法
+`summary` は10行厳守。超過する場合は `details_path` に詳細ファイル
+(`worker{N}_details.md`)を分離して置き、`summary` には結論1-2文と
+details_path への参照のみを書く。
 
-報告完了後:
+report を正しい場所 (`queue/projects/<project>/reports/worker{N}_report.yaml`)
+に保存すれば、`watch.sh` が自動的に検知して Dispatcher に届ける。手動での
+追加連絡は不要（`tmux send-keys` を自分で叩く必要はない）。
 
-```bash
-tmux send-keys -t ros-agents:0.0 "Worker{N}からの報告: タスク TASK-001 が完了しました。{SQUAD_ROOT}/queue/projects/<project>/reports/worker{N}_report.yaml を確認してください。"
-sleep 0.5
-tmux send-keys -t ros-agents:0.0 Enter
-```
-
-絶対パス必須 (Dispatcher の cwd が違うため)。
+report の Dispatcher への到達は `watch.sh` に依存する（単一障害点）。`watch.sh`
+が停止していると report が届かない。`start.sh` 起動時に `watch.sh` が稼働して
+いるか確認し、停止していれば再起動すること。
 
 ## 作業の進め方
 
@@ -166,7 +178,7 @@ tmux send-keys -t ros-agents:0.0 Enter
 5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
 6. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
 7. **知識保存**: kioku-mesh 等が使えれば、非自明な学びを save_observation (未設定ならスキップ)
-8. **通知**: Dispatcher に完了通知
+8. **通知**: report 保存で watch.sh が自動的に Dispatcher へ届ける (手動通知不要)
 
 ## Cross-review タスクの扱い
 
