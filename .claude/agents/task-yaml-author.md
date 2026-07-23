@@ -89,6 +89,8 @@ description: |
   {WORK_DIR}/<repo>-wt-<key>
 
   ### Step 0: worktree セットアップ
+  worktree 作成後に codegraph index も構築する（レビュー時の構造検索用。
+  CLI が無い/失敗する環境では fail-soft でスキップして良い）。
   ```bash
   cd {WORK_DIR}/<repo>
   git fetch origin main
@@ -99,6 +101,12 @@ description: |
       {WORK_DIR}/<repo>-wt-<key> origin/main
   fi
   cd {WORK_DIR}/<repo>-wt-<key>
+  # codegraph index を構築 (CLI が無い/失敗する環境では fail-soft でスキップ可)
+  if command -v codegraph >/dev/null 2>&1; then
+    codegraph init -i || echo "codegraph init failed, skipping (non-fatal)"
+  else
+    echo "codegraph CLI not found, skipping index init (non-fatal)"
+  fi
   ```
 
   ## branch / push 方針

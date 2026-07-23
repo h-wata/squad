@@ -25,6 +25,10 @@
   `report.yaml` の `summary` 10行厳守と超過時の `details_path` 必須化を強化、
   Plan/設計文書の cross-review 提出前 author セルフチェックリスト（時間上限・優先順位・
   計時源・境界演算子統一 + advisor 確認）を追加。
+- `task-yaml-author.md` の worktree セットアップ (Step 0) テンプレートに
+  codegraph index 構築手順を追記し、以後発行されるタスクの worktree で
+  `.codegraph/` が自動的に init されるようにした（CLI が無い/失敗する
+  環境では fail-soft でスキップ）。
 
 ### Fixed
 
