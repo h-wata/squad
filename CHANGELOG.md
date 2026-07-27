@@ -30,6 +30,19 @@
   `.codegraph/` が未初期化なら `codegraph init -i` で自動的に init、既存 worktree
   再利用時は `codegraph sync` で index を更新するようにした（CLI が無い/失敗する
   環境では fail-soft でスキップ）。
+- Dispatcher 指示書を Opus 5 前提にチューニング (`instructions/dispatcher.md`):
+  「報告スタイル」節を新設して冗長化・過剰な実況・不要な訂正narrationを抑制、
+  サブエージェントを `task-yaml-author` / `dashboard-updater` の 2 つに限定、
+  冒頭に「スコープの原則」を追加してタスクの勝手な膨張を抑止、`/compact` を
+  「5 タスクごと」から「残量 20% 未満」に変更（1M context で長期一貫性が保たれるため
+  予防 compact はむしろ状態を失う）、worker のモデル選択基準を「難しさ」から
+  「規模（触るファイル数・横断範囲）」に変更し複数ファイル横断の実装は opus を
+  指定するようにした。`task-yaml-author` にも同じ `model:` 選択基準を追記。
+  あわせて cross-review (PR #18) 指摘対応として、`task-yaml-author` の返却サマリに
+  `model:` 行を必須化し（Dispatcher は生成 YAML を読まないため、書かないと
+  `notify-worker.sh --model` に渡す値が伝わらず YAML の宣言と実モデルがズレる）、
+  「スコープの原則」に watcher 由来の自動発見候補は対象外である旨を明記した
+  （Discovery / Triage の起票ループを止めないため）。
 
 ### Fixed
 

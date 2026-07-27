@@ -61,9 +61,28 @@ Dispatcher: 以下が不足しているため task YAML を生成できません
    ✓ {SQUAD_ROOT}/queue/projects/my-app/tasks/worker2.yaml
    - task_id: TASK-186
    - title: Issue #75 _extras side-channel
+   - model: opus            # claude worker のときは必ず記載する
    - worktree: {WORK_DIR}/my-app-wt-issue75
    - branch: fix/issue-75-forward-compat-extras
    ```
+
+   **`model:` は claude worker のとき必ずサマリに含める。** Dispatcher は生成された
+   YAML を読まない運用なので、ここに書かないと `notify-worker.sh --model <model>` に
+   渡す値が Dispatcher に伝わらず、YAML の宣言と実際の worker のモデルがズレる。
+
+## `model:` の選び方（claude worker のみ）
+
+判断軸は「難しさ」ではなく **タスクの規模（触るファイル数・横断範囲）**。
+Dispatcher から明示指定があればそれに従う。無ければ自分で判断する。
+
+| model | 判断基準 |
+|-------|----------|
+| opus | 複数ファイル横断の実装・大規模リファクタ・複雑バグ調査・仕様書 |
+| sonnet | 単一〜数ファイルの実装・調査・整理（既定） |
+| haiku | 用語統一・typo など単純定型 |
+
+規模が小さければ難易度が高くても sonnet で足りる。逆に「既存構造を壊して組み直す」
+規模なら迷わず opus。
 
 ## task YAML テンプレート構造（必須）
 
@@ -74,7 +93,7 @@ task_id: TASK-<連番>
 project: <project>
 assigned_to: worker<N>
 agent: claude | codex
-model: "sonnet"  # claude のみ。codex は項目省略
+model: "sonnet"  # claude のみ (opus|sonnet|haiku)。codex は項目省略。選び方は下記
 author_agent: codex  # codex の場合のみ
 routing_reason: "..."  # 必須
 priority: high | medium | low
