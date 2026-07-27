@@ -38,6 +38,11 @@
   予防 compact はむしろ状態を失う）、worker のモデル選択基準を「難しさ」から
   「規模（触るファイル数・横断範囲）」に変更し複数ファイル横断の実装は opus を
   指定するようにした。`task-yaml-author` にも同じ `model:` 選択基準を追記。
+  あわせて cross-review (PR #18) 指摘対応として、`task-yaml-author` の返却サマリに
+  `model:` 行を必須化し（Dispatcher は生成 YAML を読まないため、書かないと
+  `notify-worker.sh --model` に渡す値が伝わらず YAML の宣言と実モデルがズレる）、
+  「スコープの原則」に watcher 由来の自動発見候補は対象外である旨を明記した
+  （Discovery / Triage の起票ループを止めないため）。
 
 ### Fixed
 

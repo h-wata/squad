@@ -61,9 +61,14 @@ Dispatcher: 以下が不足しているため task YAML を生成できません
    ✓ {SQUAD_ROOT}/queue/projects/my-app/tasks/worker2.yaml
    - task_id: TASK-186
    - title: Issue #75 _extras side-channel
+   - model: opus            # claude worker のときは必ず記載する
    - worktree: {WORK_DIR}/my-app-wt-issue75
    - branch: fix/issue-75-forward-compat-extras
    ```
+
+   **`model:` は claude worker のとき必ずサマリに含める。** Dispatcher は生成された
+   YAML を読まない運用なので、ここに書かないと `notify-worker.sh --model <model>` に
+   渡す値が Dispatcher に伝わらず、YAML の宣言と実際の worker のモデルがズレる。
 
 ## `model:` の選び方（claude worker のみ）
 
