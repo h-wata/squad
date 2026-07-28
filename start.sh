@@ -164,22 +164,27 @@ echo "マルチエージェントシステムを起動します..."
 # 新しいセッションを作成（Pane 0: Dispatcher）
 tmux new-session -d -s "$SESSION_NAME" -x 220 -y 60
 
-# Pane を追加して 4 列構成を作る (合計 7 pane)
-# 配置 (tiled 後にレイアウト自動調整):
-#   Pane 0: Dispatcher | Pane 1: Worker 1 | Pane 4: Terminal
-#   Pane 2: Worker 2   | Pane 3: Worker 3 | Pane 5: Aux-Shell
-#                                          | Pane 6: Worker 4 (Codex)
-tmux split-window -h -t "$SESSION_NAME:0"      # Pane 1
-tmux split-window -v -t "$SESSION_NAME:0.0"    # Pane 2
-tmux split-window -v -t "$SESSION_NAME:0.1"    # Pane 3
-tmux split-window -v -t "$SESSION_NAME:0.2"    # Pane 4
-tmux split-window -v -t "$SESSION_NAME:0.3"    # Pane 5
+# Pane を追加して 7 pane 構成を作る (Codex 無効時は 6 pane)
+# 配置は tiled レイアウトが決める。ペイン番号はレイアウト上の並び順
+# (左上から右へ、次の行へ) に一致する:
+#   Pane 0: Dispatcher | Pane 1: Worker 1 | Pane 2: Worker 2
+#   Pane 3: Worker 3   | Pane 4: Terminal | Pane 5: Aux-Shell
+#   Pane 6: Worker 4 (Codex)
+#
+# 重要: 分割ごとに tiled を掛け直すこと。tmux は分割のたびにペイン番号を
+# レイアウト順で振り直すため、"0.1" のようなインデックス指定は狙ったペインを
+# 指さず、実際には同じ列を半分ずつ割り続ける。60 行から 6 回半分にすると
+# 2 行まで縮んで 6 個目の分割が "no space for new pane" で失敗する。
+# 1 分割ごとに tiled で均等化すれば、どの pane も分割可能な高さを保てる。
 if [ "$ENABLE_CODEX" = "1" ]; then
-    tmux split-window -v -t "$SESSION_NAME:0.4"    # Pane 6 (Codex)
+    SPLIT_COUNT=6
+else
+    SPLIT_COUNT=5
 fi
-
-# レイアウトを調整
-tmux select-layout -t "$SESSION_NAME:0" tiled
+for _ in $(seq 1 "$SPLIT_COUNT"); do
+    tmux split-window -v -t "$SESSION_NAME:0"
+    tmux select-layout -t "$SESSION_NAME:0" tiled >/dev/null
+done
 
 # Pane タイトル
 tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
