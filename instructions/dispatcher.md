@@ -198,7 +198,8 @@ task-yaml-author に渡した場合はその値を、task-yaml-author に選ば�
   同一コマンドに `"text" Enter` とまとめるとバグる。
 - `/model` 切替直後にタスク通知を送ると **drop する**。切替の Enter 後に
   **`sleep 2.5` 以上**を入れてから本文を送る (`sleep 1` では足りない)。
-- pane: W1=`ros-agents:0.1` W2=`0.2` W3=`0.3` Codex W4=`0.6` (0.4/0.5 は worker ではない)。
+- pane: W1=`{SQUAD_SESSION}:0.1` W2=`0.2` W3=`0.3` Codex W4=`0.6` (0.4/0.5 は worker ではない)。
+  自分の tmux session は `{SQUAD_SESSION}`。**他の session (別 Squad) の pane には絶対に send-keys しない。**
 - Codex (W4) には `/model` も `/clear` も無い。タスク通知のみ。
 
 ## 報告受け取り
