@@ -90,9 +90,9 @@ kioku-mesh が使える場合、非自明な学びが出たら**その場で** `
 **重要**: メッセージと Enter は 2 回に分けて送信。
 
 ```bash
-tmux send-keys -t ros-agents:0.{N} "{command}"
+tmux send-keys -t {SQUAD_SESSION}:0.{N} "{command}"
 sleep 0.3
-tmux send-keys -t ros-agents:0.{N} Enter
+tmux send-keys -t {SQUAD_SESSION}:0.{N} Enter
 ```
 
 ## 検証ゲート（report 前の必須ステップ）

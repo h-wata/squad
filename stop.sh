@@ -1,15 +1,51 @@
 #!/bin/bash
 # Tmux マルチエージェントシステム終了スクリプト
+#
+# 使い方: ./stop.sh [session_name]
+#   session_name > SQUAD_SESSION env > 既定 ros-agents の順で対象を決める。
+#   複数 Squad 並行運用時は必ず引数か env で対象セッションを明示すること。
 
-SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
+SESSION_NAME="${1:-${SQUAD_SESSION:-ros-agents}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "マルチエージェントシステムを終了します..."
+echo "マルチエージェントシステムを終了します... (session: $SESSION_NAME)"
 
-# 監視デーモン (watcher) を停止
-if pkill -f "$SCRIPT_DIR/watch.sh" 2>/dev/null; then
-    echo "watcher を停止しました。"
+# 引数も env も無しで複数の squad watcher が動いている場合は誤爆防止で確認を求める
+if [ -z "${1:-}" ] && [ -z "${SQUAD_SESSION:-}" ]; then
+    running=$(pgrep -cf "$SCRIPT_DIR/watch.sh" 2>/dev/null || echo 0)
+    if [ "$running" -gt 1 ]; then
+        echo "警告: watcher が ${running} 個動いています (複数 Squad 並行運用中?)。"
+        echo "対象セッションを明示してください: ./stop.sh <session_name>"
+        echo "  実行中セッション:"
+        tmux list-sessions -F '    - #{session_name}' 2>/dev/null
+        exit 1
+    fi
 fi
+
+# 監視デーモン (watcher) を停止 — このセッションの watcher だけを対象にする。
+# pkill -f watch.sh は他セッションの watcher まで殺すため使わない。
+WATCH_PID_FILE="/tmp/${SESSION_NAME}-watch.pid"
+watcher_stopped=0
+if [ -f "$WATCH_PID_FILE" ]; then
+    pid=$(cat "$WATCH_PID_FILE")
+    if [ -n "$pid" ] && kill "$pid" 2>/dev/null; then
+        watcher_stopped=1
+    fi
+    rm -f "$WATCH_PID_FILE"
+fi
+if [ "$watcher_stopped" -eq 0 ]; then
+    # pidfile が無い/stale な場合のフォールバック: /proc environ で
+    # SQUAD_SESSION が一致する watch.sh プロセスだけを殺す
+    for pid in $(pgrep -f "$SCRIPT_DIR/watch.sh" 2>/dev/null); do
+        env_session=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+            | grep -m1 '^SQUAD_SESSION=' | cut -d= -f2)
+        [ -z "$env_session" ] && env_session="ros-agents"
+        if [ "$env_session" = "$SESSION_NAME" ] && kill "$pid" 2>/dev/null; then
+            watcher_stopped=1
+        fi
+    done
+fi
+[ "$watcher_stopped" -eq 1 ] && echo "watcher を停止しました。"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     # エージェント Pane (Dispatcher + Worker 1-3 + Codex Worker 4)

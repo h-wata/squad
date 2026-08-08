@@ -9,6 +9,11 @@
 #
 # 起動: start.sh が nohup で自動起動。手動: ./watch.sh &
 # 設定 (env): WATCH_INTERVAL(s) / WATCH_STALL_CYCLES / WATCH_STALL_RESUME_CYCLES / WATCH_BOOT_DELAY(s)
+#
+# 複数セッション並行運用 (SQUAD_SESSION を変えて start.sh を複数起動する場合):
+#   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
+#   report-bridge / 停止検知 / discovery はそのセッションの watcher だけが行う。
+#   マーカーが無い project は SQUAD_DEFAULT_OWNER (既定 ros-agents) の担当。
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,8 +27,18 @@ BOOT_DELAY="${WATCH_BOOT_DELAY:-12}"      # agent 起動待ち
 DISCOVERY_INTERVAL="${WATCH_DISCOVERY_INTERVAL:-900}"  # 仕事の発見走査の間隔 (既定 15分)
 DISCOVERY_MAX="${WATCH_DISCOVERY_MAX:-10}"             # 1サイクルで inbox に積む新規上限
 SWEEP_INTERVAL="${WATCH_SWEEP_INTERVAL:-14400}"        # 新規ゼロ時の周回レビュー間隔 (既定 4h)
-SEEN_FILE="$QUEUE_DIR/.discovery_seen"                 # 既知候補のキー集合 (再起動跨ぎで永続)
-INBOX_FILE="$QUEUE_DIR/_inbox.md"                      # triage inbox
+# 複数セッション並行運用: project ごとの担当セッションを queue/projects/<pj>/.squad_session
+# (1行のセッション名) で割り当てる。マーカーが無い project は DEFAULT_OWNER の担当。
+# 各 watcher は自分の担当 project しか監視しないため、通知が他セッションへ漏れない。
+DEFAULT_OWNER="${SQUAD_DEFAULT_OWNER:-ros-agents}"
+# discovery の seen/inbox もセッションごとに分離 (既定セッションは従来のファイル名を維持)
+if [ "$SESSION" = "$DEFAULT_OWNER" ]; then
+    SEEN_FILE="$QUEUE_DIR/.discovery_seen"             # 既知候補のキー集合 (再起動跨ぎで永続)
+    INBOX_FILE="$QUEUE_DIR/_inbox.md"                  # triage inbox
+else
+    SEEN_FILE="$QUEUE_DIR/.discovery_seen.$SESSION"
+    INBOX_FILE="$QUEUE_DIR/_inbox.$SESSION.md"
+fi
 GC_INTERVAL="${WATCH_GC_INTERVAL:-1800}"               # merged worktree GC の間隔 (既定 30分)
 WORKTREE_GLOB="${WATCH_WORKTREE_GLOB:-$(dirname "$SCRIPT_DIR")/*-wt-*}"  # GC 対象 worktree の glob (既定: リポジトリの親 dir)
 
@@ -66,9 +81,26 @@ auto_answer() {
 # float epoch 比較 a>b
 gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
 
+# このセッションが担当する project ディレクトリ一覧 (毎サイクル再計算し、実行中の
+# project 追加やマーカー変更にも追従する)。結果はグローバル配列 OWNED に入る。
+refresh_owned_projects() {
+    OWNED=()
+    local d owner
+    for d in "$QUEUE_DIR/projects"/*/; do
+        [ -d "$d" ] || continue
+        if [ -f "$d/.squad_session" ]; then
+            owner=$(head -n1 "$d/.squad_session" 2>/dev/null | tr -d '[:space:]')
+        else
+            owner="$DEFAULT_OWNER"
+        fi
+        [ "$owner" = "$SESSION" ] && OWNED+=("${d%/}")
+    done
+}
+
 newest_mtime() {
-    # 指定 find 述語にマッチするファイルの最新 mtime (epoch.float)。無ければ空。
-    find "$QUEUE_DIR/projects" "$@" -printf '%T@\n' 2>/dev/null | sort -nr | head -n1
+    # 担当 project 内で find 述語にマッチするファイルの最新 mtime (epoch.float)。無ければ空。
+    [ "${#OWNED[@]}" -eq 0 ] && return
+    find "${OWNED[@]}" "$@" -printf '%T@\n' 2>/dev/null | sort -nr | head -n1
 }
 
 # ---- Discovery: 定期的に仕事を発見 → triage inbox → Dispatcher 自動起票 ----
@@ -149,10 +181,10 @@ disc_todo() {
 }
 
 run_discovery() {
-    local cfgs
-    cfgs=$(find "$QUEUE_DIR/projects" -maxdepth 2 -name discovery.yaml 2>/dev/null)
+    local cfgs=""
+    [ "${#OWNED[@]}" -gt 0 ] && cfgs=$(find "${OWNED[@]}" -maxdepth 1 -name discovery.yaml 2>/dev/null)
     if [ -z "$cfgs" ]; then
-        log "discovery: 設定なし (queue/projects/*/discovery.yaml を置くと有効化)"
+        log "discovery: 設定なし (担当 project に discovery.yaml を置くと有効化)"
         return
     fi
     mkdir -p "$QUEUE_DIR"
@@ -232,6 +264,7 @@ gc_worktrees() {
     [ "$removed" -gt 0 ] && log "gc: ${removed} worktree を掛除 (skip ${skipped})"
 }
 
+OWNED=()                   # このセッション担当の project dir 一覧 (refresh_owned_projects が更新)
 declare -A REPORT_SEEN     # report path -> mtime
 declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
@@ -250,6 +283,8 @@ while true; do
         log "session '$SESSION' が無いので終了"
         break
     fi
+
+    refresh_owned_projects
 
     # --- 1. report-bridge: 新規/更新された report を Dispatcher へ橋渡し ---
     #   status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
@@ -270,7 +305,7 @@ while true; do
                 fi
             fi
         fi
-    done < <(find "$QUEUE_DIR/projects" \
+    done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null)
 
@@ -374,7 +409,9 @@ except Exception:
     fi
 
     # --- 5. worktree GC: merged+clean な専用 worktree を掛除 ---
-    if [ $(( now_ts - LAST_GC )) -ge "$GC_INTERVAL" ]; then
+    # glob ベースで project 単位に絞れないため、複数セッション並行時の重複実行を避けて
+    # 既定セッションの watcher だけが担当する。
+    if [ "$SESSION" = "$DEFAULT_OWNER" ] && [ $(( now_ts - LAST_GC )) -ge "$GC_INTERVAL" ]; then
         gc_worktrees
         LAST_GC="$now_ts"
     fi

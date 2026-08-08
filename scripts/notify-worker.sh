@@ -26,6 +26,19 @@ set -euo pipefail
 
 SESSION="${SQUAD_SESSION:-ros-agents}"
 
+# 誤爆ガード: SQUAD_SESSION 未設定のまま複数 Squad (watcher) が動いている場合、
+# 既定 ros-agents への送信は他 Squad の worker を壊す事故になるため中断する。
+# (2026-08-08: kiokumesh の Dispatcher が env 無しで ros-agents の W2 に送った実例あり)
+if [ -z "${SQUAD_SESSION:-}" ]; then
+  SCRIPT_DIR_="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  watcher_count=$(pgrep -cf "$SCRIPT_DIR_/watch.sh" 2>/dev/null || echo 0)
+  if [ "$watcher_count" -gt 1 ]; then
+    echo "エラー: SQUAD_SESSION が未設定で、watcher が ${watcher_count} 個動いています (複数 Squad 並行運用中)。" >&2
+    echo "SQUAD_SESSION=<自分の session> を付けて再実行してください。" >&2
+    exit 1
+  fi
+fi
+
 usage() {
   sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
