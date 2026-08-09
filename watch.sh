@@ -336,12 +336,8 @@ while true; do
             [ -n "${PREV_OWNED[$d]:-}" ] && continue
             NEWLY_OWNED_DIRS+=("$d")
             if [ -z "${EVER_OWNED[$d]:-}" ]; then
-                marker="$d/.squad_session"
-                if [ -f "$marker" ]; then
-                    cutoff="$(file_mtime "$marker")"
-                else
-                    cutoff="$(file_mtime "$d")"
-                fi
+                # 既読化カットオフ: .squad_session の mtime (無ければ project dir の mtime)
+                if [ -f "$d/.squad_session" ]; then cutoff="$(file_mtime "$d/.squad_session")"; else cutoff="$(file_mtime "$d")"; fi
                 NEWLY_OWNED_CUTOFF[$d]="${cutoff:-0}"
             fi
         done
