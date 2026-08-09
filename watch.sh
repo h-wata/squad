@@ -42,6 +42,18 @@ fi
 GC_INTERVAL="${WATCH_GC_INTERVAL:-1800}"               # merged worktree GC の間隔 (既定 30分)
 WORKTREE_GLOB="${WATCH_WORKTREE_GLOB:-$(dirname "$SCRIPT_DIR")/*-wt-*}"  # GC 対象 worktree の glob (既定: リポジトリの親 dir)
 
+# マーカー未設定 project の可視化 (起動時 1 回のみ)。フォールバック挙動自体は変えない。
+warn_missing_markers() {
+    local d name
+    for d in "$QUEUE_DIR/projects"/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        if [ ! -f "$d/.squad_session" ]; then
+            log "[WARN] project ${name} has no .squad_session marker; falling back to default owner ${DEFAULT_OWNER}"
+        fi
+    done
+}
+
 # worker 番号 -> tmux pane
 pane_for() {
     case "$1" in
@@ -270,8 +282,10 @@ declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
+declare -A PREV_OWNED      # 直前サイクルで担当していた project dir 集合 (新規担当検知用)
 
 log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
+warn_missing_markers
 sleep "$BOOT_DELAY"
 
 FIRST=1
@@ -286,13 +300,31 @@ while true; do
 
     refresh_owned_projects
 
+    # 新規に担当になった project (このサイクルで初めて OWNED になった) を検出。
+    # マーカー追加等で担当セッションが変わった直後、その project 配下の既存 report を
+    # 「既読」として初期化し、過去 report の一斉再通知を防ぐ (起動直後の全体 baseline は
+    # 既存の FIRST フラグで処理済みなのでここでは対象外)。
+    NEWLY_OWNED=()
+    if [ "$FIRST" -eq 0 ]; then
+        for d in "${OWNED[@]}"; do
+            [ -n "${PREV_OWNED[$d]:-}" ] || NEWLY_OWNED+=("$d")
+        done
+        for d in "${NEWLY_OWNED[@]}"; do
+            log "project $(basename "$d") が新規担当になったため既存 report を既読化 (再通知しない)"
+        done
+    fi
+
     # --- 1. report-bridge: 新規/更新された report を Dispatcher へ橋渡し ---
     #   status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         if [ "${REPORT_SEEN[$f]:-}" != "$m" ]; then
             REPORT_SEEN[$f]="$m"
-            if [ "$FIRST" -eq 0 ]; then
+            is_newly_owned=0
+            for d in "${NEWLY_OWNED[@]}"; do
+                case "$f" in "$d"/*) is_newly_owned=1; break ;; esac
+            done
+            if [ "$FIRST" -eq 0 ] && [ "$is_newly_owned" -eq 0 ]; then
                 wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
                 kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
                 status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
@@ -415,6 +447,10 @@ except Exception:
         gc_worktrees
         LAST_GC="$now_ts"
     fi
+
+    # 次サイクルの新規担当検知のため、今回の OWNED を記録
+    PREV_OWNED=()
+    for d in "${OWNED[@]}"; do PREV_OWNED[$d]=1; done
 
     FIRST=0
     sleep "$INTERVAL"

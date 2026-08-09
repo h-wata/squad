@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `watch.sh`: `.squad_session` マーカー未設定の project を起動時に1回だけ警告するように
+  し、無言フォールバックによる通知漏れを可視化。また、マーカー追加等で project の担当
+  セッションが切り替わった際、既存の完了済み report を既読扱いで初期化し、過去 report が
+  一斉に再通知される問題を修正 (SQUAD-016)。
+
 ### Added
 
 - `dashboard-updater` サブエージェントを追加し、dashboard 更新の定型作業を
