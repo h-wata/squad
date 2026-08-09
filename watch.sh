@@ -93,7 +93,24 @@ auto_answer() {
 # float epoch 比較 a>b
 gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
 
+# F2 対応: report (find %T@、小数秒) の既読化判定。marker 由来の cutoff (整数秒) と
+# 精度を揃えるため report 側の小数部を切り捨て、整数秒同士で比較する。同一秒は
+# 「握り潰し (気づけない)」より「再通知 (気づける)」の方が害が小さいという判断で
+# 通知側に倒し、report < cutoff (整数秒で真に古い) の場合のみ既読化 (suppress) する。
+# 副作用として、marker と同一秒に存在した古い report は最大1回だけ再通知される。
+should_suppress() {
+    local cutoff="$1" m="$2" m_int
+    [ -z "$cutoff" ] && return 1
+    m_int="${m%%.*}"
+    gt "$cutoff" "$m_int"
+}
+
 # ファイルの mtime (epoch秒, GNU/BSD 両対応)。取得できなければ空文字。
+# 整数秒のみ (report 側 mtime は find %T@ による小数秒であり精度が異なる。
+# 比較箇所では report 側を整数秒に切り捨てて揃えること。F2 参照)。
+# 既知の制約 (F3, 未修正): symlink には GNU `stat -c %Y` がリンク自身の mtime を
+# 返す (参照先ではない) ため、`.squad_session` を symlink にして参照先だけを
+# 差し替えると、ここで取得する mtime は更新されない。
 file_mtime() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
@@ -313,15 +330,32 @@ while true; do
     #
     # - このセッション(プロセス)がこれまで一度も担当したことが無い project
     #   (EVER_OWNED 未登録 = 初回担当): マーカーファイル (無ければ project dir 自体)
-    #   の mtime を既読化カットオフとし、それより古い report だけを既読化する。
+    #   の mtime を既読化カットオフとし、それより真に古い report だけを既読化する
+    #   (同一秒扱いは通知側に倒す。詳細は下の「既知の制約 (F2)」参照)。
     #   マーカー変更とほぼ同時 (同一サイクル内) に書かれた新規 report は mtime が
     #   カットオフより新しいため通常どおり通知される (PR #21 review major 対応)。
     # - 過去に一度でも担当したことがある project が再び担当に戻ってきた場合
-    #   (EVER_OWNED 登録済み): 既読化そのものを行わない。既に REPORT_SEEN に
-    #   記録済みで mtime が不変な report は元々再通知されないため二重通知の心配は
-    #   無く、他セッション担当中に書かれ未通知のまま残っている report を握り潰さない
-    #   ことを優先する (PR #21 review minor 対応)。
+    #   (EVER_OWNED 登録済み): 既読化そのものを行わない。このセッション自身が過去に
+    #   見た (REPORT_SEEN に記録済みで mtime が不変な) report は再通知されないが、
+    #   REPORT_SEEN はセッション(プロセス)ごとに分離したメモリ上の状態であり、
+    #   他セッションが通知済みかどうかまでは分からない。そのため「二重通知の心配は
+    #   無い」とは言えず、A→B→A のように担当が移った場合、B が担当中に発生し B が
+    #   既に通知済みの report を A が再び通知することがある (既知の制約、詳細は
+    #   下記 F1 参照)。それでも、他セッション担当中に書かれ未通知のまま残っている
+    #   report を握り潰さないことを優先し、既読化はスキップする (PR #21 review
+    #   minor 対応)。
     # 起動直後の全体 baseline は既存の FIRST フラグで処理済みなのでここでは対象外。
+    #
+    # 既知の制約 (未修正。PR #21 Codex cross-review 指摘、根本対応は別 Issue):
+    #   F1 (major, 上記参照): REPORT_SEEN はセッションごとに分離しており、通知済み
+    #     状態を watcher 間で共有する永続 ledger が無いため、A→B→A で B 通知済みの
+    #     report を A が再通知し得る (二重通知)。
+    #   F3 (minor): 既読化カットオフは `.squad_session` の mtime を「担当が切り替わった
+    #     時刻」の代理として使っているが、mtime は owner 変更時刻を正確には表さない。
+    #     `cp -p` や過去 mtime のファイルを `mv` して置換すると owner が変わっても
+    #     mtime は保持され、symlink 化して参照先だけ差し替えると GNU `stat -c %Y` は
+    #     symlink 自身の mtime を返すため cutoff が更新されない。時計ずれや保存された
+    #     未来 mtime がある場合は逆方向 (正当な report の握り潰し) にも倒れ得る。
     #
     # 残留リスク: マーカーファイルが「初回担当時点より後」に再度 touch/編集され、かつ
     # その直前に正当な新規 report が書かれてから watcher がまだそれを処理していない
@@ -354,7 +388,7 @@ while true; do
                 case "$f" in
                     "$d"/*)
                         cutoff="${NEWLY_OWNED_CUTOFF[$d]:-}"
-                        if [ -n "$cutoff" ] && ! gt "$m" "$cutoff"; then
+                        if should_suppress "$cutoff" "$m"; then
                             suppress=1
                             SUPPRESSED_COUNT[$d]=$(( ${SUPPRESSED_COUNT[$d]:-0} + 1 ))
                         fi
