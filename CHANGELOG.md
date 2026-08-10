@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `watch.sh`: `.squad_session` マーカー未設定の project を起動時に1回だけ警告するように
+  し、無言フォールバックによる通知漏れを可視化。また、マーカー追加等で project の担当
+  セッションが切り替わった際、既存の完了済み report を既読扱いで初期化し、過去 report が
+  一斉に再通知される問題を修正 (SQUAD-016)。
+- `watch.sh`: 上記の既読化ロジックが、マーカー変更とほぼ同時に書かれた正当な新規 report
+  や、担当が他セッションへ移り戻ってきた project の未通知 report まで握り潰してしまう
+  cross-review 指摘 (PR #21) に対応。既読化カットオフをマーカーファイルの mtime ベース
+  に変更し、このセッションが過去に一度でも担当した project は既読化そのものをスキップ
+  するようにした。なお、マーカー編集直後に正当な report が書かれてから watcher がまだ
+  それを処理していない状態でマーカーが再度編集されるという限定的な条件下では、既読化の
+  取りこぼしが理論上残る (詳細は watch.sh 内のコメント参照)。
+- `watch.sh`: marker (整数秒) と report (小数秒) の mtime 取得精度が揃っておらず、同一秒
+  境界で新規 report を握り潰す不具合を修正 (PR #21 Codex cross-review F2)。report 側の
+  mtime を整数秒に切り捨てて marker と同一精度で比較し、同一秒になった場合は既読化せず
+  通知する側に倒した。
+
+### Known limitations (既知の制約)
+
+- `watch.sh` の既読化カットオフは `REPORT_SEEN` (プロセスメモリのみ、セッションごとに
+  分離) と `.squad_session` の mtime (owner 変更時刻の代理) に依存しており、以下 2 点が
+  未解決のまま残っている (PR #21 Codex cross-review F1/F3。根本対応は別 Issue で追跡):
+  - **F1 (major)**: 通知済み状態がセッション間で共有されないため、project の担当が
+    A→B→A と切り替わると、B が担当中に発生し B が既に通知済みの report を A が復帰時に
+    再通知することがある (二重通知)。
+  - **F3 (minor)**: `.squad_session` の mtime は owner 変更時刻を正確には表さない
+    (`cp -p` や過去 mtime のファイルでの置換、symlink 化して参照先だけ差し替えるケース
+    など)。時計ずれや保存された未来 mtime がある場合、正当な report を握り潰す方向にも
+    倒れ得る。
+
 ### Added
 
 - `dashboard-updater` サブエージェントを追加し、dashboard 更新の定型作業を

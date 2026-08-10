@@ -42,6 +42,18 @@ fi
 GC_INTERVAL="${WATCH_GC_INTERVAL:-1800}"               # merged worktree GC の間隔 (既定 30分)
 WORKTREE_GLOB="${WATCH_WORKTREE_GLOB:-$(dirname "$SCRIPT_DIR")/*-wt-*}"  # GC 対象 worktree の glob (既定: リポジトリの親 dir)
 
+# マーカー未設定 project の可視化 (起動時 1 回のみ)。フォールバック挙動自体は変えない。
+warn_missing_markers() {
+    local d name
+    for d in "$QUEUE_DIR/projects"/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        if [ ! -f "$d/.squad_session" ]; then
+            log "[WARN] project ${name} has no .squad_session marker; falling back to default owner ${DEFAULT_OWNER}"
+        fi
+    done
+}
+
 # worker 番号 -> tmux pane
 pane_for() {
     case "$1" in
@@ -80,6 +92,28 @@ auto_answer() {
 
 # float epoch 比較 a>b
 gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
+
+# F2 対応: report (find %T@、小数秒) の既読化判定。marker 由来の cutoff (整数秒) と
+# 精度を揃えるため report 側の小数部を切り捨て、整数秒同士で比較する。同一秒は
+# 「握り潰し (気づけない)」より「再通知 (気づける)」の方が害が小さいという判断で
+# 通知側に倒し、report < cutoff (整数秒で真に古い) の場合のみ既読化 (suppress) する。
+# 副作用として、marker と同一秒に存在した古い report は最大1回だけ再通知される。
+should_suppress() {
+    local cutoff="$1" m="$2" m_int
+    [ -z "$cutoff" ] && return 1
+    m_int="${m%%.*}"
+    gt "$cutoff" "$m_int"
+}
+
+# ファイルの mtime (epoch秒, GNU/BSD 両対応)。取得できなければ空文字。
+# 整数秒のみ (report 側 mtime は find %T@ による小数秒であり精度が異なる。
+# 比較箇所では report 側を整数秒に切り捨てて揃えること。F2 参照)。
+# 既知の制約 (F3, 未修正): symlink には GNU `stat -c %Y` がリンク自身の mtime を
+# 返す (参照先ではない) ため、`.squad_session` を symlink にして参照先だけを
+# 差し替えると、ここで取得する mtime は更新されない。
+file_mtime() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
 
 # このセッションが担当する project ディレクトリ一覧 (毎サイクル再計算し、実行中の
 # project 追加やマーカー変更にも追従する)。結果はグローバル配列 OWNED に入る。
@@ -270,8 +304,14 @@ declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
+declare -A PREV_OWNED      # 直前サイクルで担当していた project dir 集合 (新規担当検知用)
+declare -A EVER_OWNED      # このセッション(プロセス)が過去に一度でも担当した project dir。
+                           # プロセス再起動で失われる (in-memory)。既読化カットオフの要否判定に使う。
+declare -A NEWLY_OWNED_CUTOFF  # 新規担当 project dir -> 既読化カットオフ mtime (毎サイクル再構築)
+declare -A SUPPRESSED_COUNT    # 新規担当 project dir -> 実際に既読化した report 件数 (毎サイクル再構築)
 
 log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
+warn_missing_markers
 sleep "$BOOT_DELAY"
 
 FIRST=1
@@ -286,13 +326,77 @@ while true; do
 
     refresh_owned_projects
 
+    # 新規に担当になった project (このサイクルで初めて OWNED になった) を検出。
+    #
+    # - このセッション(プロセス)がこれまで一度も担当したことが無い project
+    #   (EVER_OWNED 未登録 = 初回担当): マーカーファイル (無ければ project dir 自体)
+    #   の mtime を既読化カットオフとし、それより真に古い report だけを既読化する
+    #   (同一秒扱いは通知側に倒す。詳細は下の「既知の制約 (F2)」参照)。
+    #   マーカー変更とほぼ同時 (同一サイクル内) に書かれた新規 report は mtime が
+    #   カットオフより新しいため通常どおり通知される (PR #21 review major 対応)。
+    # - 過去に一度でも担当したことがある project が再び担当に戻ってきた場合
+    #   (EVER_OWNED 登録済み): 既読化そのものを行わない。このセッション自身が過去に
+    #   見た (REPORT_SEEN に記録済みで mtime が不変な) report は再通知されないが、
+    #   REPORT_SEEN はセッション(プロセス)ごとに分離したメモリ上の状態であり、
+    #   他セッションが通知済みかどうかまでは分からない。そのため「二重通知の心配は
+    #   無い」とは言えず、A→B→A のように担当が移った場合、B が担当中に発生し B が
+    #   既に通知済みの report を A が再び通知することがある (既知の制約、詳細は
+    #   下記 F1 参照)。それでも、他セッション担当中に書かれ未通知のまま残っている
+    #   report を握り潰さないことを優先し、既読化はスキップする (PR #21 review
+    #   minor 対応)。
+    # 起動直後の全体 baseline は既存の FIRST フラグで処理済みなのでここでは対象外。
+    #
+    # 既知の制約 (未修正。PR #21 Codex cross-review 指摘、根本対応は別 Issue):
+    #   F1 (major, 上記参照): REPORT_SEEN はセッションごとに分離しており、通知済み
+    #     状態を watcher 間で共有する永続 ledger が無いため、A→B→A で B 通知済みの
+    #     report を A が再通知し得る (二重通知)。
+    #   F3 (minor): 既読化カットオフは `.squad_session` の mtime を「担当が切り替わった
+    #     時刻」の代理として使っているが、mtime は owner 変更時刻を正確には表さない。
+    #     `cp -p` や過去 mtime のファイルを `mv` して置換すると owner が変わっても
+    #     mtime は保持され、symlink 化して参照先だけ差し替えると GNU `stat -c %Y` は
+    #     symlink 自身の mtime を返すため cutoff が更新されない。時計ずれや保存された
+    #     未来 mtime がある場合は逆方向 (正当な report の握り潰し) にも倒れ得る。
+    #
+    # 残留リスク: マーカーファイルが「初回担当時点より後」に再度 touch/編集され、かつ
+    # その直前に正当な新規 report が書かれてから watcher がまだそれを処理していない
+    # (watcher 停止等) 場合、その report の mtime がマーカー更新後の mtime より古くなり
+    # 既読化されてしまう可能性がある。同種のレースが理論上マーカー編集のたびに残るが、
+    # 発生には「マーカー編集 + report 未処理のまま次の編集」という限定的な条件が必要。
+    NEWLY_OWNED_DIRS=()
+    NEWLY_OWNED_CUTOFF=()
+    SUPPRESSED_COUNT=()
+    if [ "$FIRST" -eq 0 ]; then
+        for d in "${OWNED[@]}"; do
+            [ -n "${PREV_OWNED[$d]:-}" ] && continue
+            NEWLY_OWNED_DIRS+=("$d")
+            if [ -z "${EVER_OWNED[$d]:-}" ]; then
+                # 既読化カットオフ: .squad_session の mtime (無ければ project dir の mtime)
+                if [ -f "$d/.squad_session" ]; then cutoff="$(file_mtime "$d/.squad_session")"; else cutoff="$(file_mtime "$d")"; fi
+                NEWLY_OWNED_CUTOFF[$d]="${cutoff:-0}"
+            fi
+        done
+    fi
+
     # --- 1. report-bridge: 新規/更新された report を Dispatcher へ橋渡し ---
     #   status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         if [ "${REPORT_SEEN[$f]:-}" != "$m" ]; then
             REPORT_SEEN[$f]="$m"
-            if [ "$FIRST" -eq 0 ]; then
+            suppress=0
+            for d in "${NEWLY_OWNED_DIRS[@]}"; do
+                case "$f" in
+                    "$d"/*)
+                        cutoff="${NEWLY_OWNED_CUTOFF[$d]:-}"
+                        if should_suppress "$cutoff" "$m"; then
+                            suppress=1
+                            SUPPRESSED_COUNT[$d]=$(( ${SUPPRESSED_COUNT[$d]:-0} + 1 ))
+                        fi
+                        break
+                        ;;
+                esac
+            done
+            if [ "$FIRST" -eq 0 ] && [ "$suppress" -eq 0 ]; then
                 wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
                 kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
                 status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
@@ -308,6 +412,12 @@ while true; do
     done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null)
+
+    # 実際に既読化した report が1件以上ある project のみログを出す (PR #21 review nit 対応)
+    for d in "${NEWLY_OWNED_DIRS[@]}"; do
+        cnt="${SUPPRESSED_COUNT[$d]:-0}"
+        [ "$cnt" -gt 0 ] && log "project $(basename "$d") が新規担当になったため既存 report ${cnt} 件を既読化 (再通知しない)"
+    done
 
     # --- 2 & 3. 承認オートアンサー + 停止検知 (worker 1-4) ---
     for N in 1 2 3 4; do
@@ -415,6 +525,12 @@ except Exception:
         gc_worktrees
         LAST_GC="$now_ts"
     fi
+
+    # 次サイクルの新規担当検知のため、今回の OWNED を記録
+    PREV_OWNED=()
+    for d in "${OWNED[@]}"; do PREV_OWNED[$d]=1; done
+    # このプロセスが一度でも担当した project として記録 (再担当時の既読化スキップ判定に使用)
+    for d in "${OWNED[@]}"; do EVER_OWNED[$d]=1; done
 
     FIRST=0
     sleep "$INTERVAL"
