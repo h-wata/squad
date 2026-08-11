@@ -118,6 +118,7 @@ assert_eq "並行 claim 5 本のうち成功は 1 本のみ" "$(find "$RES_DIR" 
 #     過去 report を一斉通知してしまう (Codex review P1 の回帰テスト)。
 QUEUE_DIR="$TMPDIR_T/queue"
 LEDGER_FILE="$TMPDIR_T/queue/.report_ledger"
+# shellcheck disable=SC2034  # source した watch.sh 側の関数が参照する
 LEDGER_LOCK="${LEDGER_FILE}.lock"
 mkdir -p "$QUEUE_DIR/projects/pj_a/reports" "$QUEUE_DIR/projects/pj_b/reports"
 echo "status: completed" > "$QUEUE_DIR/projects/pj_a/reports/worker1_report.yaml"
