@@ -78,6 +78,9 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # Dispatcher pane へ 1 メッセージ送る。send-keys が失敗したら 1 を返す
 # (呼び出し側が「通知できなかった」ことを検知できるようにする)。
+#
+# 本文と Enter を 1 回の send-keys にまとめない: tmux 側で Enter が届かず次の
+# メッセージと連結される事象があるため、間に sleep を挟んで別々に送る。
 notify_dispatcher() {
     local msg="$1"
     tmux send-keys -t "$DISPATCHER" "$msg" 2>/dev/null || return 1
@@ -119,9 +122,18 @@ if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 # 失われて同じ穴が残る (Codex review 3 巡目 blocking 1)。
 #
 #   ledger_claim <path> <mtime>   配達権を取れたら 0、他が配達済み/配達中なら 1。
-#                                 成功時は claim 前の記録を stdout に返す (rollback 用)。
-#   ledger_commit <path> <mtime>  送信成功後に「配達済み」へ確定する。
-#   ledger_release <path> <mtime> <claim 前の記録>  送信失敗時に元の記録へ戻す。
+#                                 成功時は "<claim token>\t<claim 前の mtime>\t<claim 前の lease>"
+#                                 を stdout に返す (commit / rollback 用)。
+#   ledger_commit <path> <mtime> <token>  送信成功後に「配達済み」へ確定する。
+#   ledger_release <path> <token> <前 mtime> <前 lease>  送信失敗時に元の記録へ戻す。
+#
+# commit / release は「自分が書いた claim がまだ残っているか」を claim token
+# (= claim 時に書いた lease 期限値) で照合してから更新する。mtime だけで照合すると、
+# A の lease が切れた後に B が同じ mtime を再 claim した状況で、遅れて戻ってきた A が
+# B の claim を勝手に commit したり、B の有効な claim を release で消したりできてしまう
+# (PR #24 Codex review 4th round)。lease 期限は claim のたびに now+LEDGER_LEASE で
+# 前回より必ず大きくなる (再 claim は前の lease が切れた後にしか成立しない) ため、
+# 同一 path の異なる claim が同じ token を持つことはない。
 #
 # commit / release に失敗しても (ledger が書けない等)、lease 期限切れで再び claim
 # されるので通知が永久に消えることはない。副作用は「約 LEDGER_LEASE 秒後に再通知」。
@@ -167,28 +179,34 @@ ledger_claim() {
             # ロックを取れなかった場合は「未配達」側に倒す
             flock -w 5 9 || exit 0
         fi
-        local rec mt ut now new_mt tmp
+        local rec mt ut now token tmp
         rec="$(_ledger_lookup "$f")"
         mt=""; ut=""
         [ -n "$rec" ] && IFS=$'\t' read -r mt ut <<< "$rec"
         now=$(date +%s)
-        new_mt="$m_int"
         if [ -n "$mt" ] && [ "$m_int" -le "$mt" ] 2>/dev/null; then
-            # 既知の版。配達済み (lease 0)、または他 watcher が配達中なら触らない。
+            # 記録より古い版は常に skip。lease 切れでも claim させない: 記録上の mtime を
+            # 下げずに claim すると、呼び出し側が持つ古い mtime と ledger の mtime が
+            # 食い違い、送信後の commit が空振りして lease 切れ後に二重通知される
+            # (PR #24 Codex review 4th round)。
+            [ "$m_int" -lt "$mt" ] 2>/dev/null && exit "$LEDGER_RC_SEEN"
+            # 同じ版。配達済み (lease 0)、または他 watcher が配達中なら触らない。
+            # lease が切れていれば配達やり直しとして claim し直す。
             if [ "$ut" = "0" ] || [ "$now" -lt "$ut" ] 2>/dev/null; then
                 exit "$LEDGER_RC_SEEN"
             fi
-            new_mt="$mt"        # lease 切れの配達やり直し。記録上の mtime は下げない
         fi
+        token=$((now + LEDGER_LEASE))
         tmp="${LEDGER_FILE}.tmp.$$"
         {
             [ -f "$LEDGER_FILE" ] && _ledger_without "$f"
-            printf '%s\t%s\t%s\n' "$new_mt" "$((now + LEDGER_LEASE))" "$f"
+            printf '%s\t%s\t%s\n' "$m_int" "$token" "$f"
         } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
         # 書き込みに失敗した場合 (権限・容量など) も claim 成功として扱う。ledger が
-        # 更新されないので毎サイクル再通知されて煩いが、通知が消えるよりは気づける。
+        # 更新されないので毎サイクル再通知されて煩いが、通知が消えるよりは気づける
+        # (この場合 token は ledger に無いので commit / release は空振りする)。
         rm -f "$tmp"
-        printf '%s' "$rec"
+        printf '%s\t%s\t%s' "$token" "$mt" "$ut"
         exit 0
     ) 9>"$LEDGER_LOCK"
     rc=$?
@@ -199,7 +217,7 @@ ledger_claim() {
 # 送信成功後に配達済み (lease 0) へ確定する。自分の claim でなくなっていれば何もしない。
 # ledger を書けなければ 1 を返す (lease 期限切れ後に再通知される)。
 ledger_commit() {
-    local f="$1" m_int="${2%%.*}"
+    local f="$1" m_int="${2%%.*}" token="${3:-}"
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
@@ -210,6 +228,7 @@ ledger_commit() {
         IFS=$'\t' read -r mt ut <<< "$rec"
         [ "$mt" = "$m_int" ] || exit 0          # 別の版で上書きされている = 何もしない
         [ "$ut" = "0" ] && exit 0               # 既に配達済み
+        [ "$ut" = "$token" ] || exit 0          # 別 watcher の claim = 触らない
         tmp="${LEDGER_FILE}.tmp.$$"
         {
             _ledger_without "$f"
@@ -220,26 +239,26 @@ ledger_commit() {
     ) 9>"$LEDGER_LOCK"
 }
 
-# 送信失敗時に claim を取り消す。ledger の記録が自分の claim のままなら、claim 前の
-# 記録 ("<mtime>\t<lease期限>"、未登録だったなら空文字) に戻す。
+# 送信失敗時に claim を取り消す。ledger の記録が自分の claim (token 一致) のままなら、
+# claim 前の記録 (prev_mt / prev_ut、claim 前が未登録だったなら空文字) に戻す。
 # 取り消せたら 0、ledger を操作できなかったら 1 を返す (lease 期限切れで再 claim される)。
 #
 # 行を消すのではなく「元の記録に戻す」ことが重要。単に消すと、直前に配達済みだった
 # 古い版の記録まで失われ、更新前の mtime を掴んでいた別 watcher がその古い版を
 # 再 claim して二重通知できてしまう。
 ledger_release() {
-    local f="$1" m_int="${2%%.*}" prev_rec="${3:-}"
+    local f="$1" token="${2:-}" prev_mt="${3:-}" prev_ut="${4:-}"
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
         fi
-        local rec cur_mt cur_ut prev_mt prev_ut tmp
+        local rec cur_ut tmp
         rec="$(_ledger_lookup "$f")"
         [ -n "$rec" ] || exit 0
-        IFS=$'\t' read -r cur_mt cur_ut <<< "$rec"
-        [ "$cur_mt" = "$m_int" ] && [ "$cur_ut" != "0" ] || exit 0   # 自分の claim でない
-        prev_mt=""; prev_ut=""
-        [ -n "$prev_rec" ] && IFS=$'\t' read -r prev_mt prev_ut <<< "$prev_rec"
+        cur_ut="${rec#*$'\t'}"
+        # 自分の claim がそのまま残っている場合だけ戻す。lease 切れ後に別 watcher が
+        # 再 claim していたら (token 不一致) 触らない。
+        [ "$cur_ut" = "$token" ] || exit 0
         tmp="${LEDGER_FILE}.tmp.$$"
         {
             _ledger_without "$f"
@@ -506,7 +525,8 @@ while true; do
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         # 配達権を取る (他が配達済み / 配達中の lease を持っていれば skip)
-        prev_rec=$(ledger_claim "$f" "$m") || continue
+        claim_rec=$(ledger_claim "$f" "$m") || continue
+        IFS=$'\t' read -r claim_token prev_mt prev_ut <<< "$claim_rec"
         wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
         kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
         status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
@@ -523,10 +543,10 @@ while true; do
         # 次サイクルで再送する。commit / release 自体に失敗しても (ledger が書けない等)
         # lease 期限切れで再び claim されるので、通知が永久に消えることはない。
         if [ "$sent" -eq 0 ]; then
-            ledger_commit "$f" "$m" \
+            ledger_commit "$f" "$m" "$claim_token" \
                 || log "[WARN] ledger を更新できず: $f (約${LEDGER_LEASE}s 後に再通知される可能性)"
         else
-            if ledger_release "$f" "$m" "$prev_rec"; then
+            if ledger_release "$f" "$claim_token" "$prev_mt" "$prev_ut"; then
                 log "[WARN] Dispatcher への送信に失敗: $f (claim を取り消し、次サイクルで再送)"
             else
                 log "[WARN] Dispatcher への送信に失敗: $f (ledger を戻せず、約${LEDGER_LEASE}s 後に再送)"

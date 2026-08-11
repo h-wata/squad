@@ -42,6 +42,13 @@
   (lock file を開けない・書き込めない) も通知する側に倒す。claim は記録済み mtime より
   真に新しい場合のみ成立させ、更新前の mtime を掴んだ watcher が ledger を巻き戻して
   同じ版を二重通知することを防ぐ。
+  commit / release は「自分が書いた claim がまだ残っているか」を claim token
+  (claim 時に書いた lease 期限値) で照合してから更新する。mtime だけで照合すると、
+  A の lease が切れた後に B が同じ mtime を再 claim した状況で、遅れて戻った A が
+  B の claim を commit したり release で消したりできてしまう (PR #24 Codex review
+  4th round B2)。また lease 期限切れであっても記録より古い mtime は claim させない
+  (許すと ledger の mtime と呼び出し側の mtime が食い違い、commit が空振りして
+  lease 切れ後に二重通知される。同 B1)。
   ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
   すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
   セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。
