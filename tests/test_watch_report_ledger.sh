@@ -143,6 +143,48 @@ check "seed 後に書かれた report は通知される" \
     "$QUEUE_DIR/projects/pj_a/reports/worker4_report.yaml" \
     "$(find "$QUEUE_DIR/projects/pj_a/reports/worker4_report.yaml" -printf '%T@')" "NOTIFY"
 
+# 12. 古い mtime を掴んだ watcher が ledger を巻き戻さない (Codex review P2 の回帰)
+#     A が 101 を claim した後、更新前の 100 を掴んだ B が claim しようとしても通知せず、
+#     ledger も 101 のまま。等値だけを弾く実装だと 100 に巻き戻り、次サイクルで 101 が
+#     再 claim されて同じ版が二重通知される。
+E="/q/projects/pj_e/reports/worker1_report.yaml"
+check "新しい mtime を claim" "$E" "101.0" "NOTIFY"
+check "古い mtime (更新前スナップショット) は claim しない" "$E" "100.0" "SKIP"
+assert_eq "ledger は巻き戻らない" \
+    "$(awk -F'\t' -v p="$E" '$2==p{print $1}' "$LEDGER_FILE")" "101"
+check "巻き戻っていないので同じ版は再通知されない" "$E" "101.0" "SKIP"
+
+# 13. ledger_release: 通知に失敗したときのロールバック (Codex review P1 の回帰)
+#     claim 済みの行が消え、次サイクルで同じ report を再通知できる。
+G="/q/projects/pj_g/reports/worker2_report.yaml"
+check "claim する" "$G" "300.0" "NOTIFY"
+ledger_release "$G" "300.0"
+assert_eq "release で ledger から消える" \
+    "$(awk -F'\t' -v p="$G" '$2==p{print $1}' "$LEDGER_FILE")" ""
+check "release 後は再通知できる" "$G" "300.0" "NOTIFY"
+
+# 14. release は他 watcher が新しい mtime で claim し直した記録を消さない
+ledger_claim "$G" "301.0" > /dev/null
+ledger_release "$G" "300.0"
+assert_eq "自分の claim でなければ release しない" \
+    "$(awk -F'\t' -v p="$G" '$2==p{print $1}' "$LEDGER_FILE")" "301"
+
+# 15. lock file を開けない異常時は「通知済み」ではなく「通知する」側に倒す
+#     (読み取り専用ディレクトリ等で全 report が握り潰されるのを防ぐ。Codex review P1)
+RO_DIR="$TMPDIR_T/readonly"
+mkdir -p "$RO_DIR"
+SAVED_LEDGER="$LEDGER_FILE"
+SAVED_LOCK="$LEDGER_LOCK"
+LEDGER_FILE="$RO_DIR/.report_ledger"
+LEDGER_LOCK="$RO_DIR/.report_ledger.lock"
+chmod 500 "$RO_DIR"
+exec 3>&2 2>/dev/null   # リダイレクト失敗の "Permission denied" はテスト出力から隠す
+check "lock file を開けない場合は通知する" "/q/projects/pj_h/reports/worker1_report.yaml" "400.0" "NOTIFY"
+exec 2>&3 3>&-
+chmod 700 "$RO_DIR"
+LEDGER_FILE="$SAVED_LEDGER"
+LEDGER_LOCK="$SAVED_LOCK"
+
 echo "---"
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

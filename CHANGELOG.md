@@ -30,6 +30,11 @@
   (c) watcher 停止中に書かれた report を再起動後に拾える (従来は起動時 baseline で
   握り潰していた)。担当切替時の既読化ヒューリスティック
   (`REPORT_SEEN` / `EVER_OWNED` / marker mtime cutoff) は不要になったため削除。
+  通知に失敗した (Dispatcher pane が消えている等で `tmux send-keys` が失敗した) 場合は
+  claim を取り消し、次サイクル以降で再送する。ledger にアクセスできない異常時
+  (lock file を開けない・書き込めない) も通知する側に倒す。claim は記録済み mtime より
+  真に新しい場合のみ成立させ、更新前の mtime を掴んだ watcher が ledger を巻き戻して
+  同じ版を二重通知することを防ぐ。
   ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
   すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
   セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。

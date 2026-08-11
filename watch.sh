@@ -76,12 +76,15 @@ APPROVAL_RE='Do you want to proceed|Allow this|Approve|approve|\(y/n\)|press y|1
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
+# Dispatcher pane へ 1 メッセージ送る。send-keys が失敗したら 1 を返す
+# (呼び出し側が「通知できなかった」ことを検知できるようにする)。
 notify_dispatcher() {
     local msg="$1"
-    tmux send-keys -t "$DISPATCHER" "$msg"
+    tmux send-keys -t "$DISPATCHER" "$msg" 2>/dev/null || return 1
     sleep 0.5
-    tmux send-keys -t "$DISPATCHER" Enter
+    tmux send-keys -t "$DISPATCHER" Enter 2>/dev/null || return 1
     sleep 0.3
+    return 0
 }
 
 auto_answer() {
@@ -107,25 +110,41 @@ if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 # ファイルで管理する (Issue #22)。1 report path あたり 1 行 "<mtime整数秒>\t<path>"。
 #
 # ledger_claim <path> <mtime(小数秒可)>
-#   通知権を取得できたら 0 (= 未通知だったので通知すべき) を返し、ledger を更新する。
-#   既に同じ mtime で通知済みなら 1 を返す (通知しない)。
+#   通知権を取得できたら 0 (= 未通知なので通知すべき) を返し、ledger を更新する。
+#   既に同じか、より新しい mtime で通知済みなら 1 を返す (通知しない)。
 #   判定と更新は flock で直列化するので、複数 watcher が同時に走っても同じ report が
 #   二重通知されることはない。
+#
+# 記録済み mtime より「真に新しい」場合だけ claim する (等値ではなく単調増加で判定)。
+# 等値だけを弾くと、A が mtime 101 を claim した直後に、更新前の 100 を掴んだ B が
+# ledger を 100 に巻き戻して通知し、次のサイクルで 101 が再度 claim されて同じ版が
+# 二重通知される (Codex review P2)。副作用として、report の mtime が過去に戻る
+# 置き換え (cp -p での復元など) は通知されない。
+#
+# ledger にアクセスできない異常時 (lock file を開けない・書き込めない) は「未通知」
+# 側に倒す。握り潰し (気づけない) より再通知 (煩いが気づける) を選ぶ、という
+# watch.sh 全体の方針に合わせる。このため subshell の「通知済み」だけを 9 という
+# 専用の終了コードで表し、リダイレクト失敗など他の異常 (bash が返す 1) と区別する。
 #
 # mtime は find %T@ の小数秒を整数秒に切り捨てて記録・比較する (ファイルシステムや
 # 取得経路による小数部の揺れで同一 report を別物と誤判定しないため)。同一秒内に
 # report が 2 回更新された場合、後者は通知されない可能性があるが、worker の report
 # 更新がそこまで高頻度になることは無い。
+LEDGER_RC_SEEN=9      # subshell 内で「通知済みなので claim しない」を表す終了コード
+
 ledger_claim() {
-    local f="$1" m_int="${2%%.*}"
+    local f="$1" m_int="${2%%.*}" rc
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
-            # ロックを取れなかった場合は「未通知」側に倒す (握り潰しより再通知を選ぶ)
+            # ロックを取れなかった場合は「未通知」側に倒す
             flock -w 5 9 || exit 0
         fi
         local prev tmp
         prev=$(awk -F'\t' -v p="$f" '$2==p{v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null)
-        [ "$prev" = "$m_int" ] && exit 1
+        # prev が空 (未登録) 以外は数値比較。m_int が prev 以下なら通知しない。
+        if [ -n "$prev" ] && [ "$m_int" -le "$prev" ] 2>/dev/null; then
+            exit "$LEDGER_RC_SEEN"
+        fi
         tmp="${LEDGER_FILE}.tmp.$$"
         {
             [ -f "$LEDGER_FILE" ] && awk -F'\t' -v p="$f" '$2!=p' "$LEDGER_FILE"
@@ -136,6 +155,30 @@ ledger_claim() {
         rm -f "$tmp"
         exit 0
     ) 9>"$LEDGER_LOCK"
+    rc=$?
+    # 9 以外 (0 = claim 成功、1 = lock file を開けない等の異常) はすべて通知させる
+    [ "$rc" -ne "$LEDGER_RC_SEEN" ]
+}
+
+# ledger_release <path> <mtime(小数秒可)>
+#   claim を取り消す (通知に失敗したときのロールバック)。ledger の記録が自分の
+#   claim した mtime のままなら、その行を消して「未通知」に戻す。既に他の watcher が
+#   より新しい mtime で claim し直していれば何もしない。
+ledger_release() {
+    local f="$1" m_int="${2%%.*}"
+    (
+        if [ "$HAVE_FLOCK" -eq 1 ]; then
+            flock -w 5 9 || exit 0
+        fi
+        local prev tmp
+        prev=$(awk -F'\t' -v p="$f" '$2==p{v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null)
+        [ "$prev" = "$m_int" ] || exit 0
+        tmp="${LEDGER_FILE}.tmp.$$"
+        awk -F'\t' -v p="$f" '$2!=p' "$LEDGER_FILE" > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
+        rm -f "$tmp"
+        exit 0
+    ) 9>"$LEDGER_LOCK"
+    return 0
 }
 
 # ledger 未作成時の初期 seed: 既存 report をすべて「通知済み」として一括登録する
@@ -400,9 +443,18 @@ while true; do
         if [ "$status" = "blocked" ]; then
             log "report 検知(blocked): $f -> Dispatcher [INBOX] 通知"
             notify_dispatcher "[INBOX] Worker${wnum} が blocked: 検証ゲート未通過。${f} の notes/verdict を確認し、ユーザーに優先報告してください。"
+            sent=$?
         else
             log "report 検知: $f -> Dispatcher 通知"
             notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
+            sent=$?
+        fi
+        # 送信に失敗したら claim を取り消し、次サイクル以降で再送できるようにする。
+        # ここで戻さないと、Dispatcher pane が消えている等で送れなかった report が
+        # 「通知済み」として ledger に残り、二度と橋渡しされない (Codex review P1)。
+        if [ "$sent" -ne 0 ]; then
+            ledger_release "$f" "$m"
+            log "[WARN] Dispatcher への送信に失敗: $f (claim を取り消し、次サイクルで再送)"
         fi
     done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
