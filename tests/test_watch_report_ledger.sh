@@ -35,7 +35,7 @@ fail=0
 
 check() {
     local desc="$1" f="$2" m="$3" expect="$4" got
-    if ledger_claim "$f" "$m"; then
+    if ledger_claim "$f" "$m" > /dev/null; then   # stdout は claim 前の mtime
         got="NOTIFY"
     else
         got="SKIP"
@@ -158,32 +158,74 @@ check "巻き戻っていないので同じ版は再通知されない" "$E" "10
 #     claim 済みの行が消え、次サイクルで同じ report を再通知できる。
 G="/q/projects/pj_g/reports/worker2_report.yaml"
 check "claim する" "$G" "300.0" "NOTIFY"
-ledger_release "$G" "300.0"
-assert_eq "release で ledger から消える" \
+ledger_release "$G" "300.0" ""
+assert_eq "release で ledger から消える (claim 前が未登録なら)" \
     "$(awk -F'\t' -v p="$G" '$2==p{print $1}' "$LEDGER_FILE")" ""
 check "release 後は再通知できる" "$G" "300.0" "NOTIFY"
 
 # 14. release は他 watcher が新しい mtime で claim し直した記録を消さない
 ledger_claim "$G" "301.0" > /dev/null
-ledger_release "$G" "300.0"
+ledger_release "$G" "300.0" ""
 assert_eq "自分の claim でなければ release しない" \
     "$(awk -F'\t' -v p="$G" '$2==p{print $1}' "$LEDGER_FILE")" "301"
 
+# 14b. release は「削除」ではなく「claim 前の値に戻す」(Codex review blocking 1 の回帰)。
+#      行ごと消すと、直前に通知済みだった古い版の記録まで失われ、更新前の mtime を
+#      掴んでいた別 watcher がその古い版を再 claim して二重通知できてしまう。
+I="/q/projects/pj_i/reports/worker1_report.yaml"
+check "旧版 100 を通知済みにする" "$I" "100.0" "NOTIFY"
+prev_i=$(ledger_claim "$I" "101.0")            # 新版 101 を claim (通知しようとした)
+assert_eq "claim は上書き前の mtime を返す" "$prev_i" "100"
+ledger_release "$I" "101.0" "$prev_i"          # 通知に失敗 -> ロールバック
+assert_eq "release で 100 に戻る (行は消えない)" \
+    "$(awk -F'\t' -v p="$I" '$2==p{print $1}' "$LEDGER_FILE")" "100"
+check "巻き戻った隙に古い版 100 を再 claim できない" "$I" "100.0" "SKIP"
+check "新版 101 は次サイクルで再通知できる" "$I" "101.0" "NOTIFY"
+
+# 14c. ledger を操作できない場合、release は失敗 (非 0) を返す。
+#      呼び出し側はこれを見て再送キューに積む。root では chmod を迂回できるためスキップ。
+if [ "$(id -u)" -ne 0 ]; then
+    J="/q/projects/pj_j/reports/worker1_report.yaml"
+    ledger_claim "$J" "500.0" > /dev/null
+    chmod 400 "$LEDGER_FILE"
+    RO_PARENT="$(dirname "$LEDGER_FILE")"
+    chmod 500 "$RO_PARENT"
+    if ledger_release "$J" "500.0" "" 2>/dev/null; then rel_rc=0; else rel_rc=1; fi
+    chmod 700 "$RO_PARENT"
+    chmod 600 "$LEDGER_FILE"
+    assert_eq "ledger を書けないとき release は失敗を返す" "$rel_rc" "1"
+    assert_eq "失敗時は ledger を書き換えない" \
+        "$(awk -F'\t' -v p="$J" '$2==p{print $1}' "$LEDGER_FILE")" "500"
+else
+    echo "SKIP: release 失敗テスト (root 実行では chmod を迂回できるため)"
+fi
+
 # 15. lock file を開けない異常時は「通知済み」ではなく「通知する」側に倒す
 #     (読み取り専用ディレクトリ等で全 report が握り潰されるのを防ぐ。Codex review P1)
-RO_DIR="$TMPDIR_T/readonly"
-mkdir -p "$RO_DIR"
-SAVED_LEDGER="$LEDGER_FILE"
-SAVED_LOCK="$LEDGER_LOCK"
-LEDGER_FILE="$RO_DIR/.report_ledger"
-LEDGER_LOCK="$RO_DIR/.report_ledger.lock"
-chmod 500 "$RO_DIR"
-exec 3>&2 2>/dev/null   # リダイレクト失敗の "Permission denied" はテスト出力から隠す
-check "lock file を開けない場合は通知する" "/q/projects/pj_h/reports/worker1_report.yaml" "400.0" "NOTIFY"
-exec 2>&3 3>&-
-chmod 700 "$RO_DIR"
-LEDGER_FILE="$SAVED_LEDGER"
-LEDGER_LOCK="$SAVED_LOCK"
+#     初回 claim も NOTIFY になるため、それだけでは分岐を通った証明にならない。
+#     同じ mtime を 2 回 claim しても両方 NOTIFY = ledger に何も残っていない、まで見る
+#     (正常時なら 2 回目は SKIP になる)。root では chmod を迂回できるためスキップ。
+if [ "$(id -u)" -ne 0 ]; then
+    RO_DIR="$TMPDIR_T/readonly"
+    mkdir -p "$RO_DIR"
+    SAVED_LEDGER="$LEDGER_FILE"
+    SAVED_LOCK="$LEDGER_LOCK"
+    LEDGER_FILE="$RO_DIR/.report_ledger"
+    LEDGER_LOCK="$RO_DIR/.report_ledger.lock"
+    H="/q/projects/pj_h/reports/worker1_report.yaml"
+    chmod 500 "$RO_DIR"
+    exec 3>&2 2>/dev/null   # リダイレクト失敗の "Permission denied" はテスト出力から隠す
+    check "lock file を開けない場合は通知する" "$H" "400.0" "NOTIFY"
+    check "lock file を開けない場合は 2 回目も通知する (握り潰さない)" "$H" "400.0" "NOTIFY"
+    exec 2>&3 3>&-
+    chmod 700 "$RO_DIR"
+    assert_eq "lock を開けなかったので ledger 自体が作られない" \
+        "$([ -f "$LEDGER_FILE" ] && echo yes || echo no)" "no"
+    LEDGER_FILE="$SAVED_LEDGER"
+    LEDGER_LOCK="$SAVED_LOCK"
+else
+    echo "SKIP: lock file オープン失敗テスト (root 実行では chmod を迂回できるため)"
+fi
 
 echo "---"
 echo "pass=$pass fail=$fail"
