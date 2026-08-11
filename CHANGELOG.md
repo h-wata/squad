@@ -38,9 +38,8 @@
 - `dashboard-updater` サブエージェントを追加し、dashboard 更新の定型作業を
   Dispatcher から委譲可能にした。
 - GitHub Actions による CI を追加 (Issue #23)。`bash -n` による構文チェック、
-  `tests/*.sh` の実行、`git diff --check` を push / PR で自動実行する。
-  `shellcheck` は既存指摘が残っているため当面 `continue-on-error` の informational job
-  とし、解消後に required check へ昇格させる。
+  `tests/*.sh` の実行、`git diff --check`、`shellcheck --severity=warning` を push / PR で
+  自動実行する。
 - `tests/test_watch_report_ledger.sh`: ledger の claim semantics (再通知しない / mtime
   更新で再通知 / 別プロセスの通知済み状態を尊重 / 並行 claim の直列化 / 1 path 1 行) を
   watch.sh 本体から関数を source して検証する。旧 `tests/test_watch_mtime_boundaries.sh`

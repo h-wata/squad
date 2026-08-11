@@ -30,11 +30,8 @@ jobs:
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
 
   shellcheck:
-    name: shellcheck (informational)
+    name: shellcheck
     runs-on: ubuntu-latest
-    # 既存スクリプトに未修正の指摘が残っているため、当面は非ブロッキング。
-    # 指摘を解消したら continue-on-error を外して required check に昇格させる。
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: install shellcheck
