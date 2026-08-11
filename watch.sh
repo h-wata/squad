@@ -20,7 +20,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION="${SQUAD_SESSION:-ros-agents}"
-QUEUE_DIR="$SCRIPT_DIR/queue"
+QUEUE_DIR="${WATCH_QUEUE_DIR:-$SCRIPT_DIR/queue}"   # 上書きはテスト用 (実運用では既定のまま)
 DISPATCHER="$SESSION:0.0"
 INTERVAL="${WATCH_INTERVAL:-15}"
 STALL_CYCLES="${WATCH_STALL_CYCLES:-4}"   # 無変化がこの回数続いたら停止疑い (既定: 15s*4=60s)
@@ -106,58 +106,89 @@ gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
 # flock の有無 (util-linux が無い環境ではロック無しで動作させる)
 if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 
-# report ledger: 「この report をこの mtime で通知済みか」を全 watcher 共有の
-# ファイルで管理する (Issue #22)。1 report path あたり 1 行 "<mtime整数秒>\t<path>"。
+# report ledger: report の配達状態を全 watcher 共有のファイルで管理する (Issue #22)。
+# 1 report path あたり 1 行 "<mtime整数秒>\t<lease期限>\t<path>"。
+#   lease 期限 0        = 配達済み (Dispatcher へ送信成功)
+#   lease 期限 epoch 秒 = 配達中 (誰かが claim して送信しようとしている)
 #
-# ledger_claim <path> <mtime(小数秒可)>
-#   通知権を取得できたら 0 (= 未通知なので通知すべき) を返し、ledger を更新する。
-#   既に同じか、より新しい mtime で通知済みなら 1 を返す (通知しない)。
-#   判定と更新は flock で直列化するので、複数 watcher が同時に走っても同じ report が
-#   二重通知されることはない。
+# 「claim = 配達済み」にはしない (claim と送信成功の 2 段階にする)。claim した時点で
+# 配達済みにすると、送信に失敗した report や、送信前に watcher が死んだ report が
+# 「通知済み」として残り、二度と橋渡しされない。lease にしておけば、期限が切れた
+# 時点で誰か (別セッションの watcher でもよい) が再び claim して配達をやり直せる。
+# プロセスメモリ上の再送キューでは、watcher の再起動や project の担当変更で状態が
+# 失われて同じ穴が残る (Codex review 3 巡目 blocking 1)。
 #
-# 記録済み mtime より「真に新しい」場合だけ claim する (等値ではなく単調増加で判定)。
-# 等値だけを弾くと、A が mtime 101 を claim した直後に、更新前の 100 を掴んだ B が
-# ledger を 100 に巻き戻して通知し、次のサイクルで 101 が再度 claim されて同じ版が
-# 二重通知される (Codex review P2)。副作用として、記録済みの mtime を下回る report は
+#   ledger_claim <path> <mtime>   配達権を取れたら 0、他が配達済み/配達中なら 1。
+#                                 成功時は claim 前の記録を stdout に返す (rollback 用)。
+#   ledger_commit <path> <mtime>  送信成功後に「配達済み」へ確定する。
+#   ledger_release <path> <mtime> <claim 前の記録>  送信失敗時に元の記録へ戻す。
+#
+# commit / release に失敗しても (ledger が書けない等)、lease 期限切れで再び claim
+# されるので通知が永久に消えることはない。副作用は「約 LEDGER_LEASE 秒後に再通知」。
+#
+# 記録済み mtime より「真に新しい」場合だけ新しい版として claim する (等値ではなく
+# 単調増加で判定)。等値だけを弾くと、A が mtime 101 を claim した直後に、更新前の
+# 100 を掴んだ B が ledger を 100 に巻き戻して通知し、次のサイクルで 101 が再度
+# claim されて同じ版が二重通知される。副作用として、記録済みの mtime を下回る report は
 # 通知されない: `cp -p` での復元など過去 mtime を保持した置き換えや、システム時計が
 # 巻き戻った後に書かれた report が該当する。report は常に同一マシンで現在時刻のまま
 # 書かれる、という前提に依存している。
 #
-# ledger にアクセスできない異常時 (lock file を開けない・書き込めない) は「未通知」
+# ledger にアクセスできない異常時 (lock file を開けない・書き込めない) は「未配達」
 # 側に倒す。握り潰し (気づけない) より再通知 (煩いが気づける) を選ぶ、という
-# watch.sh 全体の方針に合わせる。このため subshell の「通知済み」だけを 9 という
-# 専用の終了コードで表し、リダイレクト失敗など他の異常 (bash が返す 1) と区別する。
+# watch.sh 全体の方針に合わせる。このため subshell の「配達済み/配達中」だけを 9 と
+# いう専用の終了コードで表し、リダイレクト失敗など他の異常 (bash が返す 1) と区別する。
 #
 # mtime は find %T@ の小数秒を整数秒に切り捨てて記録・比較する (ファイルシステムや
 # 取得経路による小数部の揺れで同一 report を別物と誤判定しないため)。同一秒内に
 # report が 2 回更新された場合、後者は通知されない可能性があるが、worker の report
 # 更新がそこまで高頻度になることは無い。
-LEDGER_RC_SEEN=9      # subshell 内で「通知済みなので claim しない」を表す終了コード
+LEDGER_RC_SEEN=9      # subshell 内で「配達済み/配達中なので claim しない」終了コード
+LEDGER_LEASE="${WATCH_LEDGER_LEASE:-60}"   # 配達 lease の有効秒数
 
-# claim 成功時は、上書きする前に記録されていた mtime を stdout に出す (未登録なら空)。
-# 通知に失敗したときに ledger_release へ渡して、削除ではなく「元の値に戻す」ために使う。
+# path の現在の記録を "<mtime>\t<lease期限>" で返す (未登録なら空)。
+# 旧形式 (2 列 "<mtime>\t<path>") の行は配達済みとして読む。
+_ledger_lookup() {
+    awk -F'\t' -v p="$1" '
+        { path = (NF >= 3 ? $3 : $2); if (path == p) { mt = $1; ut = (NF >= 3 ? $2 : 0) } }
+        END { if (mt != "") printf "%s\t%s", mt, ut }
+    ' "$LEDGER_FILE" 2>/dev/null
+}
+
+# path の行を除いた ledger を出力する (書き換えの土台)。
+_ledger_without() {
+    awk -F'\t' -v p="$1" '{ path = (NF >= 3 ? $3 : $2); if (path != p) print }' "$LEDGER_FILE" 2>/dev/null
+}
+
 ledger_claim() {
     local f="$1" m_int="${2%%.*}" rc
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
-            # ロックを取れなかった場合は「未通知」側に倒す
+            # ロックを取れなかった場合は「未配達」側に倒す
             flock -w 5 9 || exit 0
         fi
-        local prev tmp
-        prev=$(awk -F'\t' -v p="$f" '$2==p{v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null)
-        # prev が空 (未登録) 以外は数値比較。m_int が prev 以下なら通知しない。
-        if [ -n "$prev" ] && [ "$m_int" -le "$prev" ] 2>/dev/null; then
-            exit "$LEDGER_RC_SEEN"
+        local rec mt ut now new_mt tmp
+        rec="$(_ledger_lookup "$f")"
+        mt=""; ut=""
+        [ -n "$rec" ] && IFS=$'\t' read -r mt ut <<< "$rec"
+        now=$(date +%s)
+        new_mt="$m_int"
+        if [ -n "$mt" ] && [ "$m_int" -le "$mt" ] 2>/dev/null; then
+            # 既知の版。配達済み (lease 0)、または他 watcher が配達中なら触らない。
+            if [ "$ut" = "0" ] || [ "$now" -lt "$ut" ] 2>/dev/null; then
+                exit "$LEDGER_RC_SEEN"
+            fi
+            new_mt="$mt"        # lease 切れの配達やり直し。記録上の mtime は下げない
         fi
         tmp="${LEDGER_FILE}.tmp.$$"
         {
-            [ -f "$LEDGER_FILE" ] && awk -F'\t' -v p="$f" '$2!=p' "$LEDGER_FILE"
-            printf '%s\t%s\n' "$m_int" "$f"
+            [ -f "$LEDGER_FILE" ] && _ledger_without "$f"
+            printf '%s\t%s\t%s\n' "$new_mt" "$((now + LEDGER_LEASE))" "$f"
         } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
         # 書き込みに失敗した場合 (権限・容量など) も claim 成功として扱う。ledger が
         # 更新されないので毎サイクル再通知されて煩いが、通知が消えるよりは気づける。
         rm -f "$tmp"
-        printf '%s' "$prev"
+        printf '%s' "$rec"
         exit 0
     ) 9>"$LEDGER_LOCK"
     rc=$?
@@ -165,28 +196,54 @@ ledger_claim() {
     [ "$rc" -ne "$LEDGER_RC_SEEN" ]
 }
 
-# ledger_release <path> <mtime(小数秒可)> [claim 前の mtime]
-#   claim を取り消す (通知に失敗したときのロールバック)。ledger の記録が自分の
-#   claim した mtime のままなら、claim 前の値に戻す (claim 前が空なら行を消す)。
-#   既に他の watcher がより新しい mtime で claim し直していれば何もしない。
-#   取り消せたら 0、ledger を操作できなかったら 1 を返す。
-#
-# 行を消すのではなく「元の値に戻す」ことが重要。単に消すと、直前に通知済みだった
-# 古い版の記録まで失われ、更新前の mtime を掴んでいた別 watcher がその古い版を
-# 再 claim して二重通知できてしまう (Codex review blocking 1)。
-ledger_release() {
-    local f="$1" m_int="${2%%.*}" prev_int="${3:-}"
+# 送信成功後に配達済み (lease 0) へ確定する。自分の claim でなくなっていれば何もしない。
+# ledger を書けなければ 1 を返す (lease 期限切れ後に再通知される)。
+ledger_commit() {
+    local f="$1" m_int="${2%%.*}"
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
         fi
-        local cur tmp
-        cur=$(awk -F'\t' -v p="$f" '$2==p{v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null)
-        [ "$cur" = "$m_int" ] || exit 0        # 既に他が claim し直している = 何もしないでよい
+        local rec mt ut tmp
+        rec="$(_ledger_lookup "$f")"
+        [ -n "$rec" ] || exit 1
+        IFS=$'\t' read -r mt ut <<< "$rec"
+        [ "$mt" = "$m_int" ] || exit 0          # 別の版で上書きされている = 何もしない
+        [ "$ut" = "0" ] && exit 0               # 既に配達済み
         tmp="${LEDGER_FILE}.tmp.$$"
         {
-            awk -F'\t' -v p="$f" '$2!=p' "$LEDGER_FILE"
-            if [ -n "$prev_int" ]; then printf '%s\t%s\n' "$prev_int" "$f"; fi
+            _ledger_without "$f"
+            printf '%s\t0\t%s\n' "$m_int" "$f"
+        } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE" || { rm -f "$tmp"; exit 1; }
+        rm -f "$tmp"
+        exit 0
+    ) 9>"$LEDGER_LOCK"
+}
+
+# 送信失敗時に claim を取り消す。ledger の記録が自分の claim のままなら、claim 前の
+# 記録 ("<mtime>\t<lease期限>"、未登録だったなら空文字) に戻す。
+# 取り消せたら 0、ledger を操作できなかったら 1 を返す (lease 期限切れで再 claim される)。
+#
+# 行を消すのではなく「元の記録に戻す」ことが重要。単に消すと、直前に配達済みだった
+# 古い版の記録まで失われ、更新前の mtime を掴んでいた別 watcher がその古い版を
+# 再 claim して二重通知できてしまう。
+ledger_release() {
+    local f="$1" m_int="${2%%.*}" prev_rec="${3:-}"
+    (
+        if [ "$HAVE_FLOCK" -eq 1 ]; then
+            flock -w 5 9 || exit 1
+        fi
+        local rec cur_mt cur_ut prev_mt prev_ut tmp
+        rec="$(_ledger_lookup "$f")"
+        [ -n "$rec" ] || exit 0
+        IFS=$'\t' read -r cur_mt cur_ut <<< "$rec"
+        [ "$cur_mt" = "$m_int" ] && [ "$cur_ut" != "0" ] || exit 0   # 自分の claim でない
+        prev_mt=""; prev_ut=""
+        [ -n "$prev_rec" ] && IFS=$'\t' read -r prev_mt prev_ut <<< "$prev_rec"
+        tmp="${LEDGER_FILE}.tmp.$$"
+        {
+            _ledger_without "$f"
+            if [ -n "$prev_mt" ]; then printf '%s\t%s\t%s\n' "$prev_mt" "$prev_ut" "$f"; fi
         } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE" || { rm -f "$tmp"; exit 1; }
         rm -f "$tmp"
         exit 0
@@ -210,7 +267,7 @@ ledger_baseline_seed() {
     find "$QUEUE_DIR/projects" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null \
-        | awk -F'\t' '{split($1, a, "."); print a[1] "\t" $2}' > "$tmp"
+        | awk -F'\t' '{split($1, a, "."); print a[1] "\t0\t" $2}' > "$tmp"
     seeded=$(grep -c . "$tmp" 2>/dev/null || true)
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
@@ -413,8 +470,6 @@ declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
-declare -A NOTIFY_RETRY    # report path -> mtime整数秒。送信失敗かつ claim を取り消せな
-                           # かった report の再送キュー (プロセスメモリのみ)
 
 mkdir -p "$QUEUE_DIR"
 
@@ -450,14 +505,8 @@ while true; do
     # 起動時の baseline は ledger_baseline_seed が監視開始前に済ませている。
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
-        # 前回 claim 済みだが送信に失敗し、claim の取り消しにも失敗した report は
-        # ledger 上「通知済み」のままなので、プロセス内の再送キューを見て強制的に送る。
-        retry=0
-        [ "${NOTIFY_RETRY[$f]:-}" = "${m%%.*}" ] && retry=1
-        prev_m=""
-        if [ "$retry" -eq 0 ]; then
-            prev_m=$(ledger_claim "$f" "$m") || continue   # 既に (誰かが) 通知済み
-        fi
+        # 配達権を取る (他が配達済み / 配達中の lease を持っていれば skip)
+        prev_rec=$(ledger_claim "$f" "$m") || continue
         wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
         kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
         status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
@@ -470,22 +519,18 @@ while true; do
             notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
             sent=$?
         fi
-        # 送信に失敗したら claim を取り消し、次サイクル以降で再送できるようにする。
-        # ここで戻さないと、Dispatcher pane が消えている等で送れなかった report が
-        # 「通知済み」として ledger に残り、二度と橋渡しされない (Codex review P1)。
-        # 取り消しにも失敗した場合 (ledger が書けない等) は、ledger 上は通知済みのまま
-        # なので、プロセス内の再送キューに積んで次サイクルで強制送信する。
-        # 残る制約: claim から送信までの間に watcher が SIGKILL 等で死ぬと、その report は
-        # 通知済みとして ledger に残る (再送キューもプロセスメモリなので失われる)。
-        if [ "$sent" -ne 0 ]; then
-            if [ "$retry" -eq 0 ] && ledger_release "$f" "$m" "$prev_m"; then
+        # 送信できて初めて「配達済み」に確定する。失敗したら claim 前の記録に戻して
+        # 次サイクルで再送する。commit / release 自体に失敗しても (ledger が書けない等)
+        # lease 期限切れで再び claim されるので、通知が永久に消えることはない。
+        if [ "$sent" -eq 0 ]; then
+            ledger_commit "$f" "$m" \
+                || log "[WARN] ledger を更新できず: $f (約${LEDGER_LEASE}s 後に再通知される可能性)"
+        else
+            if ledger_release "$f" "$m" "$prev_rec"; then
                 log "[WARN] Dispatcher への送信に失敗: $f (claim を取り消し、次サイクルで再送)"
             else
-                NOTIFY_RETRY[$f]="${m%%.*}"
-                log "[WARN] Dispatcher への送信に失敗: $f (ledger を戻せないため再送キューに登録)"
+                log "[WARN] Dispatcher への送信に失敗: $f (ledger を戻せず、約${LEDGER_LEASE}s 後に再送)"
             fi
-        else
-            unset "NOTIFY_RETRY[$f]"
         fi
     done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \

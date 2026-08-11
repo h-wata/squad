@@ -30,11 +30,15 @@
   (c) watcher 停止中に書かれた report を再起動後に拾える (従来は起動時 baseline で
   握り潰していた)。担当切替時の既読化ヒューリスティック
   (`REPORT_SEEN` / `EVER_OWNED` / marker mtime cutoff) は不要になったため削除。
-  通知に失敗した (Dispatcher pane が消えている等で `tmux send-keys` が失敗した) 場合は
-  claim を「取り消す」= claim 前の mtime に戻し、次サイクル以降で再送する
-  (行ごと削除すると、直前に通知済みだった古い版の記録まで失われ、更新前の mtime を
-  掴んでいた別 watcher がその古い版を再通知できてしまう)。ledger を書けず取り消しにも
-  失敗した場合は、プロセス内の再送キューに積んで次サイクルで強制送信する。ledger にアクセスできない異常時
+  記録は `<mtime整数秒>\t<lease期限>\t<path>` の 3 列で、claim (配達権の取得) と
+  commit (配達済みの確定) の 2 段階にしている。claim した時点で「通知済み」にすると、
+  送信に失敗した report や送信前に watcher が死んだ report が二度と橋渡しされないため、
+  claim は期限付きの lease として記録し、送信に成功して初めて配達済みへ確定する。
+  送信に失敗したら claim 前の記録に戻す (行ごと削除すると、直前に配達済みだった古い版
+  の記録まで失われ、更新前の mtime を掴んでいた別 watcher がその古い版を再通知できて
+  しまう)。lease 期限が切れた記録は別の watcher が再び claim できるため、commit や
+  ロールバック自体に失敗しても、watcher が再起動しても、project の担当が変わっても、
+  通知が永久に失われることはない (期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。ledger にアクセスできない異常時
   (lock file を開けない・書き込めない) も通知する側に倒す。claim は記録済み mtime より
   真に新しい場合のみ成立させ、更新前の mtime を掴んだ watcher が ledger を巻き戻して
   同じ版を二重通知することを防ぐ。
@@ -54,6 +58,10 @@
   更新で再通知 / 別プロセスの通知済み状態を尊重 / 並行 claim の直列化 / 1 path 1 行) を
   watch.sh 本体から関数を source して検証する。旧 `tests/test_watch_mtime_boundaries.sh`
   は対象の `should_suppress()` が削除されたため置き換え。
+- `tests/test_watch_report_bridge.sh`: report-bridge ループ (claim → 送信 → commit /
+  ロールバック) の結合テスト。tmux をスタブに差し替えて watch.sh を実プロセスとして
+  起動し、送信失敗時に配達済みにしないこと・復旧後に再送すること・二重送信しないことを
+  検証する。
 
 ### Changed
 

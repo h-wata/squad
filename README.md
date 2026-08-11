@@ -92,6 +92,9 @@ tmux attach -t myproj
 report を Dispatcher に通知したかどうかは、セッションをまたいで共有する永続 ledger
 `queue/.report_ledger` (1 report につき 1 行、更新は `flock` で直列化) で管理する。
 project の担当セッションが移っても、既に別の watcher が通知した report は再通知されない。
+通知は「配達権の取得 (期限付き lease) → 送信成功で配達済みを確定」の 2 段階で、送信に
+失敗した report や、送信前に watcher が落ちた report は lease 期限切れ後に再送される
+(期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。
 ledger を消すと「全 report 未通知」ではなく「起動時の既存 report を通知せず登録し直す」
 挙動になる (過去 report の一斉再通知は起きない)。
 
