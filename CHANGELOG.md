@@ -30,8 +30,10 @@
   (c) watcher 停止中に書かれた report を再起動後に拾える (従来は起動時 baseline で
   握り潰していた)。担当切替時の既読化ヒューリスティック
   (`REPORT_SEEN` / `EVER_OWNED` / marker mtime cutoff) は不要になったため削除。
-  ledger ファイルが存在しない初回のみ、既存 report を通知せず登録する
-  (`queue/` は .gitignore 済みで、ledger は commit されない)。
+  ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
+  すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
+  セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。
+  `queue/` は .gitignore 済みで、ledger は commit されない。
 
 ### Added
 

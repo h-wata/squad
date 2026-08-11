@@ -112,6 +112,36 @@ done
 wait
 assert_eq "並行 claim 5 本のうち成功は 1 本のみ" "$(find "$RES_DIR" -type f | wc -l | tr -d ' ')" "1"
 
+# 10. ledger_baseline_seed は担当 project だけでなく queue/projects 配下の全 report を
+#     登録する。後から起動した別セッションの watcher は「ledger がある = seed 済み」と
+#     しか判断しないため、担当分しか seed しないとその watcher が自分の担当 project の
+#     過去 report を一斉通知してしまう (Codex review P1 の回帰テスト)。
+QUEUE_DIR="$TMPDIR_T/queue"
+LEDGER_FILE="$TMPDIR_T/queue/.report_ledger"
+LEDGER_LOCK="${LEDGER_FILE}.lock"
+mkdir -p "$QUEUE_DIR/projects/pj_a/reports" "$QUEUE_DIR/projects/pj_b/reports"
+echo "status: completed" > "$QUEUE_DIR/projects/pj_a/reports/worker1_report.yaml"
+echo "status: completed" > "$QUEUE_DIR/projects/pj_b/reports/worker2_report.yaml"
+echo "status: completed" > "$QUEUE_DIR/projects/pj_b/reports/worker3_review.yaml"
+echo "not a report"      > "$QUEUE_DIR/projects/pj_b/reports/notes.md"
+
+ledger_baseline_seed > /dev/null
+assert_eq "seed 後に ledger が存在する" "$([ -f "$LEDGER_FILE" ] && echo yes || echo no)" "yes"
+assert_eq "seed は全 project の report を登録 (report 3 件のみ)" \
+    "$(wc -l < "$LEDGER_FILE" | tr -d ' ')" "3"
+check "非担当 project の既存 report は再通知されない" \
+    "$QUEUE_DIR/projects/pj_b/reports/worker2_report.yaml" \
+    "$(find "$QUEUE_DIR/projects/pj_b/reports/worker2_report.yaml" -printf '%T@')" "SKIP"
+
+# 11. seed 済み ledger がある状態で seed を再実行しても上書きしない (先着優先)
+before="$(cat "$LEDGER_FILE")"
+echo "status: completed" > "$QUEUE_DIR/projects/pj_a/reports/worker4_report.yaml"
+ledger_baseline_seed > /dev/null
+assert_eq "ledger 済みなら seed は何もしない" "$(cat "$LEDGER_FILE")" "$before"
+check "seed 後に書かれた report は通知される" \
+    "$QUEUE_DIR/projects/pj_a/reports/worker4_report.yaml" \
+    "$(find "$QUEUE_DIR/projects/pj_a/reports/worker4_report.yaml" -printf '%T@')" "NOTIFY"
+
 echo "---"
 echo "pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

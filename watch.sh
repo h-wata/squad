@@ -131,8 +131,43 @@ ledger_claim() {
             [ -f "$LEDGER_FILE" ] && awk -F'\t' -v p="$f" '$2!=p' "$LEDGER_FILE"
             printf '%s\t%s\n' "$m_int" "$f"
         } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
+        # 書き込みに失敗した場合 (権限・容量など) も claim 成功として扱う。ledger が
+        # 更新されないので毎サイクル再通知されて煩いが、通知が消えるよりは気づける。
+        rm -f "$tmp"
         exit 0
     ) 9>"$LEDGER_LOCK"
+}
+
+# ledger 未作成時の初期 seed: 既存 report をすべて「通知済み」として一括登録する
+# (この機構の導入時や queue の作り直し時に、過去 report が一斉通知されるのを防ぐ)。
+#
+# 対象は担当 project ではなく queue/projects 配下の全 report にする。後から起動した
+# 別セッションの watcher は「ledger ファイルがある = seed 済み」とだけ判断するため、
+# 担当分しか seed しないと、その watcher が自分の担当 project の過去 report を
+# 一斉通知してしまう (Codex review P1)。
+#
+# 部分生成された ledger が他プロセスから見えないよう、一時ファイルに書いてから
+# flock 下で atomic に mv する。mv 直前に他プロセスが既に ledger を作っていたら
+# 何もしない (先着優先)。
+ledger_baseline_seed() {
+    local tmp seeded=0
+    tmp="$(mktemp "${LEDGER_FILE}.seed.XXXXXX" 2>/dev/null)" || return 1
+    find "$QUEUE_DIR/projects" \
+        \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
+        -printf '%T@\t%p\n' 2>/dev/null \
+        | awk -F'\t' '{split($1, a, "."); print a[1] "\t" $2}' > "$tmp"
+    seeded=$(grep -c . "$tmp" 2>/dev/null || true)
+    (
+        if [ "$HAVE_FLOCK" -eq 1 ]; then
+            flock -w 5 9 || exit 1
+        fi
+        [ -f "$LEDGER_FILE" ] && exit 1        # 先に他プロセスが seed 済み
+        mv -f "$tmp" "$LEDGER_FILE"
+    ) 9>"$LEDGER_LOCK"
+    local rc=$?
+    rm -f "$tmp"
+    [ "$rc" -eq 0 ] && log "ledger baseline: 既存 report ${seeded} 件を通知済みとして登録 (通知なし)"
+    return 0
 }
 
 # このセッションが担当する project ディレクトリ一覧 (毎サイクル再計算し、実行中の
@@ -324,15 +359,14 @@ declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
 
-# ledger が未作成 (この機構の初回導入 or queue の作り直し) なら、初回サイクルは既存
-# report を「通知済み」として登録するだけで通知しない (過去 report の一斉再通知を防ぐ)。
-# ledger が既にある場合は初回サイクルから ledger の内容だけで判定する。watcher 停止中に
-# 書かれた未通知 report もこれで拾える。
 mkdir -p "$QUEUE_DIR"
-LEDGER_BASELINE=0
-[ -f "$LEDGER_FILE" ] || LEDGER_BASELINE=1
 
-log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s ledger=${LEDGER_FILE}$([ "$LEDGER_BASELINE" -eq 1 ] && echo ' [baseline]'))"
+log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s ledger=${LEDGER_FILE})"
+# ledger が無ければ、監視を始める前に既存 report を通知済みとして一括登録する
+# (この機構の導入時や queue 作り直し時の一斉通知を防ぐ)。ledger があれば何もしない =
+# 初回サイクルから ledger の内容だけで判定するので、watcher 停止中に書かれた report も
+# 再起動後に拾える。
+[ -f "$LEDGER_FILE" ] || ledger_baseline_seed
 warn_missing_markers
 sleep "$BOOT_DELAY"
 
@@ -356,16 +390,10 @@ while true; do
     # 「誰かが既に通知したか」を持つため、
     #   - A→B→A と担当が移っても B 通知済み report は再通知されない (Issue #22 / F1)
     #   - マーカーの mtime を担当切替時刻の代理に使う必要が無い (F3)
-    # 唯一の例外が LEDGER_BASELINE で、ledger 自体が無い初回だけ既存 report を
-    # 通知せず登録する。
-    baseline_claimed=0
+    # 起動時の baseline は ledger_baseline_seed が監視開始前に済ませている。
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         ledger_claim "$f" "$m" || continue      # 既に (誰かが) 通知済み
-        if [ "$LEDGER_BASELINE" -eq 1 ]; then
-            baseline_claimed=$(( baseline_claimed + 1 ))
-            continue
-        fi
         wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
         kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
         status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
@@ -379,11 +407,6 @@ while true; do
     done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null)
-
-    if [ "$LEDGER_BASELINE" -eq 1 ]; then
-        log "ledger baseline: 既存 report ${baseline_claimed} 件を通知済みとして登録 (通知なし)"
-        LEDGER_BASELINE=0
-    fi
 
     # --- 2 & 3. 承認オートアンサー + 停止検知 (worker 1-4) ---
     for N in 1 2 3 4; do
