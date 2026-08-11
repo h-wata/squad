@@ -14,6 +14,8 @@
 #   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
 #   report-bridge / 停止検知 / discovery はそのセッションの watcher だけが行う。
 #   マーカーが無い project は SQUAD_DEFAULT_OWNER (既定 ros-agents) の担当。
+#   report の「通知済み」状態は queue/.report_ledger (全 watcher 共有・永続) で管理し、
+#   flock で直列化する。担当セッションが移っても通知済み判定はそのまま引き継がれる。
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,6 +41,11 @@ else
     SEEN_FILE="$QUEUE_DIR/.discovery_seen.$SESSION"
     INBOX_FILE="$QUEUE_DIR/_inbox.$SESSION.md"
 fi
+# report 通知済み ledger (全セッションの watcher で共有・永続)。
+# セッションごとに分けてはいけない: 担当が A→B→A と移っても「B が通知済み」を
+# A が参照できることが目的 (Issue #22 / PR #21 cross-review F1)。
+LEDGER_FILE="${WATCH_LEDGER_FILE:-$QUEUE_DIR/.report_ledger}"
+LEDGER_LOCK="${LEDGER_FILE}.lock"
 GC_INTERVAL="${WATCH_GC_INTERVAL:-1800}"               # merged worktree GC の間隔 (既定 30分)
 WORKTREE_GLOB="${WATCH_WORKTREE_GLOB:-$(dirname "$SCRIPT_DIR")/*-wt-*}"  # GC 対象 worktree の glob (既定: リポジトリの親 dir)
 
@@ -93,26 +100,39 @@ auto_answer() {
 # float epoch 比較 a>b
 gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
 
-# F2 対応: report (find %T@、小数秒) の既読化判定。marker 由来の cutoff (整数秒) と
-# 精度を揃えるため report 側の小数部を切り捨て、整数秒同士で比較する。同一秒は
-# 「握り潰し (気づけない)」より「再通知 (気づける)」の方が害が小さいという判断で
-# 通知側に倒し、report < cutoff (整数秒で真に古い) の場合のみ既読化 (suppress) する。
-# 副作用として、marker と同一秒に存在した古い report は最大1回だけ再通知される。
-should_suppress() {
-    local cutoff="$1" m="$2" m_int
-    [ -z "$cutoff" ] && return 1
-    m_int="${m%%.*}"
-    gt "$cutoff" "$m_int"
-}
+# flock の有無 (util-linux が無い環境ではロック無しで動作させる)
+if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 
-# ファイルの mtime (epoch秒, GNU/BSD 両対応)。取得できなければ空文字。
-# 整数秒のみ (report 側 mtime は find %T@ による小数秒であり精度が異なる。
-# 比較箇所では report 側を整数秒に切り捨てて揃えること。F2 参照)。
-# 既知の制約 (F3, 未修正): symlink には GNU `stat -c %Y` がリンク自身の mtime を
-# 返す (参照先ではない) ため、`.squad_session` を symlink にして参照先だけを
-# 差し替えると、ここで取得する mtime は更新されない。
-file_mtime() {
-    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+# report ledger: 「この report をこの mtime で通知済みか」を全 watcher 共有の
+# ファイルで管理する (Issue #22)。1 report path あたり 1 行 "<mtime整数秒>\t<path>"。
+#
+# ledger_claim <path> <mtime(小数秒可)>
+#   通知権を取得できたら 0 (= 未通知だったので通知すべき) を返し、ledger を更新する。
+#   既に同じ mtime で通知済みなら 1 を返す (通知しない)。
+#   判定と更新は flock で直列化するので、複数 watcher が同時に走っても同じ report が
+#   二重通知されることはない。
+#
+# mtime は find %T@ の小数秒を整数秒に切り捨てて記録・比較する (ファイルシステムや
+# 取得経路による小数部の揺れで同一 report を別物と誤判定しないため)。同一秒内に
+# report が 2 回更新された場合、後者は通知されない可能性があるが、worker の report
+# 更新がそこまで高頻度になることは無い。
+ledger_claim() {
+    local f="$1" m_int="${2%%.*}"
+    (
+        if [ "$HAVE_FLOCK" -eq 1 ]; then
+            # ロックを取れなかった場合は「未通知」側に倒す (握り潰しより再通知を選ぶ)
+            flock -w 5 9 || exit 0
+        fi
+        local prev tmp
+        prev=$(awk -F'\t' -v p="$f" '$2==p{v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null)
+        [ "$prev" = "$m_int" ] && exit 1
+        tmp="${LEDGER_FILE}.tmp.$$"
+        {
+            [ -f "$LEDGER_FILE" ] && awk -F'\t' -v p="$f" '$2!=p' "$LEDGER_FILE"
+            printf '%s\t%s\n' "$m_int" "$f"
+        } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
+        exit 0
+    ) 9>"$LEDGER_LOCK"
 }
 
 # このセッションが担当する project ディレクトリ一覧 (毎サイクル再計算し、実行中の
@@ -299,22 +319,23 @@ gc_worktrees() {
 }
 
 OWNED=()                   # このセッション担当の project dir 一覧 (refresh_owned_projects が更新)
-declare -A REPORT_SEEN     # report path -> mtime
 declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
-declare -A PREV_OWNED      # 直前サイクルで担当していた project dir 集合 (新規担当検知用)
-declare -A EVER_OWNED      # このセッション(プロセス)が過去に一度でも担当した project dir。
-                           # プロセス再起動で失われる (in-memory)。既読化カットオフの要否判定に使う。
-declare -A NEWLY_OWNED_CUTOFF  # 新規担当 project dir -> 既読化カットオフ mtime (毎サイクル再構築)
-declare -A SUPPRESSED_COUNT    # 新規担当 project dir -> 実際に既読化した report 件数 (毎サイクル再構築)
 
-log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
+# ledger が未作成 (この機構の初回導入 or queue の作り直し) なら、初回サイクルは既存
+# report を「通知済み」として登録するだけで通知しない (過去 report の一斉再通知を防ぐ)。
+# ledger が既にある場合は初回サイクルから ledger の内容だけで判定する。watcher 停止中に
+# 書かれた未通知 report もこれで拾える。
+mkdir -p "$QUEUE_DIR"
+LEDGER_BASELINE=0
+[ -f "$LEDGER_FILE" ] || LEDGER_BASELINE=1
+
+log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s ledger=${LEDGER_FILE}$([ "$LEDGER_BASELINE" -eq 1 ] && echo ' [baseline]'))"
 warn_missing_markers
 sleep "$BOOT_DELAY"
 
-FIRST=1
 LAST_DISCOVERY=0
 LAST_SWEEP=0
 LAST_GC=0
@@ -326,98 +347,43 @@ while true; do
 
     refresh_owned_projects
 
-    # 新規に担当になった project (このサイクルで初めて OWNED になった) を検出。
-    #
-    # - このセッション(プロセス)がこれまで一度も担当したことが無い project
-    #   (EVER_OWNED 未登録 = 初回担当): マーカーファイル (無ければ project dir 自体)
-    #   の mtime を既読化カットオフとし、それより真に古い report だけを既読化する
-    #   (同一秒扱いは通知側に倒す。詳細は下の「既知の制約 (F2)」参照)。
-    #   マーカー変更とほぼ同時 (同一サイクル内) に書かれた新規 report は mtime が
-    #   カットオフより新しいため通常どおり通知される (PR #21 review major 対応)。
-    # - 過去に一度でも担当したことがある project が再び担当に戻ってきた場合
-    #   (EVER_OWNED 登録済み): 既読化そのものを行わない。このセッション自身が過去に
-    #   見た (REPORT_SEEN に記録済みで mtime が不変な) report は再通知されないが、
-    #   REPORT_SEEN はセッション(プロセス)ごとに分離したメモリ上の状態であり、
-    #   他セッションが通知済みかどうかまでは分からない。そのため「二重通知の心配は
-    #   無い」とは言えず、A→B→A のように担当が移った場合、B が担当中に発生し B が
-    #   既に通知済みの report を A が再び通知することがある (既知の制約、詳細は
-    #   下記 F1 参照)。それでも、他セッション担当中に書かれ未通知のまま残っている
-    #   report を握り潰さないことを優先し、既読化はスキップする (PR #21 review
-    #   minor 対応)。
-    # 起動直後の全体 baseline は既存の FIRST フラグで処理済みなのでここでは対象外。
-    #
-    # 既知の制約 (未修正。PR #21 Codex cross-review 指摘、根本対応は別 Issue):
-    #   F1 (major, 上記参照): REPORT_SEEN はセッションごとに分離しており、通知済み
-    #     状態を watcher 間で共有する永続 ledger が無いため、A→B→A で B 通知済みの
-    #     report を A が再通知し得る (二重通知)。
-    #   F3 (minor): 既読化カットオフは `.squad_session` の mtime を「担当が切り替わった
-    #     時刻」の代理として使っているが、mtime は owner 変更時刻を正確には表さない。
-    #     `cp -p` や過去 mtime のファイルを `mv` して置換すると owner が変わっても
-    #     mtime は保持され、symlink 化して参照先だけ差し替えると GNU `stat -c %Y` は
-    #     symlink 自身の mtime を返すため cutoff が更新されない。時計ずれや保存された
-    #     未来 mtime がある場合は逆方向 (正当な report の握り潰し) にも倒れ得る。
-    #
-    # 残留リスク: マーカーファイルが「初回担当時点より後」に再度 touch/編集され、かつ
-    # その直前に正当な新規 report が書かれてから watcher がまだそれを処理していない
-    # (watcher 停止等) 場合、その report の mtime がマーカー更新後の mtime より古くなり
-    # 既読化されてしまう可能性がある。同種のレースが理論上マーカー編集のたびに残るが、
-    # 発生には「マーカー編集 + report 未処理のまま次の編集」という限定的な条件が必要。
-    NEWLY_OWNED_DIRS=()
-    NEWLY_OWNED_CUTOFF=()
-    SUPPRESSED_COUNT=()
-    if [ "$FIRST" -eq 0 ]; then
-        for d in "${OWNED[@]}"; do
-            [ -n "${PREV_OWNED[$d]:-}" ] && continue
-            NEWLY_OWNED_DIRS+=("$d")
-            if [ -z "${EVER_OWNED[$d]:-}" ]; then
-                # 既読化カットオフ: .squad_session の mtime (無ければ project dir の mtime)
-                if [ -f "$d/.squad_session" ]; then cutoff="$(file_mtime "$d/.squad_session")"; else cutoff="$(file_mtime "$d")"; fi
-                NEWLY_OWNED_CUTOFF[$d]="${cutoff:-0}"
-            fi
-        done
-    fi
-
     # --- 1. report-bridge: 新規/更新された report を Dispatcher へ橋渡し ---
     #   status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
+    #
+    # 通知するかどうかは共有 ledger (queue/.report_ledger) だけで決める。
+    # 「担当が切り替わった project の過去 report を既読化する」というヒューリスティック
+    # (PR #21) は不要になったので削除した。ledger は project の担当セッションに関係なく
+    # 「誰かが既に通知したか」を持つため、
+    #   - A→B→A と担当が移っても B 通知済み report は再通知されない (Issue #22 / F1)
+    #   - マーカーの mtime を担当切替時刻の代理に使う必要が無い (F3)
+    # 唯一の例外が LEDGER_BASELINE で、ledger 自体が無い初回だけ既存 report を
+    # 通知せず登録する。
+    baseline_claimed=0
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
-        if [ "${REPORT_SEEN[$f]:-}" != "$m" ]; then
-            REPORT_SEEN[$f]="$m"
-            suppress=0
-            for d in "${NEWLY_OWNED_DIRS[@]}"; do
-                case "$f" in
-                    "$d"/*)
-                        cutoff="${NEWLY_OWNED_CUTOFF[$d]:-}"
-                        if should_suppress "$cutoff" "$m"; then
-                            suppress=1
-                            SUPPRESSED_COUNT[$d]=$(( ${SUPPRESSED_COUNT[$d]:-0} + 1 ))
-                        fi
-                        break
-                        ;;
-                esac
-            done
-            if [ "$FIRST" -eq 0 ] && [ "$suppress" -eq 0 ]; then
-                wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
-                kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
-                status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
-                if [ "$status" = "blocked" ]; then
-                    log "report 検知(blocked): $f -> Dispatcher [INBOX] 通知"
-                    notify_dispatcher "[INBOX] Worker${wnum} が blocked: 検証ゲート未通過。${f} の notes/verdict を確認し、ユーザーに優先報告してください。"
-                else
-                    log "report 検知: $f -> Dispatcher 通知"
-                    notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
-                fi
-            fi
+        ledger_claim "$f" "$m" || continue      # 既に (誰かが) 通知済み
+        if [ "$LEDGER_BASELINE" -eq 1 ]; then
+            baseline_claimed=$(( baseline_claimed + 1 ))
+            continue
+        fi
+        wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
+        kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
+        status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
+        if [ "$status" = "blocked" ]; then
+            log "report 検知(blocked): $f -> Dispatcher [INBOX] 通知"
+            notify_dispatcher "[INBOX] Worker${wnum} が blocked: 検証ゲート未通過。${f} の notes/verdict を確認し、ユーザーに優先報告してください。"
+        else
+            log "report 検知: $f -> Dispatcher 通知"
+            notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
         fi
     done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null)
 
-    # 実際に既読化した report が1件以上ある project のみログを出す (PR #21 review nit 対応)
-    for d in "${NEWLY_OWNED_DIRS[@]}"; do
-        cnt="${SUPPRESSED_COUNT[$d]:-0}"
-        [ "$cnt" -gt 0 ] && log "project $(basename "$d") が新規担当になったため既存 report ${cnt} 件を既読化 (再通知しない)"
-    done
+    if [ "$LEDGER_BASELINE" -eq 1 ]; then
+        log "ledger baseline: 既存 report ${baseline_claimed} 件を通知済みとして登録 (通知なし)"
+        LEDGER_BASELINE=0
+    fi
 
     # --- 2 & 3. 承認オートアンサー + 停止検知 (worker 1-4) ---
     for N in 1 2 3 4; do
@@ -526,12 +492,5 @@ except Exception:
         LAST_GC="$now_ts"
     fi
 
-    # 次サイクルの新規担当検知のため、今回の OWNED を記録
-    PREV_OWNED=()
-    for d in "${OWNED[@]}"; do PREV_OWNED[$d]=1; done
-    # このプロセスが一度でも担当した project として記録 (再担当時の既読化スキップ判定に使用)
-    for d in "${OWNED[@]}"; do EVER_OWNED[$d]=1; done
-
-    FIRST=0
     sleep "$INTERVAL"
 done

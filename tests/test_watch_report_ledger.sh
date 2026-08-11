@@ -1,0 +1,117 @@
+#!/bin/bash
+# watch.sh の report 通知済み ledger (Issue #22 / PR #21 cross-review F1・F3 の根本対応)
+# に対する挙動テスト。
+#
+# grep によるコード存在確認ではなく、watch.sh 本体から ledger_claim() をそのまま
+# source して実際の判定挙動を検証する。ledger_claim() より後 (while true ループ) は
+# 実行しないよう、ループ開始行より前だけを抜き出して source する。
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WATCH_SH="$SCRIPT_DIR/watch.sh"
+
+TMPDIR_T="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_T"' EXIT
+
+# ledger は実運用の queue/ ではなくテスト用の一時ファイルに向ける
+export WATCH_LEDGER_FILE="$TMPDIR_T/ledger"
+
+# "OWNED=()" 以降は起動時ログ・BOOT_DELAY sleep・メインループを含むため、
+# 関数定義 (gt/ledger_claim 等) のみを含む手前までを source する。
+CUTOFF_LINE="$(grep -n '^OWNED=()' "$WATCH_SH" | head -n1 | cut -d: -f1)"
+if [ -z "$CUTOFF_LINE" ]; then
+    echo "FAIL: watch.sh 内に 'OWNED=()' が見つからず、関数定義を安全に source できない"
+    exit 1
+fi
+
+FUNCS_FILE="$TMPDIR_T/funcs.sh"
+head -n "$((CUTOFF_LINE - 1))" "$WATCH_SH" > "$FUNCS_FILE"
+
+# shellcheck disable=SC1090
+source "$FUNCS_FILE"
+
+pass=0
+fail=0
+
+check() {
+    local desc="$1" f="$2" m="$3" expect="$4" got
+    if ledger_claim "$f" "$m"; then
+        got="NOTIFY"
+    else
+        got="SKIP"
+    fi
+    if [ "$got" = "$expect" ]; then
+        echo "PASS: $desc (path=$(basename "$f") m=$m -> $got)"
+        pass=$((pass + 1))
+    else
+        echo "FAIL: $desc (path=$(basename "$f") m=$m -> got $got, expect $expect)"
+        fail=$((fail + 1))
+    fi
+}
+
+assert_eq() {
+    local desc="$1" got="$2" expect="$3"
+    if [ "$got" = "$expect" ]; then
+        echo "PASS: $desc (=$got)"
+        pass=$((pass + 1))
+    else
+        echo "FAIL: $desc (got $got, expect $expect)"
+        fail=$((fail + 1))
+    fi
+}
+
+A="/q/projects/pj_a/reports/worker1_report.yaml"
+B="/q/projects/pj_b/reports/worker2_review.yaml"
+
+# 1. ledger がまだ無い状態での初回 claim -> 通知 (ファイルも生成される)
+check "初回 claim (ledger 未作成)" "$A" "100.5" "NOTIFY"
+assert_eq "ledger ファイルが生成される" "$([ -f "$WATCH_LEDGER_FILE" ] && echo yes || echo no)" "yes"
+
+# 2. 同じ mtime での再 claim -> 通知しない (毎サイクルの再通知が起きない)
+check "同一 mtime の再 claim" "$A" "100.5" "SKIP"
+
+# 3. 小数部だけが違う同一秒 -> 同一とみなして通知しない
+#    (find %T@ の小数部は取得経路で揺れうるため整数秒に切り捨てて比較する)
+check "同一秒・小数部のみ差異 (100.5 -> 100.9)" "$A" "100.9" "SKIP"
+check "同一秒・小数部なし (100.5 -> 100)" "$A" "100" "SKIP"
+
+# 4. report が更新されて mtime が進んだら再通知する
+check "mtime が進んだ report" "$A" "101.0" "NOTIFY"
+check "進んだ mtime の再 claim" "$A" "101.2" "SKIP"
+
+# 5. 別 path は独立に判定される
+check "別 report の初回 claim" "$B" "100.5" "NOTIFY"
+check "別 report の再 claim" "$B" "100.5" "SKIP"
+
+# 6. 1 path につき 1 行しか持たない (ledger が単調増加しない)
+assert_eq "ledger 行数 (path 数と一致)" "$(wc -l < "$WATCH_LEDGER_FILE" | tr -d ' ')" "2"
+assert_eq "A の記録 mtime は最新のみ" \
+    "$(awk -F'\t' -v p="$A" '$2==p{print $1}' "$WATCH_LEDGER_FILE" | tr '\n' ',')" "101,"
+
+# 7. F1 回帰: 別 watcher プロセス (別セッション) が通知済みなら、こちらは再通知しない。
+#    担当が A→B→A と移っても二重通知にならないことの中核。
+C="/q/projects/pj_c/reports/worker3_report.yaml"
+bash -c "export WATCH_LEDGER_FILE='$WATCH_LEDGER_FILE'; source '$FUNCS_FILE'; ledger_claim '$C' '200.0'"
+rc_other=$?
+assert_eq "別プロセスの初回 claim は成功" "$rc_other" "0"
+check "別プロセスが通知済みの report" "$C" "200.0" "SKIP"
+
+# 8. 別プロセスが通知した後に report が更新されたら、こちらは通知する
+check "別プロセス通知後に更新された report" "$C" "201.0" "NOTIFY"
+
+# 9. 同時 claim (flock による直列化): 同じ path/mtime を並行して claim しても
+#    成功するのは 1 プロセスだけ。
+D="/q/projects/pj_d/reports/worker1_report.yaml"
+RES_DIR="$TMPDIR_T/race"
+mkdir -p "$RES_DIR"
+for i in 1 2 3 4 5; do
+    bash -c "export WATCH_LEDGER_FILE='$WATCH_LEDGER_FILE'
+             source '$FUNCS_FILE'
+             ledger_claim '$D' '300.0' && echo ok > '$RES_DIR/$i'" &
+done
+wait
+assert_eq "並行 claim 5 本のうち成功は 1 本のみ" "$(find "$RES_DIR" -type f | wc -l | tr -d ' ')" "1"
+
+echo "---"
+echo "pass=$pass fail=$fail"
+[ "$fail" -eq 0 ]

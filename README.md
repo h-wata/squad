@@ -89,6 +89,12 @@ tmux attach -t myproj
 `squad` CLI (`squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
 `squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
 
+report を Dispatcher に通知したかどうかは、セッションをまたいで共有する永続 ledger
+`queue/.report_ledger` (1 report につき 1 行、更新は `flock` で直列化) で管理する。
+project の担当セッションが移っても、既に別の watcher が通知した report は再通知されない。
+ledger を消すと「全 report 未通知」ではなく「起動時の既存 report を通知せず登録し直す」
+挙動になる (過去 report の一斉再通知は起きない)。
+
 ## Dispatcher 起動モデルのカスタマイズ
 
 Dispatcher (Pane 0) の起動モデルは既定で `opus`（曖昧な指示の明確化・複雑な判断を担うため）。

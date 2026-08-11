@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shell:
+    name: shell syntax + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (構文チェック)
+        run: |
+          bash -n watch.sh
+          bash -n start.sh
+          bash -n stop.sh
+          for f in tests/*.sh; do bash -n "$f"; done
+
+      - name: tests
+        run: |
+          for f in tests/*.sh; do
+            echo "=== $f ==="
+            bash "$f"
+          done
+
+      - name: git diff --check (whitespace エラー)
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+  shellcheck:
+    name: shellcheck (informational)
+    runs-on: ubuntu-latest
+    # 既存スクリプトに未修正の指摘が残っているため、当面は非ブロッキング。
+    # 指摘を解消したら continue-on-error を外して required check に昇格させる。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: run shellcheck
+        run: shellcheck --severity=warning watch.sh start.sh stop.sh tests/*.sh
