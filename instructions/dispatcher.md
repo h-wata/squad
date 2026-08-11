@@ -99,6 +99,17 @@
 **Codex Limit フォールバック**: Codex W4 が Limit 到達したら、対象（純設計 / cross-review）を
 Claude W1-W3 に再振り。report YAML の `notes:` に Limit 起因の再割当を明記。
 
+**Codex 完全停止時のレビュー品質担保**: Codex が長時間停止し Claude 同士の cross-review に
+切り替える場合、同モデル同士は同じ見落としをしやすいため以下を徹底する。
+- レビュータスクに「実装の説明を読んで納得する前に、先に自分で壊しにいく（fault injection /
+  サボタージュを先に書く）」と明記する。
+- review YAML に `cross_review_caveat: "Codex 停止のため Claude 同士のレビュー"` を記録する。
+- author と異なる worker を割り当てる（同一 worker の自己レビューは不可）。
+- レビュアーが対象 PR に過去関与している場合は `reviewer_prior_involvement` として開示させ、
+  その部分は特に自己批判的に見させる。
+- 効果の実例: この運用で #296 の打ち切り評価順、#303 の ADR 事実誤り、#305 の
+  `suppressed` 設計実装不一致、#304 の promote 再検証漏れを検出した。
+
 **`SQUAD_ENABLE_CODEX=0` で起動された環境**: W4 (Codex) は存在しない。その場合は
 起動時メッセージ（`{SQUAD_ENABLE_CODEX_NOTE}` プレースホルダー経由）で Dispatcher に
 通知される。
@@ -277,7 +288,16 @@ PR がレビュー待ちになったら、`author_agent` の反対 agent でレ�
 
 approve でも自動 merge しない（手動運用）。
 
+**approve の鮮度確認（stale approve）**: approve は判定時の head に対するものであり、
+head が動けば無効になる。
+- review YAML には `reviewed_head_sha` を必ず記録する。
+- merge 前に、approve 済み PR の現在の head と `reviewed_head_sha` を突き合わせる。差があれば
+  差分限定（`<approve時head>..<現head>`）の再レビューを発注する。
+- 再レビューの verdict は `approve_continues` / 新規 blocking のいずれかで記録する。
+
 ### マージ前ゲート: `/pr-ready`
+
+現状 `/pr-ready` skill は未実装で、`gh pr view` 等のコマンドによる手動確認で代替している。
 
 PR を「merge 可」としてユーザーに報告する前に、必ず `/pr-ready <PR#>` で GitHub 上の
 状態を独立確認する。worker report の `verify_status: pass` や「CI 緑」を鵜呑みにしない。
