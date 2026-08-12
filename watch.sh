@@ -83,9 +83,11 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 # メッセージと連結される事象があるため、間に sleep を挟んで別々に送る。
 notify_dispatcher() {
     local msg="$1"
-    tmux send-keys -t "$DISPATCHER" "$msg" 2>/dev/null || return 1
+    # stderr は捨てない。discovery / sweep / stall 通報は戻り値を見ないため、
+    # 握り潰すと「通報した」というログだけ残って実際には届いていない状態になる。
+    tmux send-keys -t "$DISPATCHER" "$msg" || return 1
     sleep 0.5
-    tmux send-keys -t "$DISPATCHER" Enter 2>/dev/null || return 1
+    tmux send-keys -t "$DISPATCHER" Enter || return 1
     sleep 0.3
     return 0
 }
@@ -104,15 +106,15 @@ auto_answer() {
 }
 
 # float epoch 比較 a>b
-gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
+gt() { LC_ALL=C awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a+0 > b+0)}'; }
 
 # flock の有無 (util-linux が無い環境ではロック無しで動作させる)
 if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 
 # report ledger: report の配達状態を全 watcher 共有のファイルで管理する (Issue #22)。
-# 1 report path あたり 1 行 "<mtime整数秒>\t<lease期限>\t<path>"。
-#   lease 期限 0        = 配達済み (Dispatcher へ送信成功)
-#   lease 期限 epoch 秒 = 配達中 (誰かが claim して送信しようとしている)
+# 1 report path あたり 1 行 "<mtime>\t<lease>\t<path>"。
+#   lease 0                    = 配達済み (Dispatcher へ送信成功)
+#   lease "<epoch 秒>:<nonce>" = 配達中 (誰かが claim して送信しようとしている)
 #
 # 「claim = 配達済み」にはしない (claim と送信成功の 2 段階にする)。claim した時点で
 # 配達済みにすると、送信に失敗した report や、送信前に watcher が死んだ report が
@@ -131,9 +133,14 @@ if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 # (= claim 時に書いた lease 期限値) で照合してから更新する。mtime だけで照合すると、
 # A の lease が切れた後に B が同じ mtime を再 claim した状況で、遅れて戻ってきた A が
 # B の claim を勝手に commit したり、B の有効な claim を release で消したりできてしまう
-# (PR #24 Codex review 4th round)。lease 期限は claim のたびに now+LEDGER_LEASE で
-# 前回より必ず大きくなる (再 claim は前の lease が切れた後にしか成立しない) ため、
-# 同一 path の異なる claim が同じ token を持つことはない。
+# (PR #24 Codex review 4th round)。
+#
+# token は "<lease 期限 epoch 秒>:<nonce>" の形にする。期限値だけでは一意にならない:
+# 新しい mtime の claim は既存 lease の期限を待たずに成立するため、担当が切り替わる
+# 瞬間などに 2 つの watcher が同じ秒に同じ path を claim すると、期限値 (now+LEASE) が
+# 一致してしまう (PR #24 Claude review #1)。nonce に PID と $RANDOM を混ぜることで
+# プロセスをまたいでも token が衝突しないようにする。lease 切れ判定では ':' より前
+# (期限 epoch 秒) だけを見る。
 #
 # commit / release に失敗しても (ledger が書けない等)、lease 期限切れで再び claim
 # されるので通知が永久に消えることはない。副作用は「約 LEDGER_LEASE 秒後に再通知」。
@@ -144,18 +151,21 @@ if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
 # claim されて同じ版が二重通知される。副作用として、記録済みの mtime を下回る report は
 # 通知されない: `cp -p` での復元など過去 mtime を保持した置き換えや、システム時計が
 # 巻き戻った後に書かれた report が該当する。report は常に同一マシンで現在時刻のまま
-# 書かれる、という前提に依存している。
+# 書かれる、という前提に依存している。この抑止は気づけないと困るので、path ごとに
+# 1 回だけ WARN をログに出す (LEDGER_RC_STALE)。
 #
 # ledger にアクセスできない異常時 (lock file を開けない・書き込めない) は「未配達」
 # 側に倒す。握り潰し (気づけない) より再通知 (煩いが気づける) を選ぶ、という
 # watch.sh 全体の方針に合わせる。このため subshell の「配達済み/配達中」だけを 9 と
 # いう専用の終了コードで表し、リダイレクト失敗など他の異常 (bash が返す 1) と区別する。
 #
-# mtime は find %T@ の小数秒を整数秒に切り捨てて記録・比較する (ファイルシステムや
-# 取得経路による小数部の揺れで同一 report を別物と誤判定しないため)。同一秒内に
-# report が 2 回更新された場合、後者は通知されない可能性があるが、worker の report
-# 更新がそこまで高頻度になることは無い。
+# mtime は find %T@ が返す文字列 (小数秒込み) をそのまま記録・比較する。整数秒に
+# 切り捨てると、同一秒内に書き直された report (例: in_progress -> blocked) が同じ版と
+# みなされて恒久的に握り潰される (PR #24 Claude review #2)。この経路の mtime は
+# すべて同じ find %T@ から得ているので、取得経路の違いによる精度の揺れは起きない。
+# 同一版かどうかは文字列一致、新旧の判定だけ数値比較 (gt) で行う。
 LEDGER_RC_SEEN=9      # subshell 内で「配達済み/配達中なので claim しない」終了コード
+LEDGER_RC_STALE=10    # 記録より古い mtime (巻き戻し) なので claim しない終了コード
 LEDGER_LEASE="${WATCH_LEDGER_LEASE:-60}"   # 配達 lease の有効秒数
 
 # path の現在の記録を "<mtime>\t<lease期限>" で返す (未登録なら空)。
@@ -173,7 +183,7 @@ _ledger_without() {
 }
 
 ledger_claim() {
-    local f="$1" m_int="${2%%.*}" rc
+    local f="$1" m="$2" rc
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             # ロックを取れなかった場合は「未配達」側に倒す
@@ -184,23 +194,25 @@ ledger_claim() {
         mt=""; ut=""
         [ -n "$rec" ] && IFS=$'\t' read -r mt ut <<< "$rec"
         now=$(date +%s)
-        if [ -n "$mt" ] && [ "$m_int" -le "$mt" ] 2>/dev/null; then
-            # 記録より古い版は常に skip。lease 切れでも claim させない: 記録上の mtime を
-            # 下げずに claim すると、呼び出し側が持つ古い mtime と ledger の mtime が
-            # 食い違い、送信後の commit が空振りして lease 切れ後に二重通知される
-            # (PR #24 Codex review 4th round)。
-            [ "$m_int" -lt "$mt" ] 2>/dev/null && exit "$LEDGER_RC_SEEN"
-            # 同じ版。配達済み (lease 0)、または他 watcher が配達中なら触らない。
-            # lease が切れていれば配達やり直しとして claim し直す。
-            if [ "$ut" = "0" ] || [ "$now" -lt "$ut" ] 2>/dev/null; then
-                exit "$LEDGER_RC_SEEN"
+        if [ -n "$mt" ]; then
+            if [ "$m" = "$mt" ]; then
+                # 同じ版。配達済み (lease 0)、または他 watcher が配達中なら触らない。
+                # lease が切れていれば配達やり直しとして claim し直す。
+                if [ "$ut" = "0" ] || [ "$now" -lt "${ut%%:*}" ] 2>/dev/null; then
+                    exit "$LEDGER_RC_SEEN"
+                fi
+            elif ! gt "$m" "$mt"; then
+                # 記録より古い版は lease の状態によらず常に skip。claim を許すと記録上の
+                # mtime と呼び出し側が持つ mtime が食い違い、送信後の commit が空振りして
+                # lease 切れ後に二重通知される (PR #24 Codex review 4th round)。
+                exit "$LEDGER_RC_STALE"
             fi
         fi
-        token=$((now + LEDGER_LEASE))
+        token="$((now + LEDGER_LEASE)):$$-$RANDOM"
         tmp="${LEDGER_FILE}.tmp.$$"
         {
             [ -f "$LEDGER_FILE" ] && _ledger_without "$f"
-            printf '%s\t%s\t%s\n' "$m_int" "$token" "$f"
+            printf '%s\t%s\t%s\n' "$m" "$token" "$f"
         } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
         # 書き込みに失敗した場合 (権限・容量など) も claim 成功として扱う。ledger が
         # 更新されないので毎サイクル再通知されて煩いが、通知が消えるよりは気づける
@@ -210,14 +222,18 @@ ledger_claim() {
         exit 0
     ) 9>"$LEDGER_LOCK"
     rc=$?
-    # 9 以外 (0 = claim 成功、1 = lock file を開けない等の異常) はすべて通知させる
-    [ "$rc" -ne "$LEDGER_RC_SEEN" ]
+    # 9 / 10 以外 (0 = claim 成功、1 = lock file を開けない等の異常) はすべて通知させる
+    case "$rc" in
+        "$LEDGER_RC_SEEN")  return 1 ;;
+        "$LEDGER_RC_STALE") return "$LEDGER_RC_STALE" ;;
+        *)                  return 0 ;;
+    esac
 }
 
 # 送信成功後に配達済み (lease 0) へ確定する。自分の claim でなくなっていれば何もしない。
 # ledger を書けなければ 1 を返す (lease 期限切れ後に再通知される)。
 ledger_commit() {
-    local f="$1" m_int="${2%%.*}" token="${3:-}"
+    local f="$1" m="$2" token="${3:-}"
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
@@ -226,13 +242,13 @@ ledger_commit() {
         rec="$(_ledger_lookup "$f")"
         [ -n "$rec" ] || exit 1
         IFS=$'\t' read -r mt ut <<< "$rec"
-        [ "$mt" = "$m_int" ] || exit 0          # 別の版で上書きされている = 何もしない
+        [ "$mt" = "$m" ] || exit 0              # 別の版で上書きされている = 何もしない
         [ "$ut" = "0" ] && exit 0               # 既に配達済み
         [ "$ut" = "$token" ] || exit 0          # 別 watcher の claim = 触らない
         tmp="${LEDGER_FILE}.tmp.$$"
         {
             _ledger_without "$f"
-            printf '%s\t0\t%s\n' "$m_int" "$f"
+            printf '%s\t0\t%s\n' "$m" "$f"
         } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE" || { rm -f "$tmp"; exit 1; }
         rm -f "$tmp"
         exit 0
@@ -282,11 +298,17 @@ ledger_release() {
 # 何もしない (先着優先)。
 ledger_baseline_seed() {
     local tmp seeded=0
-    tmp="$(mktemp "${LEDGER_FILE}.seed.XXXXXX" 2>/dev/null)" || return 1
+    tmp="$(mktemp "${LEDGER_FILE}.seed.XXXXXX" 2>/dev/null)" || {
+        # seed できないまま監視を始めると既存 report が一斉通知される。抑止側に倒すと
+        # 正当な未通知 report まで消えるので通知は止めないが、必ずログに残す。
+        log "[WARN] ledger baseline seed 用の一時ファイルを作成できません (${LEDGER_FILE}.seed.*)。" \
+            "既存 report が一斉通知される可能性があります"
+        return 1
+    }
     find "$QUEUE_DIR/projects" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null \
-        | awk -F'\t' '{split($1, a, "."); print a[1] "\t0\t" $2}' > "$tmp"
+        | awk -F'\t' '{print $1 "\t0\t" $2}' > "$tmp"
     seeded=$(grep -c . "$tmp" 2>/dev/null || true)
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
@@ -489,6 +511,7 @@ declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
+declare -A STALE_LOGGED    # report path -> mtime 巻き戻し抑止をログ済み
 
 mkdir -p "$QUEUE_DIR"
 
@@ -525,7 +548,17 @@ while true; do
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         # 配達権を取る (他が配達済み / 配達中の lease を持っていれば skip)
-        claim_rec=$(ledger_claim "$f" "$m") || continue
+        claim_rec=$(ledger_claim "$f" "$m")
+        claim_rc=$?
+        if [ "$claim_rc" -ne 0 ]; then
+            # mtime 巻き戻しによる抑止は気づけないと困るので path ごとに 1 回だけ残す
+            if [ "$claim_rc" -eq "$LEDGER_RC_STALE" ] && [ -z "${STALE_LOGGED[$f]:-}" ]; then
+                STALE_LOGGED[$f]=1
+                log "[WARN] mtime が ledger の記録より古いため通知しません: $f" \
+                    "(巻き戻し防止。意図した再通知なら touch してください)"
+            fi
+            continue
+        fi
         IFS=$'\t' read -r claim_token prev_mt prev_ut <<< "$claim_rec"
         wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
         kind=report; echo "$f" | grep -q '_review.yaml' && kind=review

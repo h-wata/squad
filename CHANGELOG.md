@@ -22,7 +22,7 @@
 
 - `watch.sh`: report の通知済み状態を全 watcher 共有の永続 ledger
   (`queue/.report_ledger`) に移し、PR #21 Codex cross-review の F1 (major) / F3 (minor)
-  を根本対応した (Issue #22)。1 report path につき 1 行 `<mtime整数秒>\t<path>` を持ち、
+  を根本対応した (Issue #22)。1 report path につき 1 行 `<mtime>\t<path>` を持ち、
   判定と更新を `flock` で直列化する。これにより
   (a) 担当が A→B→A と移っても B が通知済みの report を A が再通知しない、
   (b) `.squad_session` の mtime を「担当切替時刻」の代理に使う必要が無くなった
@@ -30,7 +30,7 @@
   (c) watcher 停止中に書かれた report を再起動後に拾える (従来は起動時 baseline で
   握り潰していた)。担当切替時の既読化ヒューリスティック
   (`REPORT_SEEN` / `EVER_OWNED` / marker mtime cutoff) は不要になったため削除。
-  記録は `<mtime整数秒>\t<lease期限>\t<path>` の 3 列で、claim (配達権の取得) と
+  記録は `<mtime>\t<lease>\t<path>` の 3 列で、claim (配達権の取得) と
   commit (配達済みの確定) の 2 段階にしている。claim した時点で「通知済み」にすると、
   送信に失敗した report や送信前に watcher が死んだ report が二度と橋渡しされないため、
   claim は期限付きの lease として記録し、送信に成功して初めて配達済みへ確定する。
@@ -49,6 +49,20 @@
   4th round B2)。また lease 期限切れであっても記録より古い mtime は claim させない
   (許すと ledger の mtime と呼び出し側の mtime が食い違い、commit が空振りして
   lease 切れ後に二重通知される。同 B1)。
+  claim token は "<lease 期限>:<nonce>" 形式にする。期限値だけでは、新しい mtime の
+  claim が既存 lease を待たずに成立する都合で、担当切替の瞬間に 2 つの watcher が
+  同じ秒に同じ path を claim すると衝突しうる (PR #24 Claude review #1)。
+  mtime は find %T@ の文字列を小数秒込みでそのまま記録・比較する。整数秒に切り捨てると
+  同一秒内に書き直された report (in_progress -> blocked 等) が同じ版とみなされて恒久的に
+  握り潰される (同 #2)。同一版かは文字列一致、新旧判定のみ数値比較で行う。
+  mtime が記録より古い report は引き続き通知しないが (ledger 巻き戻し防止)、
+  気づけない抑止にならないよう path ごとに 1 回 WARN をログに出す (同 #8)。
+  なお次の 2 つは「握り潰して気づけない」より「重複通知」を選ぶ方針上の割り切りで、
+  仕様として残している:
+  (a) ledger 生成後に queue/projects へ現れた project (archive からの復元など) の
+      既存 report は、ledger に記録が無いため通知される。
+  (b) ledger ファイルを削除して作り直すと、その時点で queue にある report は
+      すべて通知済みとして再登録される (停止中セッションの未配達 report を含む)。
   ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
   すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
   セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。

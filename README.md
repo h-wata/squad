@@ -96,7 +96,12 @@ project の担当セッションが移っても、既に別の watcher が通知
 失敗した report や、送信前に watcher が落ちた report は lease 期限切れ後に再送される
 (期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。
 ledger を消すと「全 report 未通知」ではなく「起動時の既存 report を通知せず登録し直す」
-挙動になる (過去 report の一斉再通知は起きない)。
+挙動になる (過去 report の一斉再通知は起きない)。このとき、停止中の別セッションが
+担当する未通知 report も通知済みとして登録される点に注意 (ledger の削除は全 watcher が
+止まっている状態で行うこと)。逆に、ledger がある状態で `queue/projects/<pj>` を後から
+配置した場合 (archive からの復元など) は、その project の既存 report が新着として
+一斉に通知される。通知させたくない場合は復元前に watcher を止め、ledger に該当行を
+追記するか ledger ごと作り直す。
 
 ## Dispatcher 起動モデルのカスタマイズ
 

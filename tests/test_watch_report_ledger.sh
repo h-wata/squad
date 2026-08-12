@@ -93,20 +93,23 @@ assert_eq "claim 直後は配達中 (lease 期限が入る)" "$([ "$(led_ut "$A"
 # 2. 配達中 (lease 有効) の間は他の watcher が同じ版を claim できない
 check "配達中の同一 mtime を再 claim" "$A" "100.5" "SKIP"
 
-# 3. 小数部だけが違う同一秒 -> 同一とみなす
-#    (find %T@ の小数部は取得経路で揺れうるため整数秒に切り捨てて比較する)
-check "同一秒・小数部のみ差異 (100.5 -> 100.9)" "$A" "100.9" "SKIP"
-check "同一秒・小数部なし (100.5 -> 100)" "$A" "100" "SKIP"
-
-# 4. 送信成功で配達済み (lease 0) に確定し、以後は lease 期限に関係なく再通知されない
+# 3. 送信成功で配達済み (lease 0) に確定し、以後は lease 期限に関係なく再通知されない
 commit_pending "$A" "100.5"
 assert_eq "commit で配達済みになる" "$(led_ut "$A")" "0"
 check "配達済みの report は再通知されない" "$A" "100.5" "SKIP"
 
+# 4. 同一秒内に書き直された report も別の版として通知する (小数秒まで比較する)。
+#    整数秒に切り捨てると in_progress -> blocked の書き直しが恒久的に握り潰される。
+check "同一秒・小数部のみ差異 (100.5 -> 100.9)" "$A" "100.9" "NOTIFY"
+commit_pending "$A" "100.9"
+check "同一秒でも古い小数部 (100.5) には巻き戻らない" "$A" "100.5" "SKIP"
+
 # 5. report が更新されて mtime が進んだら再通知する
 check "mtime が進んだ report" "$A" "101.0" "NOTIFY"
 commit_pending "$A" "101.0"
-check "配達済みの新しい版も再通知されない" "$A" "101.2" "SKIP"
+check "配達済みの同一 mtime は再通知されない" "$A" "101.0" "SKIP"
+check "さらに新しい版は通知する" "$A" "101.2" "NOTIFY"
+commit_pending "$A" "101.2"
 
 # 6. 別 path は独立に判定される
 check "別 report の初回 claim" "$B" "100.5" "NOTIFY"
@@ -114,7 +117,7 @@ check "別 report の再 claim" "$B" "100.5" "SKIP"
 
 # 7. 1 path につき 1 行しか持たない (ledger が単調増加しない)
 assert_eq "ledger 行数 (path 数と一致)" "$(wc -l < "$LEDGER_FILE" | tr -d ' ')" "2"
-assert_eq "A の記録 mtime は最新のみ" "$(led_mt "$A")" "101"
+assert_eq "A の記録 mtime は最新のみ" "$(led_mt "$A")" "101.2"
 
 # 8. F1 回帰: 別 watcher プロセス (別セッション) が配達済みなら、こちらは再通知しない。
 #    担当が A→B→A と移っても二重通知にならないことの中核。
@@ -159,7 +162,7 @@ check "配達済みになれば lease に関係なく skip" "$K" "400.0" "SKIP"
 E="/q/projects/pj_e/reports/worker1_report.yaml"
 deliver "$E" "101.0"
 check "古い mtime (更新前スナップショット) は claim しない" "$E" "100.0" "SKIP"
-assert_eq "ledger は巻き戻らない" "$(led_mt "$E")" "101"
+assert_eq "ledger は巻き戻らない" "$(led_mt "$E")" "101.0"
 
 # 13. ledger_release: 送信に失敗したときのロールバック。
 #     claim 前が未登録なら行ごと消え、次サイクルで再通知できる。
@@ -177,9 +180,9 @@ I="/q/projects/pj_i/reports/worker1_report.yaml"
 deliver "$I" "100.0"
 # 新版 101 を claim (通知しようとした)
 IFS=$'\t' read -r tok_i pmt_i put_i <<< "$(ledger_claim "$I" "101.0")"
-assert_eq "claim は上書き前の記録を返す" "$pmt_i/$put_i" "100/0"
+assert_eq "claim は上書き前の記録を返す" "$pmt_i/$put_i" "100.0/0"
 ledger_release "$I" "$tok_i" "$pmt_i" "$put_i"   # 送信に失敗 -> ロールバック
-assert_eq "release で 100 に戻る (行は消えない)" "$(led_mt "$I")" "100"
+assert_eq "release で 100 に戻る (行は消えない)" "$(led_mt "$I")" "100.0"
 assert_eq "戻した記録は配達済みのまま" "$(led_ut "$I")" "0"
 check "巻き戻った隙に古い版 100 を再 claim できない" "$I" "100.0" "SKIP"
 check "新版 101 は次サイクルで再通知できる" "$I" "101.0" "NOTIFY"
@@ -187,7 +190,7 @@ check "新版 101 は次サイクルで再通知できる" "$I" "101.0" "NOTIFY"
 # 15. release は他 watcher が新しい版で claim し直した記録を壊さない
 commit_pending "$I" "101.0"
 ledger_release "$I" "999999999" "" ""
-assert_eq "自分の claim でなければ release しない" "$(led_mt "$I")" "101"
+assert_eq "自分の claim でなければ release しない" "$(led_mt "$I")" "101.0"
 
 # 16. 旧形式 (2 列 "<mtime>\t<path>") の ledger は配達済みとして読む
 L="/q/projects/pj_l/reports/worker1_report.yaml"
@@ -205,7 +208,7 @@ SAVED_LEASE="$LEDGER_LEASE"
 LEDGER_LEASE=0
 check "lease 0 で新版 101 を claim (配達しないまま放置)" "$N1" "101.0" "NOTIFY"
 check "lease 切れでも古い mtime 100 は claim しない" "$N1" "100.0" "SKIP"
-assert_eq "古い claim を弾いても ledger は巻き戻らない" "$(led_mt "$N1")" "101"
+assert_eq "古い claim を弾いても ledger は巻き戻らない" "$(led_mt "$N1")" "101.0"
 check "lease 切れの同一版 101 は再 claim できる" "$N1" "101.0" "NOTIFY"
 LEDGER_LEASE="$SAVED_LEASE"
 
@@ -225,6 +228,25 @@ assert_eq "他 watcher の claim を release で壊さない" "$(led_ut "$N2")" 
 ledger_commit "$N2" "700.0" "$tok_b"                # B の commit は通る
 assert_eq "再 claim した watcher は commit できる" "$(led_ut "$N2")" "0"
 
+# 16d. PR #24 Claude review #1 回帰: claim token は同一秒の別 claim とも衝突しない。
+#      新しい mtime の claim は既存 lease を待たずに成立するため、期限値だけを token に
+#      すると担当切替の瞬間に 2 watcher が同じ token を持ちうる。
+N3="/q/projects/pj_n3/reports/worker1_report.yaml"
+tok_1="$(tok_of "$(ledger_claim "$N3" "800.0")")"
+tok_2="$(tok_of "$(ledger_claim "$N3" "800.5")")"   # 同じ秒に別 watcher が新しい版を claim
+assert_eq "同一秒の 2 claim でも token は異なる" \
+    "$([ "$tok_1" != "$tok_2" ] && echo differ || echo same)" "differ"
+ledger_release "$N3" "$tok_1" "" ""                 # 先行 claim の遅れた release
+assert_eq "先行 claim の release は後続 claim を壊さない" "$(led_ut "$N3")" "$tok_2"
+
+# 16e. PR #24 Claude review #8: mtime 巻き戻しによる skip は専用の戻り値で区別する
+#      (呼び出し側が「気づけない抑止」をログに残せるようにするため)。
+deliver "$N3" "801.0" > /dev/null
+ledger_claim "$N3" "800.0" > /dev/null
+assert_eq "巻き戻し skip は LEDGER_RC_STALE を返す" "$?" "$LEDGER_RC_STALE"
+ledger_claim "$N3" "801.0" > /dev/null
+assert_eq "配達済み skip は 1 を返す" "$?" "1"
+
 # 17. ledger を書けない場合、commit / release は失敗 (非 0) を返す。
 #     呼び出し側はログを出すだけでよい (lease 期限切れで再 claim される)。
 #     root では chmod を迂回できるためスキップ。
@@ -238,10 +260,27 @@ if [ "$(id -u)" -ne 0 ]; then
     chmod 700 "$RO_PARENT"
     assert_eq "ledger を書けないとき commit は失敗を返す" "$commit_rc" "1"
     assert_eq "ledger を書けないとき release は失敗を返す" "$rel_rc" "1"
-    assert_eq "失敗時は ledger を書き換えない" "$(led_mt "$M")" "600"
+    assert_eq "失敗時は ledger を書き換えない" "$(led_mt "$M")" "600.0"
 else
     echo "SKIP: commit/release 失敗テスト (root 実行では chmod を迂回できるため)"
 fi
+
+# 17b. PR #24 Claude review #10: claim 側の異常系は「通知する」側に倒れること。
+#      ここが fail-closed に反転すると report が黙って Dispatcher に届かなくなる。
+if [ "$(id -u)" -ne 0 ]; then
+    P1="/q/projects/pj_p1/reports/worker1_report.yaml"
+    RO_PARENT="$(dirname "$LEDGER_FILE")"
+    chmod 500 "$RO_PARENT"
+    check "ledger を書けなくても claim は通知側に倒れる" "$P1" "900.0" "NOTIFY"
+    chmod 700 "$RO_PARENT"
+fi
+
+# 17c. lock file 自体を開けない場合も通知する (9> のリダイレクトが失敗し rc=1 になる)
+SAVED_LOCK="$LEDGER_LOCK"
+LEDGER_LOCK="$TMPDIR_T/no_such_dir/lock"
+P2="/q/projects/pj_p2/reports/worker1_report.yaml"
+check "lock file を開けなくても claim は通知側に倒れる" "$P2" "910.0" "NOTIFY"
+LEDGER_LOCK="$SAVED_LOCK"
 
 # 18. ledger_baseline_seed は担当 project だけでなく queue/projects 配下の全 report を
 #     配達済みとして登録する。後から起動した別セッションの watcher は「ledger がある =
