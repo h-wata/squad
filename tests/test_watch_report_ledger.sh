@@ -295,6 +295,10 @@ if [ "$(id -u)" -ne 0 ]; then
     RO_PARENT="$(dirname "$LEDGER_FILE")"
     chmod 500 "$RO_PARENT"
     check "ledger を書けなくても claim は通知側に倒れる" "$P1" "900.0" "NOTIFY"
+    # 記録できなかった claim は token を返さない。ledger に無い token を返すと呼び出し側が
+    # 「claim 記録済み」と誤認し、ログと再送時期が実態と食い違う (Codex review 7th B1)。
+    rec_p1="$(ledger_claim "$P1" "900.5")"
+    assert_eq "記録できなかった claim は token を返さない" "$(tok_of "$rec_p1")" ""
     chmod 700 "$RO_PARENT"
 fi
 

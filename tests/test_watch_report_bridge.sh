@@ -69,7 +69,7 @@ wait_until() {
     return 1
 }
 
-led_ut() { awk -F'\t' -v p="$1" '{path=(NF>=3?$3:$2); if(path==p) v=(NF>=3?$2:0)} END{print v}' "$LEDGER" 2>/dev/null; }
+led_ut() { awk -F'\t' -v p="$1" 'NF>=3 && $3==p{v=$2} END{print v}' "$LEDGER" 2>/dev/null; }
 
 # 起動前に存在する report は seed で配達済みになり、通知されないこと
 echo "status: completed" > "$REPORTS/worker1_report.yaml"

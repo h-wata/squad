@@ -246,11 +246,12 @@ ledger_claim() {
         fi
         token="$((now + LEDGER_LEASE)):$$-$RANDOM"
         # 書き込みに失敗した場合 (権限・容量・ledger を読めない等) も claim 成功として
-        # 扱う。ledger が更新されないので毎サイクル再通知されて煩いが、通知が消える
-        # よりは気づける (この場合 token は ledger に無いので commit / release は空振り
-        # し、呼び出し側が claim 未記録の WARN を出す)。
-        _ledger_rewrite "$f" "$m" "$token"
-        printf '%s\t%s\t%s' "$token" "$mt" "$ut"
+        # 扱う (fail-open) が、token は返さない。ledger に無い token を返すと呼び出し側が
+        # 「claim 記録済み」と誤認し、commit / release のログと再送時期が実態と食い違う
+        # (Codex review 7th B1)。token が空なら呼び出し側は「claim 未記録」の WARN を出す。
+        if _ledger_rewrite "$f" "$m" "$token"; then
+            printf '%s\t%s\t%s' "$token" "$mt" "$ut"
+        fi
         exit 0
     ) 9>"$LEDGER_LOCK"
     rc=$?
@@ -331,6 +332,16 @@ ledger_baseline_seed() {
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null \
         | awk -F'\t' '{print $1 "\t0\t" $2}' > "$tmp"
+    # find (読めない dir があると非 0) / awk のどちらが失敗しても、部分的な seed を
+    # 正本として据えない。取りこぼした report が初回サイクルで一斉通知される事故を
+    # 「無言の成功ログ」の裏で起こさないため (Codex review 7th B2)。
+    local _ps=("${PIPESTATUS[@]}")   # 直後の [ ] 自体が PIPESTATUS を上書きするため即退避
+    if [ "${_ps[0]}" -ne 0 ] || [ "${_ps[1]:-1}" -ne 0 ]; then
+        rm -f "$tmp"
+        log "[WARN] ledger baseline seed の report 列挙に失敗しました (find/awk)。" \
+            "ledger を作らず監視を始めます (既存 report が一斉通知される可能性があります)"
+        return 1
+    fi
     seeded=$(grep -c . "$tmp" 2>/dev/null || true)
     (
         if [ "$HAVE_FLOCK" -eq 1 ]; then
@@ -549,7 +560,8 @@ declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
-declare -A STALE_SEEN      # report path -> 前サイクルで STALE になった mtime
+declare -A STALE_SEEN      # report path -> このサイクルで STALE になった mtime
+declare -A STALE_PREV      # report path -> 前サイクルで STALE になった mtime
 declare -A STALE_LOGGED    # report path -> mtime 巻き戻し抑止をログ済みの mtime
 
 mkdir -p "$QUEUE_DIR"
@@ -585,6 +597,12 @@ while true; do
     #   - A→B→A と担当が移っても B 通知済み report は再通知されない (Issue #22 / F1)
     #   - マーカーの mtime を担当切替時刻の代理に使う必要が無い (F3)
     # 起動時の baseline は ledger_baseline_seed が監視開始前に済ませている。
+    # STALE の「2 サイクル連続」判定用にサイクル単位で集合を入れ替える。入れ替えないと
+    # 「過去に一度でも同じ mtime を見た」だけで WARN になり、良性競合が非連続に 2 回
+    # 起きただけで本物用の 1 回限り WARN を消費してしまう (Codex review 7th B4)。
+    STALE_PREV=()
+    for _k in "${!STALE_SEEN[@]}"; do STALE_PREV[$_k]="${STALE_SEEN[$_k]}"; done
+    STALE_SEEN=()
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
         # 配達権を取る (他が配達済み / 配達中の lease を持っていれば skip)
@@ -599,14 +617,11 @@ while true; do
             # 同じ mtime が 2 サイクル連続したときだけ本物とみなして 1 回 WARN する
             # (PR #24 Claude review 6th #6)。
             if [ "$claim_rc" -eq "$LEDGER_RC_STALE" ]; then
-                if [ "${STALE_SEEN[$f]:-}" = "$m" ]; then
-                    if [ "${STALE_LOGGED[$f]:-}" != "$m" ]; then
-                        STALE_LOGGED[$f]="$m"
-                        log "[WARN] mtime が ledger の記録より古いため通知しません: $f" \
-                            "(巻き戻し防止。意図した再通知なら touch してください)"
-                    fi
-                else
-                    STALE_SEEN[$f]="$m"
+                STALE_SEEN[$f]="$m"
+                if [ "${STALE_PREV[$f]:-}" = "$m" ] && [ "${STALE_LOGGED[$f]:-}" != "$m" ]; then
+                    STALE_LOGGED[$f]="$m"
+                    log "[WARN] mtime が ledger の記録より古いため通知しません: $f" \
+                        "(巻き戻し防止。意図した再通知なら touch してください)"
                 fi
             fi
             continue
@@ -755,7 +770,10 @@ except Exception:
         PENDING_NUDGE=""
     fi
     now_ts=$(date +%s)
-    if [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
+    # 保留 nudge が残っている間は discovery を延期する。実行すると新しい nudge が
+    # PENDING_NUDGE (1 スロット) を上書きし、古い通知が失われる (Codex review 7th B3)。
+    # どうせ Dispatcher に届かない状態なので、延期しても失うものは無い。
+    if [ -z "$PENDING_NUDGE" ] && [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
         run_discovery
         LAST_DISCOVERY="$now_ts"
     fi

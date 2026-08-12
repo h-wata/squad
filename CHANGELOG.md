@@ -78,6 +78,11 @@
   (vi) claim が fail-open して ledger に記録が無い場合のログを実態に合わせた (6th #5)。
   (vii) mtime 巻き戻しの WARN は同じ path・同じ mtime が 2 サイクル連続したときだけ
   出す (担当切替時の良性競合で 1 回限りの WARN が消費されるのを防ぐ。6th #6)。
+  7 巡目レビュー (Codex) 対応: claim は ledger への記録に成功したときだけ token を返す
+  (記録できていない token を返すとログと再送時期が実態と食い違う)、seed の find|awk
+  失敗を PIPESTATUS で検査して部分 ledger を正本にしない、保留 nudge がある間は
+  discovery を延期して 1 スロットの PENDING_NUDGE を上書きしない、STALE の連続判定を
+  サイクル単位の集合入れ替えにして「過去に一度見た」だけで WARN を消費しないようにした。
   ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
   すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
   セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。
