@@ -13,11 +13,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: bash -n (構文チェック)
-        run: |
-          bash -n watch.sh
-          bash -n start.sh
-          bash -n stop.sh
-          for f in tests/*.sh; do bash -n "$f"; done
+        # 対象はハードコードせず git 管理下の全 *.sh (shellcheck ジョブと同じ列挙方法。
+        # リストを 2 箇所に持つと新規スクリプトの追加漏れが起きる)
+        run: git ls-files -z '*.sh' | xargs -0 -n1 bash -n
 
       - name: tests
         run: |
@@ -37,4 +35,4 @@ jobs:
       - name: install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: run shellcheck
-        run: shellcheck --severity=warning watch.sh start.sh stop.sh tests/*.sh
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning

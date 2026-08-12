@@ -13,8 +13,10 @@ WATCH_SH="$SCRIPT_DIR/watch.sh"
 
 TMPDIR_T="$(mktemp -d)"
 WATCH_PID=""
+WATCH_PID_B=""
 cleanup() {
     [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null
+    [ -n "$WATCH_PID_B" ] && kill "$WATCH_PID_B" 2>/dev/null
     rm -rf "$TMPDIR_T"
 }
 trap cleanup EXIT
@@ -118,6 +120,36 @@ wait_until '[ "$(sends_for worker2_report)" -ge 2 ]' 15
 assert_eq "更新された report は再通知される" "$(sends_for worker2_report)" "2"
 assert_eq "blocked は [INBOX] 付きで通知される" \
     "$(grep -c 'INBOX.*worker2_report' "$SEND_LOG")" "1"
+# 後段の担当切替テストのため、worker2 の配達済みを確定させておく
+wait_until '[ "$(led_ut "$REPORTS/worker2_report.yaml")" = "0" ]' 10
+
+# 4. 複数 watcher + 担当切替 (Issue #22 F1 のループレベル検証):
+#    A(testsess) が配達済みの report は、担当が othersess に移っても B が再通知しない。
+#    新規 report は新担当 B だけが 1 回通知する (二重通知なし)。
+PATH="$STUB_DIR:$PATH" \
+SQUAD_SESSION=othersess SQUAD_DEFAULT_OWNER=not-this-session \
+WATCH_QUEUE_DIR="$QUEUE" WATCH_BOOT_DELAY=0 WATCH_INTERVAL=1 \
+WATCH_DISCOVERY_INTERVAL=999999 WATCH_GC_INTERVAL=999999 WATCH_LEDGER_LEASE=3 \
+    bash "$WATCH_SH" > "$TMPDIR_T/watch_b.log" 2>&1 &
+WATCH_PID_B=$!
+sleep 2
+echo othersess > "$QUEUE/projects/pj_test/.squad_session"   # 担当を A -> B に切替
+sleep 4   # 両 watcher が数サイクル回るのを待つ
+assert_eq "担当切替後も A 配達済みの report を B が再通知しない (worker2)" \
+    "$(sends_for worker2_report)" "2"
+assert_eq "担当切替後も A 配達済みの report を B が再通知しない (worker3)" \
+    "$(sends_for worker3_report)" "1"
+
+echo "status: completed" > "$REPORTS/worker5_report.yaml"
+wait_until '[ "$(sends_for worker5_report)" -ge 1 ]' 15
+wait_until '[ "$(led_ut "$REPORTS/worker5_report.yaml")" = "0" ]' 10
+sleep 3
+assert_eq "新規 report は 1 回だけ通知される (2 watcher でも二重通知なし)" \
+    "$(sends_for worker5_report)" "1"
+assert_eq "通知したのは新担当セッションの watcher" \
+    "$(grep -c 'othersess.*worker5_report' "$SEND_LOG")" "1"
+
+kill "$WATCH_PID_B" 2>/dev/null; WATCH_PID_B=""
 
 kill "$WATCH_PID" 2>/dev/null; WATCH_PID=""
 

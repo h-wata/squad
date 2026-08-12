@@ -63,6 +63,21 @@
       既存 report は、ledger に記録が無いため通知される。
   (b) ledger ファイルを削除して作り直すと、その時点で queue にある report は
       すべて通知済みとして再登録される (停止中セッションの未配達 report を含む)。
+  6 巡目レビュー (Claude multi-agent) 対応: (i) ledger の書き換えを「既存 ledger を
+  読めなければ何も変更しない」helper (`_ledger_rewrite`) に集約した。従来はグループ
+  コマンドの終了ステータスが最後の printf に化けるため、ledger を読めない状態で
+  claim すると ledger 全体が新規 1 行に置き換わり、全 report の配達済み記録が消えて
+  一斉再通知になった (6th #1)。(ii) 新旧判定の `gt` を整数部・小数部分離の比較にした
+  (awk の double は約 16 桁で、find %T@ の 20 桁では下位桁が落ちて新しい版を STALE と
+  誤判定する。6th #8)。(iii) 中間リビジョンだけが書いていた旧 2 列形式の互換読みを
+  削除した (整数秒 mtime のため実際には互換にならず、全件再通知や誤 STALE を招く。
+  6th #3。pre-merge リビジョンの watcher を動かしていた場合は ledger を削除して
+  作り直すこと)。(iv) discovery / sweep / stall 通報も送信失敗を握り潰さないようにした
+  (nudge は PENDING_NUDGE として毎サイクル再送、stall は通報済みマークを送信成功時のみ
+  更新。6th #2)。(v) baseline seed の失敗を全経路で WARN ログするようにした (6th #4)。
+  (vi) claim が fail-open して ledger に記録が無い場合のログを実態に合わせた (6th #5)。
+  (vii) mtime 巻き戻しの WARN は同じ path・同じ mtime が 2 サイクル連続したときだけ
+  出す (担当切替時の良性競合で 1 回限りの WARN が消費されるのを防ぐ。6th #6)。
   ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
   すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
   セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。
@@ -82,7 +97,9 @@
 - `tests/test_watch_report_bridge.sh`: report-bridge ループ (claim → 送信 → commit /
   ロールバック) の結合テスト。tmux をスタブに差し替えて watch.sh を実プロセスとして
   起動し、送信失敗時に配達済みにしないこと・復旧後に再送すること・二重送信しないことを
-  検証する。
+  検証する。watcher 2 プロセス + `.squad_session` 切替のシナリオも含み、担当が移っても
+  配達済み report を再通知しないこと・新規 report を新担当だけが 1 回通知することを
+  ループレベルで検証する (Issue #22 F1)。
 
 ### Changed
 

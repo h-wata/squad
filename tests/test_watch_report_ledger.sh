@@ -37,9 +37,9 @@ source "$FUNCS_FILE"
 pass=0
 fail=0
 
-# ledger の記録を読む (本体と同じ 3 列形式 / 旧 2 列形式の両対応)
-led_mt() { awk -F'\t' -v p="$1" '{path=(NF>=3?$3:$2); if(path==p) v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null; }
-led_ut() { awk -F'\t' -v p="$1" '{path=(NF>=3?$3:$2); if(path==p) v=(NF>=3?$2:0)} END{print v}' "$LEDGER_FILE" 2>/dev/null; }
+# ledger の記録を読む (本体と同じ 3 列形式)
+led_mt() { awk -F'\t' -v p="$1" 'NF>=3 && $3==p{v=$1} END{print v}' "$LEDGER_FILE" 2>/dev/null; }
+led_ut() { awk -F'\t' -v p="$1" 'NF>=3 && $3==p{v=$2} END{print v}' "$LEDGER_FILE" 2>/dev/null; }
 
 check() {
     local desc="$1" f="$2" m="$3" expect="$4" got
@@ -192,12 +192,12 @@ commit_pending "$I" "101.0"
 ledger_release "$I" "999999999" "" ""
 assert_eq "自分の claim でなければ release しない" "$(led_mt "$I")" "101.0"
 
-# 16. 旧形式 (2 列 "<mtime>\t<path>") の ledger は配達済みとして読む
+# 16. 3 列に満たない行 (壊れた行) は無視され、正常な行の判定に影響しない
 L="/q/projects/pj_l/reports/worker1_report.yaml"
-printf '500\t%s\n' "$L" >> "$LEDGER_FILE"
-assert_eq "旧形式の行は配達済みとして読む" "$(led_ut "$L")" "0"
-check "旧形式で記録済みの report は再通知されない" "$L" "500.0" "SKIP"
-check "旧形式より新しい mtime は通知する" "$L" "501.0" "NOTIFY"
+printf 'broken-line\n' >> "$LEDGER_FILE"
+check "壊れた行があっても新規 report は通知される" "$L" "500.0" "NOTIFY"
+commit_pending "$L" "500.0"
+check "壊れた行があっても配達済み判定は機能する" "$L" "500.0" "SKIP"
 
 # 16b. PR #24 Codex review 4th round B1 回帰:
 #      lease が切れていても、記録より古い mtime は claim させない。claim を許すと
@@ -246,6 +246,29 @@ ledger_claim "$N3" "800.0" > /dev/null
 assert_eq "巻き戻し skip は LEDGER_RC_STALE を返す" "$?" "$LEDGER_RC_STALE"
 ledger_claim "$N3" "801.0" > /dev/null
 assert_eq "配達済み skip は 1 を返す" "$?" "1"
+
+# 16f. PR #24 Claude review 6th #1 回帰: ledger を読めない状態で claim しても、
+#      既存の配達済み記録を消さない (部分的な内容で mv すると全 report 一斉再通知になる)。
+if [ "$(id -u)" -ne 0 ]; then
+    R1="/q/projects/pj_r/reports/worker1_report.yaml"
+    R2="/q/projects/pj_r/reports/worker2_report.yaml"
+    deliver "$R1" "950.0" > /dev/null
+    before_r="$(cat "$LEDGER_FILE")"
+    chmod 000 "$LEDGER_FILE"
+    check "ledger を読めないときの claim は通知側に倒れる" "$R2" "951.0" "NOTIFY"
+    chmod 644 "$LEDGER_FILE"
+    assert_eq "読めない ledger を部分内容で上書きしない" "$(cat "$LEDGER_FILE")" "$before_r"
+else
+    echo "SKIP: ledger 読み取り不可テスト (root 実行では chmod を迂回できるため)"
+fi
+
+# 16g. PR #24 Claude review 6th #8 回帰: find %T@ の 20 桁 mtime でも下位桁の差を
+#      正しく比較する (awk double は約 16 桁で桁落ちし、新しい版が STALE 扱いになる)。
+G2="/q/projects/pj_g2/reports/worker1_report.yaml"
+deliver "$G2" "1786499353.1215575750" > /dev/null
+check "下位 1 桁だけ新しい mtime は通知する" "$G2" "1786499353.1215575751" "NOTIFY"
+commit_pending "$G2" "1786499353.1215575751"
+check "下位 1 桁だけ古い mtime は claim しない" "$G2" "1786499353.1215575750" "SKIP"
 
 # 17. ledger を書けない場合、commit / release は失敗 (非 0) を返す。
 #     呼び出し側はログを出すだけでよい (lease 期限切れで再 claim される)。
@@ -305,6 +328,22 @@ assert_eq "seed した行は配達済み (lease 0)" \
 check "非担当 project の既存 report は再通知されない" \
     "$QUEUE_DIR/projects/pj_b/reports/worker2_report.yaml" \
     "$(find "$QUEUE_DIR/projects/pj_b/reports/worker2_report.yaml" -printf '%T@')" "SKIP"
+
+# 18c. PR #24 Claude review 6th #4: seed が lock file を開けない場合は WARN を出して
+#      1 を返す (無言の return 0 だと、seed されないまま監視が始まって一斉通知になる
+#      原因がログから追えない)。
+SAVED_LOCK_SEED="$LEDGER_LOCK"
+SAVED_FILE_SEED="$LEDGER_FILE"
+LEDGER_FILE="$TMPDIR_T/queue_seedfail/.report_ledger"
+LEDGER_LOCK="$TMPDIR_T/no_such_dir_seed/lock"
+mkdir -p "$TMPDIR_T/queue_seedfail"
+seed_out="$(ledger_baseline_seed 2>&1)"; seed_rc=$?
+assert_eq "lock を開けない seed は失敗を返す" "$seed_rc" "1"
+assert_eq "seed 失敗は WARN をログする" \
+    "$(echo "$seed_out" | grep -q 'WARN.*seed' && echo yes || echo no)" "yes"
+assert_eq "seed 失敗時は ledger を作らない" "$([ -f "$LEDGER_FILE" ] && echo yes || echo no)" "no"
+LEDGER_LOCK="$SAVED_LOCK_SEED"
+LEDGER_FILE="$SAVED_FILE_SEED"
 
 # 19. seed 済み ledger がある状態で seed を再実行しても上書きしない (先着優先)
 before="$(cat "$LEDGER_FILE")"

@@ -105,8 +105,21 @@ auto_answer() {
     sleep 0.3
 }
 
-# float epoch 比較 a>b
-gt() { LC_ALL=C awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a+0 > b+0)}'; }
+# float epoch 比較 a>b。awk の double は約 16 桁しか保持できず、find %T@ の 20 桁
+# (秒 10 桁 + ナノ秒 10 桁) では下位桁が落ちて「異なる mtime を同一以下」と誤判定する
+# (PR #24 Claude review 6th #8)。整数部は数値で、小数部はゼロ詰めした固定長文字列の
+# 辞書順で比較する (同じ長さの数字列なら辞書順 = 数値順)。
+gt() {
+    LC_ALL=C awk -v a="$1" -v b="${2:-0}" 'BEGIN{
+        na = split(a, x, "."); nb = split(b, y, ".")
+        ia = x[1] + 0; ib = y[1] + 0
+        if (ia != ib) exit !(ia > ib)
+        fa = (na > 1 ? x[2] : ""); fb = (nb > 1 ? y[2] : "")
+        while (length(fa) < length(fb)) fa = fa "0"
+        while (length(fb) < length(fa)) fb = fb "0"
+        exit !(fa "" > fb "")
+    }'
+}
 
 # flock の有無 (util-linux が無い環境ではロック無しで動作させる)
 if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
@@ -168,18 +181,41 @@ LEDGER_RC_SEEN=9      # subshell 内で「配達済み/配達中なので claim 
 LEDGER_RC_STALE=10    # 記録より古い mtime (巻き戻し) なので claim しない終了コード
 LEDGER_LEASE="${WATCH_LEDGER_LEASE:-60}"   # 配達 lease の有効秒数
 
-# path の現在の記録を "<mtime>\t<lease期限>" で返す (未登録なら空)。
-# 旧形式 (2 列 "<mtime>\t<path>") の行は配達済みとして読む。
+# path の現在の記録を "<mtime>\t<lease>" で返す (未登録なら空)。
+# 3 列に満たない行は無視する (この ledger 形式は本 PR が初出で、旧形式は存在しない。
+# 中間リビジョンの 2 列形式は mtime が整数秒で書かれており、小数秒込みの現行 mtime と
+# 突き合わせても正しく「配達済み」と読めないため、互換で読む価値がない —
+# PR #24 Claude review 6th #3。もし残っていたら ledger ごと削除して作り直すこと)。
 _ledger_lookup() {
     awk -F'\t' -v p="$1" '
-        { path = (NF >= 3 ? $3 : $2); if (path == p) { mt = $1; ut = (NF >= 3 ? $2 : 0) } }
+        NF >= 3 && $3 == p { mt = $1; ut = $2 }
         END { if (mt != "") printf "%s\t%s", mt, ut }
     ' "$LEDGER_FILE" 2>/dev/null
 }
 
 # path の行を除いた ledger を出力する (書き換えの土台)。
 _ledger_without() {
-    awk -F'\t' -v p="$1" '{ path = (NF >= 3 ? $3 : $2); if (path != p) print }' "$LEDGER_FILE" 2>/dev/null
+    awk -F'\t' -v p="$1" 'NF < 3 || $3 != p' "$LEDGER_FILE" 2>/dev/null
+}
+
+# path の行を差し替えた ledger 全体を一時ファイルに作り、atomic に置き換える。
+# mtime (第 2 引数) が空なら行を削除する。成功で 0、失敗なら何も変更せず 1 を返す。
+#
+# 「既存 ledger を読めなければ何も変更しない」ことが重要: 読めないまま新しい行だけを
+# 書いた一時ファイルを mv すると、他 report の配達済み記録が全消失し、queue 全体の
+# 一斉再通知になる (PR #24 Claude review 6th #1)。グループコマンドの終了ステータスは
+# 最後のコマンドのものになるため、awk (_ledger_without) の失敗を個別に判定する。
+_ledger_rewrite() {
+    local f="$1" mt="${2:-}" ut="${3:-}" tmp="${LEDGER_FILE}.tmp.$$"
+    if [ -f "$LEDGER_FILE" ]; then
+        _ledger_without "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    else
+        : > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    fi
+    if [ -n "$mt" ]; then
+        printf '%s\t%s\t%s\n' "$mt" "$ut" "$f" >> "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    fi
+    mv -f "$tmp" "$LEDGER_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
 ledger_claim() {
@@ -189,7 +225,7 @@ ledger_claim() {
             # ロックを取れなかった場合は「未配達」側に倒す
             flock -w 5 9 || exit 0
         fi
-        local rec mt ut now token tmp
+        local rec mt ut now token
         rec="$(_ledger_lookup "$f")"
         mt=""; ut=""
         [ -n "$rec" ] && IFS=$'\t' read -r mt ut <<< "$rec"
@@ -209,15 +245,11 @@ ledger_claim() {
             fi
         fi
         token="$((now + LEDGER_LEASE)):$$-$RANDOM"
-        tmp="${LEDGER_FILE}.tmp.$$"
-        {
-            [ -f "$LEDGER_FILE" ] && _ledger_without "$f"
-            printf '%s\t%s\t%s\n' "$m" "$token" "$f"
-        } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE"
-        # 書き込みに失敗した場合 (権限・容量など) も claim 成功として扱う。ledger が
-        # 更新されないので毎サイクル再通知されて煩いが、通知が消えるよりは気づける
-        # (この場合 token は ledger に無いので commit / release は空振りする)。
-        rm -f "$tmp"
+        # 書き込みに失敗した場合 (権限・容量・ledger を読めない等) も claim 成功として
+        # 扱う。ledger が更新されないので毎サイクル再通知されて煩いが、通知が消える
+        # よりは気づける (この場合 token は ledger に無いので commit / release は空振り
+        # し、呼び出し側が claim 未記録の WARN を出す)。
+        _ledger_rewrite "$f" "$m" "$token"
         printf '%s\t%s\t%s' "$token" "$mt" "$ut"
         exit 0
     ) 9>"$LEDGER_LOCK"
@@ -238,19 +270,14 @@ ledger_commit() {
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
         fi
-        local rec mt ut tmp
+        local rec mt ut
         rec="$(_ledger_lookup "$f")"
         [ -n "$rec" ] || exit 1
         IFS=$'\t' read -r mt ut <<< "$rec"
         [ "$mt" = "$m" ] || exit 0              # 別の版で上書きされている = 何もしない
         [ "$ut" = "0" ] && exit 0               # 既に配達済み
         [ "$ut" = "$token" ] || exit 0          # 別 watcher の claim = 触らない
-        tmp="${LEDGER_FILE}.tmp.$$"
-        {
-            _ledger_without "$f"
-            printf '%s\t0\t%s\n' "$m" "$f"
-        } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE" || { rm -f "$tmp"; exit 1; }
-        rm -f "$tmp"
+        _ledger_rewrite "$f" "$m" 0 || exit 1
         exit 0
     ) 9>"$LEDGER_LOCK"
 }
@@ -268,19 +295,14 @@ ledger_release() {
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
         fi
-        local rec cur_ut tmp
+        local rec cur_ut
         rec="$(_ledger_lookup "$f")"
         [ -n "$rec" ] || exit 0
         cur_ut="${rec#*$'\t'}"
         # 自分の claim がそのまま残っている場合だけ戻す。lease 切れ後に別 watcher が
         # 再 claim していたら (token 不一致) 触らない。
         [ "$cur_ut" = "$token" ] || exit 0
-        tmp="${LEDGER_FILE}.tmp.$$"
-        {
-            _ledger_without "$f"
-            if [ -n "$prev_mt" ]; then printf '%s\t%s\t%s\n' "$prev_mt" "$prev_ut" "$f"; fi
-        } > "$tmp" 2>/dev/null && mv -f "$tmp" "$LEDGER_FILE" || { rm -f "$tmp"; exit 1; }
-        rm -f "$tmp"
+        _ledger_rewrite "$f" "$prev_mt" "$prev_ut" || exit 1
         exit 0
     ) 9>"$LEDGER_LOCK"
 }
@@ -314,12 +336,21 @@ ledger_baseline_seed() {
         if [ "$HAVE_FLOCK" -eq 1 ]; then
             flock -w 5 9 || exit 1
         fi
-        [ -f "$LEDGER_FILE" ] && exit 1        # 先に他プロセスが seed 済み
-        mv -f "$tmp" "$LEDGER_FILE"
+        [ -f "$LEDGER_FILE" ] && exit 2        # 先に他プロセスが seed 済み (正常)
+        mv -f "$tmp" "$LEDGER_FILE" || exit 1
     ) 9>"$LEDGER_LOCK"
     local rc=$?
     rm -f "$tmp"
-    [ "$rc" -eq 0 ] && log "ledger baseline: 既存 report ${seeded} 件を通知済みとして登録 (通知なし)"
+    if [ "$rc" -eq 0 ]; then
+        log "ledger baseline: 既存 report ${seeded} 件を通知済みとして登録 (通知なし)"
+    elif [ "$rc" -ne 2 ]; then
+        # lock file を開けない・flock を取れない・mv 失敗。seed されないまま監視が
+        # 始まると既存 report が一斉通知されるため、原因の手掛かりを必ず残す
+        # (mktemp 失敗だけでなく全経路をログする。PR #24 Claude review 6th #4)。
+        log "[WARN] ledger baseline seed に失敗しました (lock/書き込み不可): $LEDGER_FILE" \
+            "既存 report が一斉通知される可能性があります"
+        return 1
+    fi
     return 0
 }
 
@@ -458,7 +489,12 @@ run_discovery() {
     fi
     if [ "$added" -gt 0 ]; then
         log "discovery: 新規候補 ${added} 件 -> inbox + Dispatcher 通知"
-        notify_dispatcher "[DISCOVERY] 新規候補 ${added} 件を ${INBOX_FILE} に追加。空き worker に自動起票してください (task-yaml-author → 通知)。merge gate は人間が維持。"
+        # 送信に失敗したら PENDING_NUDGE に積み、メインループが毎サイクル再送を試みる。
+        # SEEN_FILE の既知化は取り消さない (候補は inbox に記録済みで、失われるのは
+        # nudge だけ。既知化を取り消すと重複 inbox 行が増える)。(6th #2)
+        notify_dispatcher "[DISCOVERY] 新規候補 ${added} 件を ${INBOX_FILE} に追加。空き worker に自動起票してください (task-yaml-author → 通知)。merge gate は人間が維持。" \
+            || { PENDING_NUDGE="[DISCOVERY] 新規候補を ${INBOX_FILE} に追加済み。確認して空き worker に起票してください。"
+                 log "[WARN] Dispatcher への discovery 通知に失敗 (次サイクルで再送)"; }
         return
     fi
     # 新規ゼロ: idle を遊ばせず、throttle 付きで「一通りレビュー(sweep)」を投げる
@@ -466,7 +502,9 @@ run_discovery() {
     if [ $(( now2 - LAST_SWEEP )) -ge "$SWEEP_INTERVAL" ]; then
         echo "- [ ] $(date '+%Y-%m-%dT%H:%M:%S%z') [sweep] all: 新規タスクなし。既存コード/open PR/backlog の一通りレビュー・監査  \`sweep:${now2}\`" >> "$INBOX_FILE"
         log "discovery: 新規なし -> [SWEEP] 周回レビューを inbox 投入"
-        notify_dispatcher "[SWEEP] 新規タスクなし。空き worker がいれば既存コード/open PR/backlog の一通りレビュー・監査を1件だけ割り当ててください (全員稼働中なら何もしない)。"
+        notify_dispatcher "[SWEEP] 新規タスクなし。空き worker がいれば既存コード/open PR/backlog の一通りレビュー・監査を1件だけ割り当ててください (全員稼働中なら何もしない)。" \
+            || { PENDING_NUDGE="[SWEEP] 周回レビュー候補を ${INBOX_FILE} に投入済み。空き worker がいれば割り当ててください。"
+                 log "[WARN] Dispatcher への sweep 通知に失敗 (次サイクルで再送)"; }
         LAST_SWEEP="$now2"
     else
         log "discovery: 新規なし (self-archive, 次 sweep まで約 $(( (SWEEP_INTERVAL - (now2 - LAST_SWEEP)) / 60 )) 分)"
@@ -511,7 +549,8 @@ declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
-declare -A STALE_LOGGED    # report path -> mtime 巻き戻し抑止をログ済み
+declare -A STALE_SEEN      # report path -> 前サイクルで STALE になった mtime
+declare -A STALE_LOGGED    # report path -> mtime 巻き戻し抑止をログ済みの mtime
 
 mkdir -p "$QUEUE_DIR"
 
@@ -526,6 +565,7 @@ sleep "$BOOT_DELAY"
 
 LAST_DISCOVERY=0
 LAST_SWEEP=0
+PENDING_NUDGE=""          # 送信に失敗した discovery / sweep nudge (毎サイクル再送を試みる)
 LAST_GC=0
 while true; do
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -551,11 +591,23 @@ while true; do
         claim_rec=$(ledger_claim "$f" "$m")
         claim_rc=$?
         if [ "$claim_rc" -ne 0 ]; then
-            # mtime 巻き戻しによる抑止は気づけないと困るので path ごとに 1 回だけ残す
-            if [ "$claim_rc" -eq "$LEDGER_RC_STALE" ] && [ -z "${STALE_LOGGED[$f]:-}" ]; then
-                STALE_LOGGED[$f]=1
-                log "[WARN] mtime が ledger の記録より古いため通知しません: $f" \
-                    "(巻き戻し防止。意図した再通知なら touch してください)"
+            # mtime 巻き戻しによる抑止は気づけないと困るのでログに残す。ただし
+            # 2 つの watcher が同じ project を走査する切替の瞬間には、古い find
+            # スナップショットを掴んだ側にも STALE が出る (次サイクルで新しい mtime を
+            # 拾って解消する良性の競合)。この一時的な STALE で「1 回だけの WARN」を
+            # 消費すると、後で本物の握り潰しが起きたとき無警告になるため、同じ path・
+            # 同じ mtime が 2 サイクル連続したときだけ本物とみなして 1 回 WARN する
+            # (PR #24 Claude review 6th #6)。
+            if [ "$claim_rc" -eq "$LEDGER_RC_STALE" ]; then
+                if [ "${STALE_SEEN[$f]:-}" = "$m" ]; then
+                    if [ "${STALE_LOGGED[$f]:-}" != "$m" ]; then
+                        STALE_LOGGED[$f]="$m"
+                        log "[WARN] mtime が ledger の記録より古いため通知しません: $f" \
+                            "(巻き戻し防止。意図した再通知なら touch してください)"
+                    fi
+                else
+                    STALE_SEEN[$f]="$m"
+                fi
             fi
             continue
         fi
@@ -575,11 +627,21 @@ while true; do
         # 送信できて初めて「配達済み」に確定する。失敗したら claim 前の記録に戻して
         # 次サイクルで再送する。commit / release 自体に失敗しても (ledger が書けない等)
         # lease 期限切れで再び claim されるので、通知が永久に消えることはない。
+        # claim_token が空 = claim は fail-open した (flock を取れない等で ledger に
+        # 記録が無い)。commit / release は token 不一致で空振りするだけなので、
+        # 「配達済みにした / 取り消した」と実態と逆のログを出さない
+        # (PR #24 Claude review 6th #5)。
         if [ "$sent" -eq 0 ]; then
-            ledger_commit "$f" "$m" "$claim_token" \
-                || log "[WARN] ledger を更新できず: $f (約${LEDGER_LEASE}s 後に再通知される可能性)"
+            if [ -z "$claim_token" ]; then
+                log "[WARN] 通知したが ledger に claim を記録できていません: $f (毎サイクル再通知される可能性)"
+            else
+                ledger_commit "$f" "$m" "$claim_token" \
+                    || log "[WARN] ledger を更新できず: $f (約${LEDGER_LEASE}s 後に再通知される可能性)"
+            fi
         else
-            if ledger_release "$f" "$claim_token" "$prev_mt" "$prev_ut"; then
+            if [ -z "$claim_token" ]; then
+                log "[WARN] Dispatcher への送信に失敗: $f (ledger に claim は無く、次サイクルで再送)"
+            elif ledger_release "$f" "$claim_token" "$prev_mt" "$prev_ut"; then
                 log "[WARN] Dispatcher への送信に失敗: $f (claim を取り消し、次サイクルで再送)"
             else
                 log "[WARN] Dispatcher への送信に失敗: $f (ledger を戻せず、約${LEDGER_LEASE}s 後に再送)"
@@ -672,16 +734,26 @@ except Exception:
             fi
             if [ -n "$hook_event" ]; then
                 log "Worker${N}: stall 検知だが hook=$hook_event のため完了通報に分類"
-                notify_dispatcher "Worker${N} は完了 (hook=$hook_event) していますが task が pending のままです (約${secs}s 経過)。pane ${pane#"$SESSION":} を確認し、report を書くよう促してください。"
+                stall_msg="Worker${N} は完了 (hook=$hook_event) していますが task が pending のままです (約${secs}s 経過)。pane ${pane#"$SESSION":} を確認し、report を書くよう促してください。"
             else
                 log "Worker${N}: 約${secs}s 停止 (タスク未報告) -> Dispatcher 通報"
-                notify_dispatcher "Worker${N} が約${secs}s 停止しています (タスク割当済・report 未出力)。pane ${pane#"$SESSION":} を確認し、必要なら再送/clear してください。"
+                stall_msg="Worker${N} が約${secs}s 停止しています (タスク割当済・report 未出力)。pane ${pane#"$SESSION":} を確認し、必要なら再送/clear してください。"
             fi
-            STALL_NOTIFIED[$N]="$task_m"
+            # 送信できたときだけ通報済みにする。失敗時は次サイクルで再試行される (6th #2)
+            if notify_dispatcher "$stall_msg"; then
+                STALL_NOTIFIED[$N]="$task_m"
+            else
+                log "[WARN] Worker${N} の停止通報を送信できず (次サイクルで再試行)"
+            fi
         fi
     done
 
     # --- 4. Discovery: 低頻度で仕事を発見し inbox へ (新規ゼロ時は throttle 付き sweep) ---
+    # 前回送信に失敗した nudge があれば先に再送を試みる (成功するまで毎サイクル)
+    if [ -n "$PENDING_NUDGE" ] && notify_dispatcher "$PENDING_NUDGE"; then
+        log "保留していた Dispatcher 通知を再送しました"
+        PENDING_NUDGE=""
+    fi
     now_ts=$(date +%s)
     if [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
         run_discovery
