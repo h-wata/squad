@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- ponytail 連携: `start.sh` が `PONYTAIL_DEFAULT_MODE` をロール別に設定 (Worker 1-3 は
+  `full`、Dispatcher は `off`)。ponytail プラグイン導入済み環境では Worker が最小差分
+  規範で実装するようになる。未導入環境では無視され従来通り。Worker 4 (Codex) は
+  プラグイン機構がないため `instructions/worker-codex.md` に規範を直接記載し、
+  cross-review の観点に過剰設計を追加。導入手順は README「Ponytail 連携 (任意)」参照。
+
 ### Fixed
 
 - `watch.sh`: `.squad_session` マーカー未設定の project を起動時に1回だけ警告するように
