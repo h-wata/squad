@@ -42,6 +42,7 @@ import time
 from typing import NamedTuple
 
 DELIVERED = '0'
+SQLITE_MAGIC = b'SQLite format 3\x00'
 SCHEMA = 'CREATE TABLE IF NOT EXISTS reports (path TEXT PRIMARY KEY, mtime TEXT NOT NULL, lease TEXT NOT NULL)'
 
 # 監視対象 report のファイル名パターン (queue/projects 配下)
@@ -232,8 +233,20 @@ class ReportLedger:
     def exists(self) -> bool:
         return self.path.exists()
 
-    def _build(self, rows: Iterable[tuple[str, str, str]]) -> int:
+    def is_sqlite(self) -> bool:
+        """Ledger のファイル実体が sqlite3 DB か (旧テキスト ledger と区別する)."""
+        try:
+            with self.path.open('rb') as fh:
+                return fh.read(16) == SQLITE_MAGIC
+        except OSError:
+            return False
+
+    def _build(self, rows: Iterable[tuple[str, str, str]], replace: bool = False) -> int:
         """一時 DB を作って rows を入れ、DB がまだ無ければ atomic に据える.
+
+        Args:
+            rows: (path, mtime, lease) の並び。
+            replace: True なら既存ファイルを上書きする (旧テキスト ledger の in-place 移行用)。
 
         Returns:
             登録件数。既に他プロセスが作っていた場合は -1 (先着優先で何もしない)。
@@ -247,6 +260,9 @@ class ReportLedger:
                 count = conn.execute('SELECT count(*) FROM reports').fetchone()[0]
             finally:
                 conn.close()
+            if replace:
+                os.replace(tmp, self.path)
+                return int(count)
             try:
                 # link は宛先が既にあれば必ず失敗する = 先着優先の atomic な据え付け
                 os.link(tmp, self.path)
@@ -274,13 +290,18 @@ class ReportLedger:
         except (OSError, sqlite3.Error):
             return -2
 
-    def migrate_legacy(self, legacy_path: Path) -> int:
+    def migrate_legacy(self, legacy_path: Path, replace: bool = False) -> int:
         r"""旧タブ区切り ledger (`<mtime>\t<lease>\t<path>`) を sqlite3 へ取り込む.
+
+        Args:
+            legacy_path: 旧テキスト ledger。replace=True なら自分自身 (ledger_path) でもよい。
+            replace: True なら既存の ledger_path を上書きする (WATCH_LEDGER_FILE が
+                旧テキスト ledger を直接指している場合の in-place 移行)。
 
         Returns:
             取り込み件数。既に ledger がある場合は -1、失敗した場合は -2。
         """
-        if self.path.exists():
+        if self.path.exists() and not replace:
             return -1
         try:
             rows: list[tuple[str, str, str]] = []
@@ -290,6 +311,6 @@ class ReportLedger:
                     continue  # 壊れた行 / 旧中間形式は無視する
                 mt, ut, path = cols[0], cols[1], '\t'.join(cols[2:])
                 rows.append((path, mt, ut))
-            return self._build(rows)
+            return self._build(rows, replace=replace)
         except (OSError, sqlite3.Error):
             return -2

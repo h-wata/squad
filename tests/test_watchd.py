@@ -11,13 +11,22 @@ FakeTmux (subprocess を使わない) に差し替えて検証する。旧 test_
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
 from watchd import Config  # noqa: E402
+from watchd import posix_cksum  # noqa: E402
 from watchd import Watcher  # noqa: E402
+
+
+def cksum_key(text: str) -> str:
+    """外部 coreutils cksum を oracle にした旧 dedup key (実装に依存しない照合用)."""
+    out = subprocess.run(['cksum'], input=text.encode(), capture_output=True, check=True).stdout
+    return out.split()[0].decode()
 
 
 class FakeTmux:
@@ -214,6 +223,7 @@ class TestDiscovery:
         assert w.cfg.seen_file.exists()
 
     def test_todo_discovery_writes_inbox(self, tmp_path: Path, watcher: tuple[Watcher, Path]) -> None:
+        """Baseline は黙って既知化し、その後に増えた TODO 行だけが inbox に載る."""
         w, queue = watcher
         repo = tmp_path / 'repo'
         (repo / 'src').mkdir(parents=True)
@@ -221,9 +231,39 @@ class TestDiscovery:
         d = make_project(queue, 'pj', session='testsess')
         (d / 'discovery.yaml').write_text(f'repo: {repo}\ntodo_paths: src\nsources: todo\n')
         w.refresh_owned_projects()
-        w.run_discovery()  # 1 回目 = baseline (通知なし)
-        w.run_discovery()  # 2 回目も候補は既知化済みなので新規なし
+        w.run_discovery()  # 1 回目 = baseline (既知化のみ、通知なし)
         assert w.cfg.inbox_file.exists()
+        assert 'TODO: fix this' not in w.cfg.inbox_file.read_text()
+        w.run_discovery()  # 2 回目: 候補は既知化済みなので再追記されない
+        assert 'TODO: fix this' not in w.cfg.inbox_file.read_text()
+        if shutil.which('cksum'):
+            # 永続 key は旧 watch.sh (cksum) と同一でなければならない (F3)
+            expected = f'pj:todo:{cksum_key(f"{repo / 'src' / 'a.py'}|# TODO: fix this")}'
+            assert expected in w.cfg.seen_file.read_text().split()
+
+        (repo / 'src' / 'b.py').write_text('# TODO: brand new\n')
+        w.run_discovery()
+        assert 'TODO: brand new' in w.cfg.inbox_file.read_text()
+        assert any('DISCOVERY' in m for _, m in w.tmux.sent)
+
+    @pytest.mark.skipif(shutil.which('cksum') is None, reason='coreutils cksum が無い')
+    def test_todo_dedup_key_stays_posix_cksum_compatible(self, tmp_path: Path, watcher: tuple[Watcher, Path]) -> None:
+        """旧 watch.sh (cksum) が書いた .discovery_seen を引き継いでも再通知しない (F3)."""
+        w, queue = watcher
+        repo = tmp_path / 'repo'
+        (repo / 'src').mkdir(parents=True)
+        todo = '# TODO: fix this'
+        (repo / 'src' / 'a.py').write_text(f'{todo}\nprint(1)\n')
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'discovery.yaml').write_text(f'repo: {repo}\ntodo_paths: src\nsources: todo\n')
+        queue.mkdir(parents=True, exist_ok=True)
+        legacy_key = f'pj:todo:{cksum_key(f"{repo / 'src' / 'a.py'}|{todo}")}'
+        w.cfg.seen_file.write_text(legacy_key + '\n')  # 旧形式の seen file を引き継いだ状態
+
+        w.refresh_owned_projects()
+        w.run_discovery()  # baseline ではない (seen file が既にある)
+        assert 'TODO: fix this' not in w.cfg.inbox_file.read_text()
+        assert not any('DISCOVERY' in m for _, m in w.tmux.sent)
 
     def test_disabled_discovery_skipped(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
@@ -263,6 +303,29 @@ class TestLedgerPrepare:
         w.prepare_ledger()
         assert not w.ledger.claim('/some/report.yaml', '100.5').ok
 
+    def test_prepare_ledger_migrates_legacy_text_at_custom_path(self, tmp_path: Path) -> None:
+        """WATCH_LEDGER_FILE が旧テキスト ledger を指していても sqlite3 化される (F1)."""
+        queue = tmp_path / 'queue'
+        queue.mkdir()
+        custom = tmp_path / 'custom-ledger'
+        custom.write_text('100.5\t0\t/some/report.yaml\n')
+        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue, ledger_file=str(custom))
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.prepare_ledger()
+        assert not w.ledger.claim('/some/report.yaml', '100.5').ok  # 既知として抑止
+        c = w.ledger.claim('/some/report.yaml', '200.0')  # 新しい版は token 付きで claim できる
+        assert c.ok
+        assert c.token
+
+    def test_prepare_ledger_keeps_existing_sqlite_db(self, tmp_path: Path) -> None:
+        queue = tmp_path / 'queue'
+        queue.mkdir()
+        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.ledger.claim('/some/report.yaml', '100.5')  # DB を作って 1 件記録
+        w.prepare_ledger()
+        assert not w.ledger.claim('/some/report.yaml', '100.5').ok  # 記録が消えていない
+
     def test_prepare_ledger_falls_back_to_baseline_seed(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
         d = make_project(queue, 'pj', session='testsess')
@@ -271,6 +334,14 @@ class TestLedgerPrepare:
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.prepare_ledger()
         assert w.ledger.exists()
+
+
+def test_posix_cksum_matches_coreutils() -> None:
+    """POSIX cksum(1) の既知ベクタ (旧 .discovery_seen の key と一致すること)."""
+    assert posix_cksum(b'') == 4294967295
+    assert posix_cksum(b'a') == 1220704766
+    assert posix_cksum(b'hello world') == 1135714720
+    assert posix_cksum(b'/tmp/x.py|# TODO: fix this') == 2509647034
 
 
 def test_pane_for_matches_legacy_layout() -> None:

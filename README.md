@@ -18,9 +18,8 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
   （詳細は下記「起動 / 終了」参照）。
 - **Python 3** — `squad/squad.py` は標準ライブラリのみで動作し、追加パッケージの
   インストールは不要。
-- **flock (util-linux)** — `watch.sh` が複数セッション共有の report ledger を排他制御
-  するために必須。無いと `watch.sh` は起動時にエラー終了する。ほとんどの Linux
-  ディストリに標準搭載（無ければ `apt install util-linux`）。
+  report ledger は Python 標準の `sqlite3` で排他制御するため、`flock` 等の追加ツールは
+  不要（Issue #26 の Python 移植で `flock` 依存は廃止）。
 
 ### 初回セットアップ
 
@@ -73,7 +72,9 @@ SQUAD_ENABLE_CODEX=0 ./start.sh <workspace_path>   # 既定は 1 (Codex を起�
 
 ```bash
 ./watch.sh &             # 手動起動 (SQUAD_SESSION 環境変数を見る。詳細は次節)
-pkill -f "$(pwd)/watch.sh"   # 手動停止
+# 手動停止 (watch.sh は squad/watchd.py を exec するラッパなので、稼働中の
+# プロセス名は watchd.py になる。移行期間の旧 watch.sh プロセスも一緒に拾う)
+pkill -f "$(pwd)/(watch\.sh|squad/watchd\.py)"
 ```
 
 ## tmux session 名のカスタマイズ
@@ -93,7 +94,7 @@ tmux attach -t myproj
 `squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
 
 report を Dispatcher に通知したかどうかは、セッションをまたいで共有する永続 ledger
-`queue/.report_ledger` (1 report につき 1 行、更新は `flock` で直列化) で管理する。
+`queue/.report_ledger.db` (sqlite3, 更新は `BEGIN IMMEDIATE` で直列化) で管理する。
 project の担当セッションが移っても、既に別の watcher が通知した report は再通知されない。
 通知は「配達権の取得 (期限付き lease) → 送信成功で配達済みを確定」の 2 段階で、送信に
 失敗した report や、送信前に watcher が落ちた report は lease 期限切れ後に再送される
@@ -120,6 +121,8 @@ ledger を消す場合は必ず全 watcher を止めてから行うこと。watc
   ledger (`queue/.report_ledger`) が存在する場合、`ReportLedger.migrate_legacy()` が
   既存の通知済みレコードをそのまま sqlite3 へ取り込んでから起動する
   (旧ファイルは削除されず残る。ログに移行件数が出力される)。
+- `WATCH_LEDGER_FILE` が旧タブ区切りテキストを直接指している場合も、起動時にその場で
+  sqlite3 へ変換して置き換える (変換できないときは WARN を出す)。
 - 旧 ledger も sqlite3 ledger も無い場合は、従来通り baseline seed
   (既存 report を通知済みとして一括登録) が走る。
 

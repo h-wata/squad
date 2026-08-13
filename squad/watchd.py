@@ -64,6 +64,35 @@ CAPTURE_TAIL_LINES = 40
 HOOK_FRESH_SECONDS = 300
 
 
+def _cksum_table() -> list[int]:
+    table = []
+    for i in range(256):
+        c = i << 24
+        for _ in range(8):
+            c = ((c << 1) ^ 0x04C11DB7 if c & 0x80000000 else c << 1) & 0xFFFFFFFF
+        table.append(c)
+    return table
+
+
+_CKSUM_TABLE = _cksum_table()
+
+
+def posix_cksum(data: bytes) -> int:
+    """POSIX cksum(1) と同じ CRC 値を返す.
+
+    discovery の TODO dedup key は旧 watch.sh が `cksum` で書いた .discovery_seen を
+    跨いで永続する。zlib.crc32 は別 variant で値が一致しないため自前で持つ。
+    """
+    crc = 0
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[(crc >> 24) ^ b]
+    n = len(data)
+    while n:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[(crc >> 24) ^ (n & 0xFF)]
+        n >>= 8
+    return ~crc & 0xFFFFFFFF
+
+
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, '') or default)
@@ -516,7 +545,9 @@ class Watcher:
                         continue
                     hits += 1
                     text = line.strip()
-                    h = zlib.crc32(f'{f}|{text}'.encode())
+                    # 旧 watch.sh の `cksum` と同じ key を作る (.discovery_seen は
+                    # 再起動・upgrade を跨ぐ永続フォーマットなので変えてはいけない)
+                    h = posix_cksum(f'{f}|{text}'.encode())
                     self._add_candidate(state, f'{pj}:todo:{h}', 'todo', pj, f'{f}:{no} {text}')
 
     @staticmethod
@@ -665,6 +696,15 @@ class Watcher:
     def prepare_ledger(self) -> None:
         """Ledger が無ければ旧タブ区切りから移行、それも無ければ baseline seed する."""
         if self.ledger.exists():
+            if self.ledger.is_sqlite():
+                return
+            # WATCH_LEDGER_FILE が旧テキスト ledger を直接指している運用。放置すると
+            # sqlite3 open が毎回失敗し、claim が fail-open して同じ report を再通知し続ける。
+            n = self.ledger.migrate_legacy(self.cfg.ledger_path, replace=True)
+            if n >= 0:
+                self.log(f'ledger migration: 旧テキスト {self.cfg.ledger_path} を sqlite3 化しました ({n} 件)')
+            else:
+                self.log(f'[WARN] 旧テキスト ledger ({self.cfg.ledger_path}) の sqlite3 化に失敗しました')
             return
         legacy = self.cfg.legacy_ledger_path
         if legacy.is_file():
