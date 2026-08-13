@@ -18,6 +18,9 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
   （詳細は下記「起動 / 終了」参照）。
 - **Python 3** — `squad/squad.py` は標準ライブラリのみで動作し、追加パッケージの
   インストールは不要。
+- **flock (util-linux)** — `watch.sh` が複数セッション共有の report ledger を排他制御
+  するために必須。無いと `watch.sh` は起動時にエラー終了する。ほとんどの Linux
+  ディストリに標準搭載（無ければ `apt install util-linux`）。
 
 ### 初回セットアップ
 

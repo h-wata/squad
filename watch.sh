@@ -121,8 +121,13 @@ gt() {
     }'
 }
 
-# flock の有無 (util-linux が無い環境ではロック無しで動作させる)
-if command -v flock >/dev/null 2>&1; then HAVE_FLOCK=1; else HAVE_FLOCK=0; fi
+# flock は必須 (util-linux)。ロック無しで動かすと複数 watcher の ledger
+# read-modify-rename が交錯し、配達済み行の消失や二重 claim が起きる
+# (PR #24 Codex review 8th P2-1)。フォールバックは提供しない。
+if ! command -v flock >/dev/null 2>&1; then
+    echo "[ERROR] watch.sh には flock (util-linux) が必要です。インストールしてから起動してください" >&2
+    exit 1
+fi
 
 # report ledger: report の配達状態を全 watcher 共有のファイルで管理する (Issue #22)。
 # 1 report path あたり 1 行 "<mtime>\t<lease>\t<path>"。
@@ -187,15 +192,18 @@ LEDGER_LEASE="${WATCH_LEDGER_LEASE:-60}"   # 配達 lease の有効秒数
 # 突き合わせても正しく「配達済み」と読めないため、互換で読む価値がない —
 # PR #24 Claude review 6th #3。もし残っていたら ledger ごと削除して作り直すこと)。
 _ledger_lookup() {
-    awk -F'\t' -v p="$1" '
-        NF >= 3 && $3 == p { mt = $1; ut = $2 }
+    # path は -v ではなく環境変数で渡す。-v は値の backslash エスケープ (\n 等) を
+    # デコードするため、リテラル \n を含む path だと ledger に保存した生文字列と
+    # 照合できず、同じ report が繰り返し通知される (PR #24 Codex review 8th P2-2)。
+    LEDGER_KEY="$1" awk -F'\t' '
+        NF >= 3 && $3 == ENVIRON["LEDGER_KEY"] { mt = $1; ut = $2 }
         END { if (mt != "") printf "%s\t%s", mt, ut }
     ' "$LEDGER_FILE" 2>/dev/null
 }
 
 # path の行を除いた ledger を出力する (書き換えの土台)。
 _ledger_without() {
-    awk -F'\t' -v p="$1" 'NF < 3 || $3 != p' "$LEDGER_FILE" 2>/dev/null
+    LEDGER_KEY="$1" awk -F'\t' 'NF < 3 || $3 != ENVIRON["LEDGER_KEY"]' "$LEDGER_FILE" 2>/dev/null
 }
 
 # path の行を差し替えた ledger 全体を一時ファイルに作り、atomic に置き換える。
@@ -220,11 +228,13 @@ _ledger_rewrite() {
 
 ledger_claim() {
     local f="$1" m="$2" rc
+    # タブ・改行を含む path はタブ区切り行指向の ledger 形式そのものと両立しないため
+    # 記録しない (PR #24 Codex review 8th P2-2)。token 無しの claim 成功 (fail-open)
+    # として返すと、呼び出し側が「claim 未記録」の WARN を出しつつ通知自体は行われる。
+    case "$f" in (*$'\t'*|*$'\n'*) return 0 ;; esac
     (
-        if [ "$HAVE_FLOCK" -eq 1 ]; then
-            # ロックを取れなかった場合は「未配達」側に倒す
-            flock -w 5 9 || exit 0
-        fi
+        # ロックを取れなかった場合は「未配達」側に倒す
+        flock -w 5 9 || exit 0
         local rec mt ut now token
         rec="$(_ledger_lookup "$f")"
         mt=""; ut=""
@@ -268,9 +278,7 @@ ledger_claim() {
 ledger_commit() {
     local f="$1" m="$2" token="${3:-}"
     (
-        if [ "$HAVE_FLOCK" -eq 1 ]; then
-            flock -w 5 9 || exit 1
-        fi
+        flock -w 5 9 || exit 1
         local rec mt ut
         rec="$(_ledger_lookup "$f")"
         [ -n "$rec" ] || exit 1
@@ -293,9 +301,7 @@ ledger_commit() {
 ledger_release() {
     local f="$1" token="${2:-}" prev_mt="${3:-}" prev_ut="${4:-}"
     (
-        if [ "$HAVE_FLOCK" -eq 1 ]; then
-            flock -w 5 9 || exit 1
-        fi
+        flock -w 5 9 || exit 1
         local rec cur_ut
         rec="$(_ledger_lookup "$f")"
         [ -n "$rec" ] || exit 0
@@ -344,9 +350,7 @@ ledger_baseline_seed() {
     fi
     seeded=$(grep -c . "$tmp" 2>/dev/null || true)
     (
-        if [ "$HAVE_FLOCK" -eq 1 ]; then
-            flock -w 5 9 || exit 1
-        fi
+        flock -w 5 9 || exit 1
         [ -f "$LEDGER_FILE" ] && exit 2        # 先に他プロセスが seed 済み (正常)
         mv -f "$tmp" "$LEDGER_FILE" || exit 1
     ) 9>"$LEDGER_LOCK"

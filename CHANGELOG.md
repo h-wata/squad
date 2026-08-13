@@ -87,6 +87,13 @@
   すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
   セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。
   `queue/` は .gitignore 済みで、ledger は commit されない。
+  8 巡目レビュー (Codex) 対応: `flock` (util-linux) を必須化した (無ければ起動時に
+  エラー終了。ロック無しフォールバックは複数 watcher の read-modify-rename が交錯し、
+  配達済み行の消失や二重通知を招くため削除)。ledger の path 照合を awk の `-v` から
+  環境変数 (`ENVIRON`) 渡しに変更した (`-v` は値の backslash エスケープをデコードする
+  ため、リテラル `\n` 等を含む path で照合が恒久的に外れて毎回再通知される)。タブ・
+  改行を含む path はタブ区切り行指向の ledger 形式と両立しないため記録せず、claim
+  未記録の WARN 付きで通知する (fail-open)。
 
 ### Added
 
