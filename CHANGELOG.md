@@ -16,6 +16,18 @@
   report が再通知される事故 (Issue #26 の Python 移植で退行していた SQUAD-016 相当の
   不具合) を防ぐ (SQUAD-210)。
 
+### Fixed
+
+- `squad/watchd.py`: PR #28 cross-review (worker4_review_SQUAD-211.yaml) 指摘対応。
+  `refresh_owned_projects()` の担当変更 seed に TOCTOU があり、marker 読み取り〜
+  `find_reports()` 実行の間に新規作成された report まで配達済みとして飲み込み、
+  永久に通知されなくなる不具合を修正。関数冒頭 (marker 読み取り前) で cutoff を
+  取得し、cutoff より新しい mtime の report は seed 対象から除外するようにした
+  (SQUAD-212)。
+- `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
+  届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
+  呼び出しを追加した (SQUAD-212)。
+
 ### Changed
 
 - `watch.sh` (794行 bash) を `squad/watchd.py` + `squad/ledger.py` (stdlib only) へ

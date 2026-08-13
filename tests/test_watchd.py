@@ -294,13 +294,14 @@ class TestSessionMarkerFiltering:
 
 
 class TestZeroOwnedWarning:
-    """SQUAD-210: 担当 project 0 件の起動を可視化する."""
+    """SQUAD-210/212: 担当 project 0 件の起動を可視化する (ログ + Dispatcher 通知)."""
 
     def test_warns_when_no_project_owned(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         queue = tmp_path / 'queue'
         make_project(queue, 'theirs', session='othersess')
         cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
         w.warn_missing_markers()
         out = capsys.readouterr().out
         assert '[WARN]' in out and 'no projects owned' in out
@@ -311,14 +312,39 @@ class TestZeroOwnedWarning:
         make_project(queue, 'mine', session='testsess')
         cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
         w.warn_missing_markers()
         out = capsys.readouterr().out
         assert 'no projects owned' not in out
         assert [p.name for p in w.owned] == ['mine']
 
+    def test_zero_owned_warning_reaches_dispatcher_pane(self, tmp_path: Path) -> None:
+        """PR #28 cross-review blocking 3: print だけでなく notify_dispatcher() で届く."""
+        queue = tmp_path / 'queue'
+        make_project(queue, 'theirs', session='othersess')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.warn_missing_markers()
+        assert any('no projects owned' in m for _, m in w.tmux.sent)
+
+    def test_no_dispatcher_notify_when_project_owned(self, tmp_path: Path) -> None:
+        queue = tmp_path / 'queue'
+        make_project(queue, 'mine', session='testsess')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.warn_missing_markers()
+        assert w.tmux.sent == []
+
 
 class TestOwnershipChangeSeed:
     """SQUAD-210: 担当変更で新規 owned になった project の既存 report を再通知しない."""
+
+    @staticmethod
+    def _report_notifications(sent: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """report-bridge によるメッセージだけを抽出する (0件警告 nudge を除外)."""
+        return [s for s in sent if '確認してください' in s[1]]
 
     def test_preexisting_report_not_renotified_after_ownership_gained(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
@@ -334,7 +360,45 @@ class TestOwnershipChangeSeed:
         w.refresh_owned_projects()
         assert [p.name for p in w.owned] == ['pj']
         w.report_bridge()
-        assert w.tmux.sent == []  # 担当変更前から存在していた report は再通知されない
+        assert self._report_notifications(w.tmux.sent) == []  # 担当変更前から存在していた report は再通知されない
+
+    def test_report_created_in_toctou_window_is_still_notified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR #28 cross-review blocking 1/2: 担当検出〜find_reports() 実行の間に作られた report も飲み込まれない.
+
+        cutoff は refresh_owned_projects() の冒頭 (marker 読み取り前) で取る。
+        marker 読み取り〜find_reports() 実行の間に report が新規作成される窓を、
+        watchd.find_reports() を差し替えて「呼ばれた瞬間に report を書いてから
+        本来の find_reports() を実行する」形で直接エミュレートする。
+        """
+        import watchd as watchd_module
+
+        queue = tmp_path / 'queue'
+        d = make_project(queue, 'pj', session='othersess')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.warn_missing_markers()
+        assert w.owned == []
+
+        (d / '.squad_session').write_text('testsess\n')  # 担当変更 (cutoff より前)
+
+        real_find_reports = watchd_module.find_reports
+
+        def _find_reports_after_toctou_write(dirs: object) -> list[tuple[str, str]]:
+            # marker は既に読み終わり、cutoff も確定した後 (= find_reports() 実行直前) に
+            # report が新規作成される瞬間を模す。
+            (d / 'reports' / 'worker1_report.yaml').write_text('status: completed\n')
+            return real_find_reports(dirs)
+
+        monkeypatch.setattr(watchd_module, 'find_reports', _find_reports_after_toctou_write)
+        w.refresh_owned_projects()
+        assert [p.name for p in w.owned] == ['pj']
+        monkeypatch.undo()  # report_bridge() 側は本来の find_reports に戻す (無関係な差し替えを残さない)
+
+        w.report_bridge()
+        assert len(self._report_notifications(w.tmux.sent)) == 1  # 飲み込まれず通知される
 
     def test_report_written_after_ownership_change_is_notified(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
@@ -349,7 +413,7 @@ class TestOwnershipChangeSeed:
         w.refresh_owned_projects()
         (d / 'reports' / 'worker1_report.yaml').write_text('status: completed\n')  # 担当変更後に新規作成
         w.report_bridge()
-        assert len(w.tmux.sent) == 2  # 新規 report は通常どおり通知される
+        assert len(self._report_notifications(w.tmux.sent)) == 1  # 新規 report は通常どおり通知される
 
     def test_default_owner_fallback_ownership_gain_also_seeds(self, tmp_path: Path) -> None:
         """マーカー無し (default_owner フォールバック) で owned になった場合も同様に効く."""
@@ -369,7 +433,7 @@ class TestOwnershipChangeSeed:
         w.refresh_owned_projects()
         assert [p.name for p in w.owned] == ['pj']
         w.report_bridge()
-        assert w.tmux.sent == []
+        assert self._report_notifications(w.tmux.sent) == []
 
 
 class TestLedgerPrepare:

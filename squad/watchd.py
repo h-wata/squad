@@ -93,6 +93,12 @@ def posix_cksum(data: bytes) -> int:
     return ~crc & 0xFFFFFFFF
 
 
+def _now_mtime_str() -> str:
+    """現在時刻を ledger.mtime_str() と同じ「秒.ナノ秒(9桁)」文字列で返す."""
+    ns = time.time_ns()
+    return f'{ns // 10**9}.{ns % 10**9:09d}'
+
+
 def _int_env(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, '') or default)
@@ -235,10 +241,12 @@ class Watcher:
                 )
         self.refresh_owned_projects()
         if not self.owned:
-            self.log(
+            msg = (
                 f"[WARN] no projects owned by session '{self.cfg.session}'; watcher will idle. "
                 'Check queue/projects/*/.squad_session markers or SQUAD_DEFAULT_OWNER'
             )
+            self.log(msg)
+            self.notify_dispatcher(msg)
 
     def refresh_owned_projects(self) -> None:
         """担当 project を毎サイクル再計算する (project 追加やマーカー変更に追従).
@@ -246,7 +254,14 @@ class Watcher:
         起動後の初回計算を過ぎてから新規に owned になった project を検出したら、
         その時点で既に存在する report を ledger に配達済みとして seed する
         (担当変更直後に、処理済みの既存 report が再通知されるのを防ぐ)。
+
+        cutoff は marker を読み始める前 (この関数の冒頭) に取る。newly_owned の
+        判定・find_reports() の実行はこの後に続くため、cutoff より新しい report は
+        「担当検出後に書かれた report」と確定でき、seed 対象から除外できる
+        (marker 読み取り〜find_reports() 実行の間に新規作成された report が
+        誤って DELIVERED 化される TOCTOU を防ぐ)。
         """
+        cutoff = _now_mtime_str()
         owned: list[Path] = []
         if self.cfg.projects_dir.is_dir():
             for d in sorted(p for p in self.cfg.projects_dir.iterdir() if p.is_dir()):
@@ -265,16 +280,17 @@ class Watcher:
         self.owned = owned
         self._owned_initialized = True
         if newly_owned:
-            self._seed_newly_owned(newly_owned)
+            self._seed_newly_owned(newly_owned, cutoff)
 
-    def _seed_newly_owned(self, dirs: list[Path]) -> None:
+    def _seed_newly_owned(self, dirs: list[Path], cutoff: str) -> None:
         """新規に owned になった project の既存 report を配達済みとして seed する.
 
+        cutoff より新しい mtime の report (= 担当検出後に書かれた report) は除外する。
         seed 済みの report は mtime が一致する限り再通知されない。seed 後に新しく
         書かれる report は mtime が異なるため、通常どおり claim() が新規と判定して
         通知される (seed が新規通知まで殺さない)。
         """
-        rows = find_reports(dirs)
+        rows = [(p, m) for p, m in find_reports(dirs) if not mtime_gt(m, cutoff)]
         if not rows:
             return
         n = self.ledger.seed_delivered(rows)
