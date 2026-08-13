@@ -210,16 +210,20 @@ tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 
 # Pane 0: Dispatcher (Claude, スクリプトディレクトリで起動)
 # instructions/*.md 内の {SQUAD_ROOT} プレースホルダは起動時に実パスへ展開する
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q)\"" Enter
+# PONYTAIL_DEFAULT_MODE: ponytail プラグイン導入済み環境でロール別に制御する。
+#   Dispatcher は YAML 管理のみでコードを書かないため off、Worker 1-3 は実装担当のため
+#   full。プラグイン未導入なら無視されるだけで無害。レベルを変えたい場合はここを編集
+#   (lite/full/ultra)。導入手順は README の「Ponytail 連携 (任意)」参照。
+tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
 # 無指定でも $TMUX_PANE → config.json 逆引きで動くが、明示する方が確実。
 # --settings: worker の cwd が任意の WORKSPACE のため、project hooks が読まれない。
 #   SCRIPT_DIR/.claude/settings.local.json を明示ロードして squad の hook を有効化。
-tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w1 SQUAD_SESSION=$SESSION_NAME_Q claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w2 SQUAD_SESSION=$SESSION_NAME_Q claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 SQUAD_SESSION=$SESSION_NAME_Q claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w1 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w2 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
 
 # Pane 6: Worker 4 (Codex, ワークスペースで起動)
 # Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
