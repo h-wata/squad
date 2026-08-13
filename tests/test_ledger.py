@@ -676,3 +676,15 @@ class TestLegacyMigration:
         led0 = ReportLedger(tmp_path / '.report_ledger.db')
         led0.claim('/some/other/path', '1.0')
         assert led0.migrate_legacy(legacy) == -1
+
+    def test_67_concurrent_replace_true_does_not_erase_migrated_records(self, tmp_path: Path) -> None:
+        """WATCH_LEDGER_FILE の in-place 移行で 2 watcher が同時に旧形式判定しても壊れない (F4)."""
+        legacy = tmp_path / 'custom-ledger'
+        legacy.write_text('100.5\t0\t/some/report.yaml\n')
+        a = ReportLedger(legacy)
+        b = ReportLedger(legacy)
+        assert not a.is_sqlite()
+        assert not b.is_sqlite()  # 両方が旧形式と判定した後で A→B の順に移行を実行する
+        assert a.migrate_legacy(legacy, replace=True) == 1
+        assert b.migrate_legacy(legacy, replace=True) == -1  # 既に sqlite3 化済みなので上書きしない
+        assert not b.claim('/some/report.yaml', '100.5').ok  # 移行済みレコードが残っている

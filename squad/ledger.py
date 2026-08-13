@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from collections.abc import Iterator
 from contextlib import contextmanager
+import fcntl
 import os
 from pathlib import Path
 import random
@@ -261,8 +262,19 @@ class ReportLedger:
             finally:
                 conn.close()
             if replace:
-                os.replace(tmp, self.path)
-                return int(count)
+                # 2 watcher が同時に旧形式と判定した場合の TOCTOU 対策: 読み取り〜置換の
+                # 間に別プロセスが先に sqlite3 化していたら、その移行済み DB を空 DB で
+                # 上書きしないよう、lock 保持中に宛先の現在状態を再チェックする。
+                lock_path = self.path.with_name(f'{self.path.name}.lock')
+                with lock_path.open('a+') as lock_fh:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+                    try:
+                        if self.is_sqlite():
+                            return -1
+                        os.replace(tmp, self.path)
+                        return int(count)
+                    finally:
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
             try:
                 # link は宛先が既にあれば必ず失敗する = 先着優先の atomic な据え付け
                 os.link(tmp, self.path)
