@@ -20,23 +20,98 @@
   mtime を整数秒に切り捨てて marker と同一精度で比較し、同一秒になった場合は既読化せず
   通知する側に倒した。
 
-### Known limitations (既知の制約)
-
-- `watch.sh` の既読化カットオフは `REPORT_SEEN` (プロセスメモリのみ、セッションごとに
-  分離) と `.squad_session` の mtime (owner 変更時刻の代理) に依存しており、以下 2 点が
-  未解決のまま残っている (PR #21 Codex cross-review F1/F3。根本対応は別 Issue で追跡):
-  - **F1 (major)**: 通知済み状態がセッション間で共有されないため、project の担当が
-    A→B→A と切り替わると、B が担当中に発生し B が既に通知済みの report を A が復帰時に
-    再通知することがある (二重通知)。
-  - **F3 (minor)**: `.squad_session` の mtime は owner 変更時刻を正確には表さない
-    (`cp -p` や過去 mtime のファイルでの置換、symlink 化して参照先だけ差し替えるケース
-    など)。時計ずれや保存された未来 mtime がある場合、正当な report を握り潰す方向にも
-    倒れ得る。
+- `watch.sh`: report の通知済み状態を全 watcher 共有の永続 ledger
+  (`queue/.report_ledger`) に移し、PR #21 Codex cross-review の F1 (major) / F3 (minor)
+  を根本対応した (Issue #22)。1 report path につき 1 行 `<mtime>\t<path>` を持ち、
+  判定と更新を `flock` で直列化する。これにより
+  (a) 担当が A→B→A と移っても B が通知済みの report を A が再通知しない、
+  (b) `.squad_session` の mtime を「担当切替時刻」の代理に使う必要が無くなった
+  (`cp -p` / symlink 置換 / 時計ずれの影響を受けない)、
+  (c) watcher 停止中に書かれた report を再起動後に拾える (従来は起動時 baseline で
+  握り潰していた)。担当切替時の既読化ヒューリスティック
+  (`REPORT_SEEN` / `EVER_OWNED` / marker mtime cutoff) は不要になったため削除。
+  記録は `<mtime>\t<lease>\t<path>` の 3 列で、claim (配達権の取得) と
+  commit (配達済みの確定) の 2 段階にしている。claim した時点で「通知済み」にすると、
+  送信に失敗した report や送信前に watcher が死んだ report が二度と橋渡しされないため、
+  claim は期限付きの lease として記録し、送信に成功して初めて配達済みへ確定する。
+  送信に失敗したら claim 前の記録に戻す (行ごと削除すると、直前に配達済みだった古い版
+  の記録まで失われ、更新前の mtime を掴んでいた別 watcher がその古い版を再通知できて
+  しまう)。lease 期限が切れた記録は別の watcher が再び claim できるため、commit や
+  ロールバック自体に失敗しても、watcher が再起動しても、project の担当が変わっても、
+  通知が永久に失われることはない (期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。ledger にアクセスできない異常時
+  (lock file を開けない・書き込めない) も通知する側に倒す。claim は記録済み mtime より
+  真に新しい場合のみ成立させ、更新前の mtime を掴んだ watcher が ledger を巻き戻して
+  同じ版を二重通知することを防ぐ。
+  commit / release は「自分が書いた claim がまだ残っているか」を claim token
+  (claim 時に書いた lease 期限値) で照合してから更新する。mtime だけで照合すると、
+  A の lease が切れた後に B が同じ mtime を再 claim した状況で、遅れて戻った A が
+  B の claim を commit したり release で消したりできてしまう (PR #24 Codex review
+  4th round B2)。また lease 期限切れであっても記録より古い mtime は claim させない
+  (許すと ledger の mtime と呼び出し側の mtime が食い違い、commit が空振りして
+  lease 切れ後に二重通知される。同 B1)。
+  claim token は "<lease 期限>:<nonce>" 形式にする。期限値だけでは、新しい mtime の
+  claim が既存 lease を待たずに成立する都合で、担当切替の瞬間に 2 つの watcher が
+  同じ秒に同じ path を claim すると衝突しうる (PR #24 Claude review #1)。
+  mtime は find %T@ の文字列を小数秒込みでそのまま記録・比較する。整数秒に切り捨てると
+  同一秒内に書き直された report (in_progress -> blocked 等) が同じ版とみなされて恒久的に
+  握り潰される (同 #2)。同一版かは文字列一致、新旧判定のみ数値比較で行う。
+  mtime が記録より古い report は引き続き通知しないが (ledger 巻き戻し防止)、
+  気づけない抑止にならないよう path ごとに 1 回 WARN をログに出す (同 #8)。
+  なお次の 2 つは「握り潰して気づけない」より「重複通知」を選ぶ方針上の割り切りで、
+  仕様として残している:
+  (a) ledger 生成後に queue/projects へ現れた project (archive からの復元など) の
+      既存 report は、ledger に記録が無いため通知される。
+  (b) ledger ファイルを削除して作り直すと、その時点で queue にある report は
+      すべて通知済みとして再登録される (停止中セッションの未配達 report を含む)。
+  6 巡目レビュー (Claude multi-agent) 対応: (i) ledger の書き換えを「既存 ledger を
+  読めなければ何も変更しない」helper (`_ledger_rewrite`) に集約した。従来はグループ
+  コマンドの終了ステータスが最後の printf に化けるため、ledger を読めない状態で
+  claim すると ledger 全体が新規 1 行に置き換わり、全 report の配達済み記録が消えて
+  一斉再通知になった (6th #1)。(ii) 新旧判定の `gt` を整数部・小数部分離の比較にした
+  (awk の double は約 16 桁で、find %T@ の 20 桁では下位桁が落ちて新しい版を STALE と
+  誤判定する。6th #8)。(iii) 中間リビジョンだけが書いていた旧 2 列形式の互換読みを
+  削除した (整数秒 mtime のため実際には互換にならず、全件再通知や誤 STALE を招く。
+  6th #3。pre-merge リビジョンの watcher を動かしていた場合は ledger を削除して
+  作り直すこと)。(iv) discovery / sweep / stall 通報も送信失敗を握り潰さないようにした
+  (nudge は PENDING_NUDGE として毎サイクル再送、stall は通報済みマークを送信成功時のみ
+  更新。6th #2)。(v) baseline seed の失敗を全経路で WARN ログするようにした (6th #4)。
+  (vi) claim が fail-open して ledger に記録が無い場合のログを実態に合わせた (6th #5)。
+  (vii) mtime 巻き戻しの WARN は同じ path・同じ mtime が 2 サイクル連続したときだけ
+  出す (担当切替時の良性競合で 1 回限りの WARN が消費されるのを防ぐ。6th #6)。
+  7 巡目レビュー (Codex) 対応: claim は ledger への記録に成功したときだけ token を返す
+  (記録できていない token を返すとログと再送時期が実態と食い違う)、seed の find|awk
+  失敗を PIPESTATUS で検査して部分 ledger を正本にしない、保留 nudge がある間は
+  discovery を延期して 1 スロットの PENDING_NUDGE を上書きしない、STALE の連続判定を
+  サイクル単位の集合入れ替えにして「過去に一度見た」だけで WARN を消費しないようにした。
+  ledger ファイルが存在しない場合のみ、監視開始前に `queue/projects` 配下の既存 report を
+  すべて通知済みとして一括登録する (担当 project だけを登録すると、後から起動した別
+  セッションの watcher が自分の担当 project の過去 report を一斉通知してしまうため)。
+  `queue/` は .gitignore 済みで、ledger は commit されない。
+  8 巡目レビュー (Codex) 対応: `flock` (util-linux) を必須化した (無ければ起動時に
+  エラー終了。ロック無しフォールバックは複数 watcher の read-modify-rename が交錯し、
+  配達済み行の消失や二重通知を招くため削除)。ledger の path 照合を awk の `-v` から
+  環境変数 (`ENVIRON`) 渡しに変更した (`-v` は値の backslash エスケープをデコードする
+  ため、リテラル `\n` 等を含む path で照合が恒久的に外れて毎回再通知される)。タブ・
+  改行を含む path はタブ区切り行指向の ledger 形式と両立しないため記録せず、claim
+  未記録の WARN 付きで通知する (fail-open)。
 
 ### Added
 
 - `dashboard-updater` サブエージェントを追加し、dashboard 更新の定型作業を
   Dispatcher から委譲可能にした。
+- GitHub Actions による CI を追加 (Issue #23)。`bash -n` による構文チェック、
+  `tests/*.sh` の実行、`git diff --check`、`shellcheck --severity=warning` を push / PR で
+  自動実行する。
+- `tests/test_watch_report_ledger.sh`: ledger の claim semantics (再通知しない / mtime
+  更新で再通知 / 別プロセスの通知済み状態を尊重 / 並行 claim の直列化 / 1 path 1 行) を
+  watch.sh 本体から関数を source して検証する。旧 `tests/test_watch_mtime_boundaries.sh`
+  は対象の `should_suppress()` が削除されたため置き換え。
+- `tests/test_watch_report_bridge.sh`: report-bridge ループ (claim → 送信 → commit /
+  ロールバック) の結合テスト。tmux をスタブに差し替えて watch.sh を実プロセスとして
+  起動し、送信失敗時に配達済みにしないこと・復旧後に再送すること・二重送信しないことを
+  検証する。watcher 2 プロセス + `.squad_session` 切替のシナリオも含み、担当が移っても
+  配達済み report を再通知しないこと・新規 report を新担当だけが 1 回通知することを
+  ループレベルで検証する (Issue #22 F1)。
 
 ### Changed
 

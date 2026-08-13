@@ -14,11 +14,13 @@
 #   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
 #   report-bridge / 停止検知 / discovery はそのセッションの watcher だけが行う。
 #   マーカーが無い project は SQUAD_DEFAULT_OWNER (既定 ros-agents) の担当。
+#   report の「通知済み」状態は queue/.report_ledger (全 watcher 共有・永続) で管理し、
+#   flock で直列化する。担当セッションが移っても通知済み判定はそのまま引き継がれる。
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION="${SQUAD_SESSION:-ros-agents}"
-QUEUE_DIR="$SCRIPT_DIR/queue"
+QUEUE_DIR="${WATCH_QUEUE_DIR:-$SCRIPT_DIR/queue}"   # 上書きはテスト用 (実運用では既定のまま)
 DISPATCHER="$SESSION:0.0"
 INTERVAL="${WATCH_INTERVAL:-15}"
 STALL_CYCLES="${WATCH_STALL_CYCLES:-4}"   # 無変化がこの回数続いたら停止疑い (既定: 15s*4=60s)
@@ -39,6 +41,11 @@ else
     SEEN_FILE="$QUEUE_DIR/.discovery_seen.$SESSION"
     INBOX_FILE="$QUEUE_DIR/_inbox.$SESSION.md"
 fi
+# report 通知済み ledger (全セッションの watcher で共有・永続)。
+# セッションごとに分けてはいけない: 担当が A→B→A と移っても「B が通知済み」を
+# A が参照できることが目的 (Issue #22 / PR #21 cross-review F1)。
+LEDGER_FILE="${WATCH_LEDGER_FILE:-$QUEUE_DIR/.report_ledger}"
+LEDGER_LOCK="${LEDGER_FILE}.lock"
 GC_INTERVAL="${WATCH_GC_INTERVAL:-1800}"               # merged worktree GC の間隔 (既定 30分)
 WORKTREE_GLOB="${WATCH_WORKTREE_GLOB:-$(dirname "$SCRIPT_DIR")/*-wt-*}"  # GC 対象 worktree の glob (既定: リポジトリの親 dir)
 
@@ -69,12 +76,20 @@ APPROVAL_RE='Do you want to proceed|Allow this|Approve|approve|\(y/n\)|press y|1
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
+# Dispatcher pane へ 1 メッセージ送る。send-keys が失敗したら 1 を返す
+# (呼び出し側が「通知できなかった」ことを検知できるようにする)。
+#
+# 本文と Enter を 1 回の send-keys にまとめない: tmux 側で Enter が届かず次の
+# メッセージと連結される事象があるため、間に sleep を挟んで別々に送る。
 notify_dispatcher() {
     local msg="$1"
-    tmux send-keys -t "$DISPATCHER" "$msg"
+    # stderr は捨てない。discovery / sweep / stall 通報は戻り値を見ないため、
+    # 握り潰すと「通報した」というログだけ残って実際には届いていない状態になる。
+    tmux send-keys -t "$DISPATCHER" "$msg" || return 1
     sleep 0.5
-    tmux send-keys -t "$DISPATCHER" Enter
+    tmux send-keys -t "$DISPATCHER" Enter || return 1
     sleep 0.3
+    return 0
 }
 
 auto_answer() {
@@ -90,29 +105,268 @@ auto_answer() {
     sleep 0.3
 }
 
-# float epoch 比較 a>b
-gt() { awk -v a="$1" -v b="${2:-0}" 'BEGIN{exit !(a>b)}'; }
-
-# F2 対応: report (find %T@、小数秒) の既読化判定。marker 由来の cutoff (整数秒) と
-# 精度を揃えるため report 側の小数部を切り捨て、整数秒同士で比較する。同一秒は
-# 「握り潰し (気づけない)」より「再通知 (気づける)」の方が害が小さいという判断で
-# 通知側に倒し、report < cutoff (整数秒で真に古い) の場合のみ既読化 (suppress) する。
-# 副作用として、marker と同一秒に存在した古い report は最大1回だけ再通知される。
-should_suppress() {
-    local cutoff="$1" m="$2" m_int
-    [ -z "$cutoff" ] && return 1
-    m_int="${m%%.*}"
-    gt "$cutoff" "$m_int"
+# float epoch 比較 a>b。awk の double は約 16 桁しか保持できず、find %T@ の 20 桁
+# (秒 10 桁 + ナノ秒 10 桁) では下位桁が落ちて「異なる mtime を同一以下」と誤判定する
+# (PR #24 Claude review 6th #8)。整数部は数値で、小数部はゼロ詰めした固定長文字列の
+# 辞書順で比較する (同じ長さの数字列なら辞書順 = 数値順)。
+gt() {
+    LC_ALL=C awk -v a="$1" -v b="${2:-0}" 'BEGIN{
+        na = split(a, x, "."); nb = split(b, y, ".")
+        ia = x[1] + 0; ib = y[1] + 0
+        if (ia != ib) exit !(ia > ib)
+        fa = (na > 1 ? x[2] : ""); fb = (nb > 1 ? y[2] : "")
+        while (length(fa) < length(fb)) fa = fa "0"
+        while (length(fb) < length(fa)) fb = fb "0"
+        exit !(fa "" > fb "")
+    }'
 }
 
-# ファイルの mtime (epoch秒, GNU/BSD 両対応)。取得できなければ空文字。
-# 整数秒のみ (report 側 mtime は find %T@ による小数秒であり精度が異なる。
-# 比較箇所では report 側を整数秒に切り捨てて揃えること。F2 参照)。
-# 既知の制約 (F3, 未修正): symlink には GNU `stat -c %Y` がリンク自身の mtime を
-# 返す (参照先ではない) ため、`.squad_session` を symlink にして参照先だけを
-# 差し替えると、ここで取得する mtime は更新されない。
-file_mtime() {
-    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+# flock は必須 (util-linux)。ロック無しで動かすと複数 watcher の ledger
+# read-modify-rename が交錯し、配達済み行の消失や二重 claim が起きる
+# (PR #24 Codex review 8th P2-1)。フォールバックは提供しない。
+if ! command -v flock >/dev/null 2>&1; then
+    echo "[ERROR] watch.sh には flock (util-linux) が必要です。インストールしてから起動してください" >&2
+    exit 1
+fi
+
+# report ledger: report の配達状態を全 watcher 共有のファイルで管理する (Issue #22)。
+# 1 report path あたり 1 行 "<mtime>\t<lease>\t<path>"。
+#   lease 0                    = 配達済み (Dispatcher へ送信成功)
+#   lease "<epoch 秒>:<nonce>" = 配達中 (誰かが claim して送信しようとしている)
+#
+# 「claim = 配達済み」にはしない (claim と送信成功の 2 段階にする)。claim した時点で
+# 配達済みにすると、送信に失敗した report や、送信前に watcher が死んだ report が
+# 「通知済み」として残り、二度と橋渡しされない。lease にしておけば、期限が切れた
+# 時点で誰か (別セッションの watcher でもよい) が再び claim して配達をやり直せる。
+# プロセスメモリ上の再送キューでは、watcher の再起動や project の担当変更で状態が
+# 失われて同じ穴が残る (Codex review 3 巡目 blocking 1)。
+#
+#   ledger_claim <path> <mtime>   配達権を取れたら 0、他が配達済み/配達中なら 1。
+#                                 成功時は "<claim token>\t<claim 前の mtime>\t<claim 前の lease>"
+#                                 を stdout に返す (commit / rollback 用)。
+#   ledger_commit <path> <mtime> <token>  送信成功後に「配達済み」へ確定する。
+#   ledger_release <path> <token> <前 mtime> <前 lease>  送信失敗時に元の記録へ戻す。
+#
+# commit / release は「自分が書いた claim がまだ残っているか」を claim token
+# (= claim 時に書いた lease 期限値) で照合してから更新する。mtime だけで照合すると、
+# A の lease が切れた後に B が同じ mtime を再 claim した状況で、遅れて戻ってきた A が
+# B の claim を勝手に commit したり、B の有効な claim を release で消したりできてしまう
+# (PR #24 Codex review 4th round)。
+#
+# token は "<lease 期限 epoch 秒>:<nonce>" の形にする。期限値だけでは一意にならない:
+# 新しい mtime の claim は既存 lease の期限を待たずに成立するため、担当が切り替わる
+# 瞬間などに 2 つの watcher が同じ秒に同じ path を claim すると、期限値 (now+LEASE) が
+# 一致してしまう (PR #24 Claude review #1)。nonce に PID と $RANDOM を混ぜることで
+# プロセスをまたいでも token が衝突しないようにする。lease 切れ判定では ':' より前
+# (期限 epoch 秒) だけを見る。
+#
+# commit / release に失敗しても (ledger が書けない等)、lease 期限切れで再び claim
+# されるので通知が永久に消えることはない。副作用は「約 LEDGER_LEASE 秒後に再通知」。
+#
+# 記録済み mtime より「真に新しい」場合だけ新しい版として claim する (等値ではなく
+# 単調増加で判定)。等値だけを弾くと、A が mtime 101 を claim した直後に、更新前の
+# 100 を掴んだ B が ledger を 100 に巻き戻して通知し、次のサイクルで 101 が再度
+# claim されて同じ版が二重通知される。副作用として、記録済みの mtime を下回る report は
+# 通知されない: `cp -p` での復元など過去 mtime を保持した置き換えや、システム時計が
+# 巻き戻った後に書かれた report が該当する。report は常に同一マシンで現在時刻のまま
+# 書かれる、という前提に依存している。この抑止は気づけないと困るので、path ごとに
+# 1 回だけ WARN をログに出す (LEDGER_RC_STALE)。
+#
+# ledger にアクセスできない異常時 (lock file を開けない・書き込めない) は「未配達」
+# 側に倒す。握り潰し (気づけない) より再通知 (煩いが気づける) を選ぶ、という
+# watch.sh 全体の方針に合わせる。このため subshell の「配達済み/配達中」だけを 9 と
+# いう専用の終了コードで表し、リダイレクト失敗など他の異常 (bash が返す 1) と区別する。
+#
+# mtime は find %T@ が返す文字列 (小数秒込み) をそのまま記録・比較する。整数秒に
+# 切り捨てると、同一秒内に書き直された report (例: in_progress -> blocked) が同じ版と
+# みなされて恒久的に握り潰される (PR #24 Claude review #2)。この経路の mtime は
+# すべて同じ find %T@ から得ているので、取得経路の違いによる精度の揺れは起きない。
+# 同一版かどうかは文字列一致、新旧の判定だけ数値比較 (gt) で行う。
+LEDGER_RC_SEEN=9      # subshell 内で「配達済み/配達中なので claim しない」終了コード
+LEDGER_RC_STALE=10    # 記録より古い mtime (巻き戻し) なので claim しない終了コード
+LEDGER_LEASE="${WATCH_LEDGER_LEASE:-60}"   # 配達 lease の有効秒数
+
+# path の現在の記録を "<mtime>\t<lease>" で返す (未登録なら空)。
+# 3 列に満たない行は無視する (この ledger 形式は本 PR が初出で、旧形式は存在しない。
+# 中間リビジョンの 2 列形式は mtime が整数秒で書かれており、小数秒込みの現行 mtime と
+# 突き合わせても正しく「配達済み」と読めないため、互換で読む価値がない —
+# PR #24 Claude review 6th #3。もし残っていたら ledger ごと削除して作り直すこと)。
+_ledger_lookup() {
+    # path は -v ではなく環境変数で渡す。-v は値の backslash エスケープ (\n 等) を
+    # デコードするため、リテラル \n を含む path だと ledger に保存した生文字列と
+    # 照合できず、同じ report が繰り返し通知される (PR #24 Codex review 8th P2-2)。
+    LEDGER_KEY="$1" awk -F'\t' '
+        NF >= 3 && $3 == ENVIRON["LEDGER_KEY"] { mt = $1; ut = $2 }
+        END { if (mt != "") printf "%s\t%s", mt, ut }
+    ' "$LEDGER_FILE" 2>/dev/null
+}
+
+# path の行を除いた ledger を出力する (書き換えの土台)。
+_ledger_without() {
+    LEDGER_KEY="$1" awk -F'\t' 'NF < 3 || $3 != ENVIRON["LEDGER_KEY"]' "$LEDGER_FILE" 2>/dev/null
+}
+
+# path の行を差し替えた ledger 全体を一時ファイルに作り、atomic に置き換える。
+# mtime (第 2 引数) が空なら行を削除する。成功で 0、失敗なら何も変更せず 1 を返す。
+#
+# 「既存 ledger を読めなければ何も変更しない」ことが重要: 読めないまま新しい行だけを
+# 書いた一時ファイルを mv すると、他 report の配達済み記録が全消失し、queue 全体の
+# 一斉再通知になる (PR #24 Claude review 6th #1)。グループコマンドの終了ステータスは
+# 最後のコマンドのものになるため、awk (_ledger_without) の失敗を個別に判定する。
+_ledger_rewrite() {
+    local f="$1" mt="${2:-}" ut="${3:-}" tmp="${LEDGER_FILE}.tmp.$$"
+    if [ -f "$LEDGER_FILE" ]; then
+        _ledger_without "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    else
+        : > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    fi
+    if [ -n "$mt" ]; then
+        printf '%s\t%s\t%s\n' "$mt" "$ut" "$f" >> "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    fi
+    mv -f "$tmp" "$LEDGER_FILE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+ledger_claim() {
+    local f="$1" m="$2" rc
+    # タブ・改行を含む path はタブ区切り行指向の ledger 形式そのものと両立しないため
+    # 記録しない (PR #24 Codex review 8th P2-2)。token 無しの claim 成功 (fail-open)
+    # として返すと、呼び出し側が「claim 未記録」の WARN を出しつつ通知自体は行われる。
+    case "$f" in (*$'\t'*|*$'\n'*) return 0 ;; esac
+    (
+        # ロックを取れなかった場合は「未配達」側に倒す
+        flock -w 5 9 || exit 0
+        local rec mt ut now token
+        rec="$(_ledger_lookup "$f")"
+        mt=""; ut=""
+        [ -n "$rec" ] && IFS=$'\t' read -r mt ut <<< "$rec"
+        now=$(date +%s)
+        if [ -n "$mt" ]; then
+            if [ "$m" = "$mt" ]; then
+                # 同じ版。配達済み (lease 0)、または他 watcher が配達中なら触らない。
+                # lease が切れていれば配達やり直しとして claim し直す。
+                if [ "$ut" = "0" ] || [ "$now" -lt "${ut%%:*}" ] 2>/dev/null; then
+                    exit "$LEDGER_RC_SEEN"
+                fi
+            elif ! gt "$m" "$mt"; then
+                # 記録より古い版は lease の状態によらず常に skip。claim を許すと記録上の
+                # mtime と呼び出し側が持つ mtime が食い違い、送信後の commit が空振りして
+                # lease 切れ後に二重通知される (PR #24 Codex review 4th round)。
+                exit "$LEDGER_RC_STALE"
+            fi
+        fi
+        token="$((now + LEDGER_LEASE)):$$-$RANDOM"
+        # 書き込みに失敗した場合 (権限・容量・ledger を読めない等) も claim 成功として
+        # 扱う (fail-open) が、token は返さない。ledger に無い token を返すと呼び出し側が
+        # 「claim 記録済み」と誤認し、commit / release のログと再送時期が実態と食い違う
+        # (Codex review 7th B1)。token が空なら呼び出し側は「claim 未記録」の WARN を出す。
+        if _ledger_rewrite "$f" "$m" "$token"; then
+            printf '%s\t%s\t%s' "$token" "$mt" "$ut"
+        fi
+        exit 0
+    ) 9>"$LEDGER_LOCK"
+    rc=$?
+    # 9 / 10 以外 (0 = claim 成功、1 = lock file を開けない等の異常) はすべて通知させる
+    case "$rc" in
+        "$LEDGER_RC_SEEN")  return 1 ;;
+        "$LEDGER_RC_STALE") return "$LEDGER_RC_STALE" ;;
+        *)                  return 0 ;;
+    esac
+}
+
+# 送信成功後に配達済み (lease 0) へ確定する。自分の claim でなくなっていれば何もしない。
+# ledger を書けなければ 1 を返す (lease 期限切れ後に再通知される)。
+ledger_commit() {
+    local f="$1" m="$2" token="${3:-}"
+    (
+        flock -w 5 9 || exit 1
+        local rec mt ut
+        rec="$(_ledger_lookup "$f")"
+        [ -n "$rec" ] || exit 1
+        IFS=$'\t' read -r mt ut <<< "$rec"
+        [ "$mt" = "$m" ] || exit 0              # 別の版で上書きされている = 何もしない
+        [ "$ut" = "0" ] && exit 0               # 既に配達済み
+        [ "$ut" = "$token" ] || exit 0          # 別 watcher の claim = 触らない
+        _ledger_rewrite "$f" "$m" 0 || exit 1
+        exit 0
+    ) 9>"$LEDGER_LOCK"
+}
+
+# 送信失敗時に claim を取り消す。ledger の記録が自分の claim (token 一致) のままなら、
+# claim 前の記録 (prev_mt / prev_ut、claim 前が未登録だったなら空文字) に戻す。
+# 取り消せたら 0、ledger を操作できなかったら 1 を返す (lease 期限切れで再 claim される)。
+#
+# 行を消すのではなく「元の記録に戻す」ことが重要。単に消すと、直前に配達済みだった
+# 古い版の記録まで失われ、更新前の mtime を掴んでいた別 watcher がその古い版を
+# 再 claim して二重通知できてしまう。
+ledger_release() {
+    local f="$1" token="${2:-}" prev_mt="${3:-}" prev_ut="${4:-}"
+    (
+        flock -w 5 9 || exit 1
+        local rec cur_ut
+        rec="$(_ledger_lookup "$f")"
+        [ -n "$rec" ] || exit 0
+        cur_ut="${rec#*$'\t'}"
+        # 自分の claim がそのまま残っている場合だけ戻す。lease 切れ後に別 watcher が
+        # 再 claim していたら (token 不一致) 触らない。
+        [ "$cur_ut" = "$token" ] || exit 0
+        _ledger_rewrite "$f" "$prev_mt" "$prev_ut" || exit 1
+        exit 0
+    ) 9>"$LEDGER_LOCK"
+}
+
+# ledger 未作成時の初期 seed: 既存 report をすべて「通知済み」として一括登録する
+# (この機構の導入時や queue の作り直し時に、過去 report が一斉通知されるのを防ぐ)。
+#
+# 対象は担当 project ではなく queue/projects 配下の全 report にする。後から起動した
+# 別セッションの watcher は「ledger ファイルがある = seed 済み」とだけ判断するため、
+# 担当分しか seed しないと、その watcher が自分の担当 project の過去 report を
+# 一斉通知してしまう (Codex review P1)。
+#
+# 部分生成された ledger が他プロセスから見えないよう、一時ファイルに書いてから
+# flock 下で atomic に mv する。mv 直前に他プロセスが既に ledger を作っていたら
+# 何もしない (先着優先)。
+ledger_baseline_seed() {
+    local tmp seeded=0
+    tmp="$(mktemp "${LEDGER_FILE}.seed.XXXXXX" 2>/dev/null)" || {
+        # seed できないまま監視を始めると既存 report が一斉通知される。抑止側に倒すと
+        # 正当な未通知 report まで消えるので通知は止めないが、必ずログに残す。
+        log "[WARN] ledger baseline seed 用の一時ファイルを作成できません (${LEDGER_FILE}.seed.*)。" \
+            "既存 report が一斉通知される可能性があります"
+        return 1
+    }
+    find "$QUEUE_DIR/projects" \
+        \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
+        -printf '%T@\t%p\n' 2>/dev/null \
+        | awk -F'\t' '{print $1 "\t0\t" $2}' > "$tmp"
+    # find (読めない dir があると非 0) / awk のどちらが失敗しても、部分的な seed を
+    # 正本として据えない。取りこぼした report が初回サイクルで一斉通知される事故を
+    # 「無言の成功ログ」の裏で起こさないため (Codex review 7th B2)。
+    local _ps=("${PIPESTATUS[@]}")   # 直後の [ ] 自体が PIPESTATUS を上書きするため即退避
+    if [ "${_ps[0]}" -ne 0 ] || [ "${_ps[1]:-1}" -ne 0 ]; then
+        rm -f "$tmp"
+        log "[WARN] ledger baseline seed の report 列挙に失敗しました (find/awk)。" \
+            "ledger を作らず監視を始めます (既存 report が一斉通知される可能性があります)"
+        return 1
+    fi
+    seeded=$(grep -c . "$tmp" 2>/dev/null || true)
+    (
+        flock -w 5 9 || exit 1
+        [ -f "$LEDGER_FILE" ] && exit 2        # 先に他プロセスが seed 済み (正常)
+        mv -f "$tmp" "$LEDGER_FILE" || exit 1
+    ) 9>"$LEDGER_LOCK"
+    local rc=$?
+    rm -f "$tmp"
+    if [ "$rc" -eq 0 ]; then
+        log "ledger baseline: 既存 report ${seeded} 件を通知済みとして登録 (通知なし)"
+    elif [ "$rc" -ne 2 ]; then
+        # lock file を開けない・flock を取れない・mv 失敗。seed されないまま監視が
+        # 始まると既存 report が一斉通知されるため、原因の手掛かりを必ず残す
+        # (mktemp 失敗だけでなく全経路をログする。PR #24 Claude review 6th #4)。
+        log "[WARN] ledger baseline seed に失敗しました (lock/書き込み不可): $LEDGER_FILE" \
+            "既存 report が一斉通知される可能性があります"
+        return 1
+    fi
+    return 0
 }
 
 # このセッションが担当する project ディレクトリ一覧 (毎サイクル再計算し、実行中の
@@ -250,7 +504,12 @@ run_discovery() {
     fi
     if [ "$added" -gt 0 ]; then
         log "discovery: 新規候補 ${added} 件 -> inbox + Dispatcher 通知"
-        notify_dispatcher "[DISCOVERY] 新規候補 ${added} 件を ${INBOX_FILE} に追加。空き worker に自動起票してください (task-yaml-author → 通知)。merge gate は人間が維持。"
+        # 送信に失敗したら PENDING_NUDGE に積み、メインループが毎サイクル再送を試みる。
+        # SEEN_FILE の既知化は取り消さない (候補は inbox に記録済みで、失われるのは
+        # nudge だけ。既知化を取り消すと重複 inbox 行が増える)。(6th #2)
+        notify_dispatcher "[DISCOVERY] 新規候補 ${added} 件を ${INBOX_FILE} に追加。空き worker に自動起票してください (task-yaml-author → 通知)。merge gate は人間が維持。" \
+            || { PENDING_NUDGE="[DISCOVERY] 新規候補を ${INBOX_FILE} に追加済み。確認して空き worker に起票してください。"
+                 log "[WARN] Dispatcher への discovery 通知に失敗 (次サイクルで再送)"; }
         return
     fi
     # 新規ゼロ: idle を遊ばせず、throttle 付きで「一通りレビュー(sweep)」を投げる
@@ -258,7 +517,9 @@ run_discovery() {
     if [ $(( now2 - LAST_SWEEP )) -ge "$SWEEP_INTERVAL" ]; then
         echo "- [ ] $(date '+%Y-%m-%dT%H:%M:%S%z') [sweep] all: 新規タスクなし。既存コード/open PR/backlog の一通りレビュー・監査  \`sweep:${now2}\`" >> "$INBOX_FILE"
         log "discovery: 新規なし -> [SWEEP] 周回レビューを inbox 投入"
-        notify_dispatcher "[SWEEP] 新規タスクなし。空き worker がいれば既存コード/open PR/backlog の一通りレビュー・監査を1件だけ割り当ててください (全員稼働中なら何もしない)。"
+        notify_dispatcher "[SWEEP] 新規タスクなし。空き worker がいれば既存コード/open PR/backlog の一通りレビュー・監査を1件だけ割り当ててください (全員稼働中なら何もしない)。" \
+            || { PENDING_NUDGE="[SWEEP] 周回レビュー候補を ${INBOX_FILE} に投入済み。空き worker がいれば割り当ててください。"
+                 log "[WARN] Dispatcher への sweep 通知に失敗 (次サイクルで再送)"; }
         LAST_SWEEP="$now2"
     else
         log "discovery: 新規なし (self-archive, 次 sweep まで約 $(( (SWEEP_INTERVAL - (now2 - LAST_SWEEP)) / 60 )) 分)"
@@ -299,24 +560,28 @@ gc_worktrees() {
 }
 
 OWNED=()                   # このセッション担当の project dir 一覧 (refresh_owned_projects が更新)
-declare -A REPORT_SEEN     # report path -> mtime
 declare -A PANE_HASH       # worker -> 直近 pane ハッシュ
 declare -A PANE_STALL      # worker -> 無変化カウント
 declare -A STALL_NOTIFIED  # worker -> 通報済みタスク mtime
 declare -A RESUME_COUNT    # worker -> 通報後の連続活動再開カウント
-declare -A PREV_OWNED      # 直前サイクルで担当していた project dir 集合 (新規担当検知用)
-declare -A EVER_OWNED      # このセッション(プロセス)が過去に一度でも担当した project dir。
-                           # プロセス再起動で失われる (in-memory)。既読化カットオフの要否判定に使う。
-declare -A NEWLY_OWNED_CUTOFF  # 新規担当 project dir -> 既読化カットオフ mtime (毎サイクル再構築)
-declare -A SUPPRESSED_COUNT    # 新規担当 project dir -> 実際に既読化した report 件数 (毎サイクル再構築)
+declare -A STALE_SEEN      # report path -> このサイクルで STALE になった mtime
+declare -A STALE_PREV      # report path -> 前サイクルで STALE になった mtime
+declare -A STALE_LOGGED    # report path -> mtime 巻き戻し抑止をログ済みの mtime
 
-log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s)"
+mkdir -p "$QUEUE_DIR"
+
+log "watcher start (session=$SESSION interval=${INTERVAL}s stall=${STALL_CYCLES} stall_resume=${STALL_RESUME_CYCLES} discovery=${DISCOVERY_INTERVAL}s sweep=${SWEEP_INTERVAL}s gc=${GC_INTERVAL}s boot_delay=${BOOT_DELAY}s ledger=${LEDGER_FILE})"
+# ledger が無ければ、監視を始める前に既存 report を通知済みとして一括登録する
+# (この機構の導入時や queue 作り直し時の一斉通知を防ぐ)。ledger があれば何もしない =
+# 初回サイクルから ledger の内容だけで判定するので、watcher 停止中に書かれた report も
+# 再起動後に拾える。
+[ -f "$LEDGER_FILE" ] || ledger_baseline_seed
 warn_missing_markers
 sleep "$BOOT_DELAY"
 
-FIRST=1
 LAST_DISCOVERY=0
 LAST_SWEEP=0
+PENDING_NUDGE=""          # 送信に失敗した discovery / sweep nudge (毎サイクル再送を試みる)
 LAST_GC=0
 while true; do
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -326,98 +591,84 @@ while true; do
 
     refresh_owned_projects
 
-    # 新規に担当になった project (このサイクルで初めて OWNED になった) を検出。
-    #
-    # - このセッション(プロセス)がこれまで一度も担当したことが無い project
-    #   (EVER_OWNED 未登録 = 初回担当): マーカーファイル (無ければ project dir 自体)
-    #   の mtime を既読化カットオフとし、それより真に古い report だけを既読化する
-    #   (同一秒扱いは通知側に倒す。詳細は下の「既知の制約 (F2)」参照)。
-    #   マーカー変更とほぼ同時 (同一サイクル内) に書かれた新規 report は mtime が
-    #   カットオフより新しいため通常どおり通知される (PR #21 review major 対応)。
-    # - 過去に一度でも担当したことがある project が再び担当に戻ってきた場合
-    #   (EVER_OWNED 登録済み): 既読化そのものを行わない。このセッション自身が過去に
-    #   見た (REPORT_SEEN に記録済みで mtime が不変な) report は再通知されないが、
-    #   REPORT_SEEN はセッション(プロセス)ごとに分離したメモリ上の状態であり、
-    #   他セッションが通知済みかどうかまでは分からない。そのため「二重通知の心配は
-    #   無い」とは言えず、A→B→A のように担当が移った場合、B が担当中に発生し B が
-    #   既に通知済みの report を A が再び通知することがある (既知の制約、詳細は
-    #   下記 F1 参照)。それでも、他セッション担当中に書かれ未通知のまま残っている
-    #   report を握り潰さないことを優先し、既読化はスキップする (PR #21 review
-    #   minor 対応)。
-    # 起動直後の全体 baseline は既存の FIRST フラグで処理済みなのでここでは対象外。
-    #
-    # 既知の制約 (未修正。PR #21 Codex cross-review 指摘、根本対応は別 Issue):
-    #   F1 (major, 上記参照): REPORT_SEEN はセッションごとに分離しており、通知済み
-    #     状態を watcher 間で共有する永続 ledger が無いため、A→B→A で B 通知済みの
-    #     report を A が再通知し得る (二重通知)。
-    #   F3 (minor): 既読化カットオフは `.squad_session` の mtime を「担当が切り替わった
-    #     時刻」の代理として使っているが、mtime は owner 変更時刻を正確には表さない。
-    #     `cp -p` や過去 mtime のファイルを `mv` して置換すると owner が変わっても
-    #     mtime は保持され、symlink 化して参照先だけ差し替えると GNU `stat -c %Y` は
-    #     symlink 自身の mtime を返すため cutoff が更新されない。時計ずれや保存された
-    #     未来 mtime がある場合は逆方向 (正当な report の握り潰し) にも倒れ得る。
-    #
-    # 残留リスク: マーカーファイルが「初回担当時点より後」に再度 touch/編集され、かつ
-    # その直前に正当な新規 report が書かれてから watcher がまだそれを処理していない
-    # (watcher 停止等) 場合、その report の mtime がマーカー更新後の mtime より古くなり
-    # 既読化されてしまう可能性がある。同種のレースが理論上マーカー編集のたびに残るが、
-    # 発生には「マーカー編集 + report 未処理のまま次の編集」という限定的な条件が必要。
-    NEWLY_OWNED_DIRS=()
-    NEWLY_OWNED_CUTOFF=()
-    SUPPRESSED_COUNT=()
-    if [ "$FIRST" -eq 0 ]; then
-        for d in "${OWNED[@]}"; do
-            [ -n "${PREV_OWNED[$d]:-}" ] && continue
-            NEWLY_OWNED_DIRS+=("$d")
-            if [ -z "${EVER_OWNED[$d]:-}" ]; then
-                # 既読化カットオフ: .squad_session の mtime (無ければ project dir の mtime)
-                if [ -f "$d/.squad_session" ]; then cutoff="$(file_mtime "$d/.squad_session")"; else cutoff="$(file_mtime "$d")"; fi
-                NEWLY_OWNED_CUTOFF[$d]="${cutoff:-0}"
-            fi
-        done
-    fi
-
     # --- 1. report-bridge: 新規/更新された report を Dispatcher へ橋渡し ---
     #   status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
+    #
+    # 通知するかどうかは共有 ledger (queue/.report_ledger) だけで決める。
+    # 「担当が切り替わった project の過去 report を既読化する」というヒューリスティック
+    # (PR #21) は不要になったので削除した。ledger は project の担当セッションに関係なく
+    # 「誰かが既に通知したか」を持つため、
+    #   - A→B→A と担当が移っても B 通知済み report は再通知されない (Issue #22 / F1)
+    #   - マーカーの mtime を担当切替時刻の代理に使う必要が無い (F3)
+    # 起動時の baseline は ledger_baseline_seed が監視開始前に済ませている。
+    # STALE の「2 サイクル連続」判定用にサイクル単位で集合を入れ替える。入れ替えないと
+    # 「過去に一度でも同じ mtime を見た」だけで WARN になり、良性競合が非連続に 2 回
+    # 起きただけで本物用の 1 回限り WARN を消費してしまう (Codex review 7th B4)。
+    STALE_PREV=()
+    for _k in "${!STALE_SEEN[@]}"; do STALE_PREV[$_k]="${STALE_SEEN[$_k]}"; done
+    STALE_SEEN=()
     while IFS=$'\t' read -r m f; do
         [ -z "$f" ] && continue
-        if [ "${REPORT_SEEN[$f]:-}" != "$m" ]; then
-            REPORT_SEEN[$f]="$m"
-            suppress=0
-            for d in "${NEWLY_OWNED_DIRS[@]}"; do
-                case "$f" in
-                    "$d"/*)
-                        cutoff="${NEWLY_OWNED_CUTOFF[$d]:-}"
-                        if should_suppress "$cutoff" "$m"; then
-                            suppress=1
-                            SUPPRESSED_COUNT[$d]=$(( ${SUPPRESSED_COUNT[$d]:-0} + 1 ))
-                        fi
-                        break
-                        ;;
-                esac
-            done
-            if [ "$FIRST" -eq 0 ] && [ "$suppress" -eq 0 ]; then
-                wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
-                kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
-                status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
-                if [ "$status" = "blocked" ]; then
-                    log "report 検知(blocked): $f -> Dispatcher [INBOX] 通知"
-                    notify_dispatcher "[INBOX] Worker${wnum} が blocked: 検証ゲート未通過。${f} の notes/verdict を確認し、ユーザーに優先報告してください。"
-                else
-                    log "report 検知: $f -> Dispatcher 通知"
-                    notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
+        # 配達権を取る (他が配達済み / 配達中の lease を持っていれば skip)
+        claim_rec=$(ledger_claim "$f" "$m")
+        claim_rc=$?
+        if [ "$claim_rc" -ne 0 ]; then
+            # mtime 巻き戻しによる抑止は気づけないと困るのでログに残す。ただし
+            # 2 つの watcher が同じ project を走査する切替の瞬間には、古い find
+            # スナップショットを掴んだ側にも STALE が出る (次サイクルで新しい mtime を
+            # 拾って解消する良性の競合)。この一時的な STALE で「1 回だけの WARN」を
+            # 消費すると、後で本物の握り潰しが起きたとき無警告になるため、同じ path・
+            # 同じ mtime が 2 サイクル連続したときだけ本物とみなして 1 回 WARN する
+            # (PR #24 Claude review 6th #6)。
+            if [ "$claim_rc" -eq "$LEDGER_RC_STALE" ]; then
+                STALE_SEEN[$f]="$m"
+                if [ "${STALE_PREV[$f]:-}" = "$m" ] && [ "${STALE_LOGGED[$f]:-}" != "$m" ]; then
+                    STALE_LOGGED[$f]="$m"
+                    log "[WARN] mtime が ledger の記録より古いため通知しません: $f" \
+                        "(巻き戻し防止。意図した再通知なら touch してください)"
                 fi
+            fi
+            continue
+        fi
+        IFS=$'\t' read -r claim_token prev_mt prev_ut <<< "$claim_rec"
+        wnum=$(basename "$f" | grep -oE 'worker[0-9]+' | grep -oE '[0-9]+')
+        kind=report; echo "$f" | grep -q '_review.yaml' && kind=review
+        status=$(grep -m1 -E '^status:' "$f" 2>/dev/null | awk '{print $2}')
+        if [ "$status" = "blocked" ]; then
+            log "report 検知(blocked): $f -> Dispatcher [INBOX] 通知"
+            notify_dispatcher "[INBOX] Worker${wnum} が blocked: 検証ゲート未通過。${f} の notes/verdict を確認し、ユーザーに優先報告してください。"
+            sent=$?
+        else
+            log "report 検知: $f -> Dispatcher 通知"
+            notify_dispatcher "Worker${wnum} ${kind}: ${f} を確認してください。(watcher 自動橋渡し)"
+            sent=$?
+        fi
+        # 送信できて初めて「配達済み」に確定する。失敗したら claim 前の記録に戻して
+        # 次サイクルで再送する。commit / release 自体に失敗しても (ledger が書けない等)
+        # lease 期限切れで再び claim されるので、通知が永久に消えることはない。
+        # claim_token が空 = claim は fail-open した (flock を取れない等で ledger に
+        # 記録が無い)。commit / release は token 不一致で空振りするだけなので、
+        # 「配達済みにした / 取り消した」と実態と逆のログを出さない
+        # (PR #24 Claude review 6th #5)。
+        if [ "$sent" -eq 0 ]; then
+            if [ -z "$claim_token" ]; then
+                log "[WARN] 通知したが ledger に claim を記録できていません: $f (毎サイクル再通知される可能性)"
+            else
+                ledger_commit "$f" "$m" "$claim_token" \
+                    || log "[WARN] ledger を更新できず: $f (約${LEDGER_LEASE}s 後に再通知される可能性)"
+            fi
+        else
+            if [ -z "$claim_token" ]; then
+                log "[WARN] Dispatcher への送信に失敗: $f (ledger に claim は無く、次サイクルで再送)"
+            elif ledger_release "$f" "$claim_token" "$prev_mt" "$prev_ut"; then
+                log "[WARN] Dispatcher への送信に失敗: $f (claim を取り消し、次サイクルで再送)"
+            else
+                log "[WARN] Dispatcher への送信に失敗: $f (ledger を戻せず、約${LEDGER_LEASE}s 後に再送)"
             fi
         fi
     done < <([ "${#OWNED[@]}" -gt 0 ] && find "${OWNED[@]}" \
         \( -path '*/reports/worker*_report.yaml' -o -path '*/reports/worker*_review.yaml' \) \
         -printf '%T@\t%p\n' 2>/dev/null)
-
-    # 実際に既読化した report が1件以上ある project のみログを出す (PR #21 review nit 対応)
-    for d in "${NEWLY_OWNED_DIRS[@]}"; do
-        cnt="${SUPPRESSED_COUNT[$d]:-0}"
-        [ "$cnt" -gt 0 ] && log "project $(basename "$d") が新規担当になったため既存 report ${cnt} 件を既読化 (再通知しない)"
-    done
 
     # --- 2 & 3. 承認オートアンサー + 停止検知 (worker 1-4) ---
     for N in 1 2 3 4; do
@@ -502,18 +753,31 @@ except Exception:
             fi
             if [ -n "$hook_event" ]; then
                 log "Worker${N}: stall 検知だが hook=$hook_event のため完了通報に分類"
-                notify_dispatcher "Worker${N} は完了 (hook=$hook_event) していますが task が pending のままです (約${secs}s 経過)。pane ${pane#"$SESSION":} を確認し、report を書くよう促してください。"
+                stall_msg="Worker${N} は完了 (hook=$hook_event) していますが task が pending のままです (約${secs}s 経過)。pane ${pane#"$SESSION":} を確認し、report を書くよう促してください。"
             else
                 log "Worker${N}: 約${secs}s 停止 (タスク未報告) -> Dispatcher 通報"
-                notify_dispatcher "Worker${N} が約${secs}s 停止しています (タスク割当済・report 未出力)。pane ${pane#"$SESSION":} を確認し、必要なら再送/clear してください。"
+                stall_msg="Worker${N} が約${secs}s 停止しています (タスク割当済・report 未出力)。pane ${pane#"$SESSION":} を確認し、必要なら再送/clear してください。"
             fi
-            STALL_NOTIFIED[$N]="$task_m"
+            # 送信できたときだけ通報済みにする。失敗時は次サイクルで再試行される (6th #2)
+            if notify_dispatcher "$stall_msg"; then
+                STALL_NOTIFIED[$N]="$task_m"
+            else
+                log "[WARN] Worker${N} の停止通報を送信できず (次サイクルで再試行)"
+            fi
         fi
     done
 
     # --- 4. Discovery: 低頻度で仕事を発見し inbox へ (新規ゼロ時は throttle 付き sweep) ---
+    # 前回送信に失敗した nudge があれば先に再送を試みる (成功するまで毎サイクル)
+    if [ -n "$PENDING_NUDGE" ] && notify_dispatcher "$PENDING_NUDGE"; then
+        log "保留していた Dispatcher 通知を再送しました"
+        PENDING_NUDGE=""
+    fi
     now_ts=$(date +%s)
-    if [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
+    # 保留 nudge が残っている間は discovery を延期する。実行すると新しい nudge が
+    # PENDING_NUDGE (1 スロット) を上書きし、古い通知が失われる (Codex review 7th B3)。
+    # どうせ Dispatcher に届かない状態なので、延期しても失うものは無い。
+    if [ -z "$PENDING_NUDGE" ] && [ $(( now_ts - LAST_DISCOVERY )) -ge "$DISCOVERY_INTERVAL" ]; then
         run_discovery
         LAST_DISCOVERY="$now_ts"
     fi
@@ -526,12 +790,5 @@ except Exception:
         LAST_GC="$now_ts"
     fi
 
-    # 次サイクルの新規担当検知のため、今回の OWNED を記録
-    PREV_OWNED=()
-    for d in "${OWNED[@]}"; do PREV_OWNED[$d]=1; done
-    # このプロセスが一度でも担当した project として記録 (再担当時の既読化スキップ判定に使用)
-    for d in "${OWNED[@]}"; do EVER_OWNED[$d]=1; done
-
-    FIRST=0
     sleep "$INTERVAL"
 done

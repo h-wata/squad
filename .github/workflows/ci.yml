@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shell:
+    name: shell syntax + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (構文チェック)
+        # 対象はハードコードせず git 管理下の全 *.sh (shellcheck ジョブと同じ列挙方法。
+        # リストを 2 箇所に持つと新規スクリプトの追加漏れが起きる)
+        run: git ls-files -z '*.sh' | xargs -0 -n1 bash -n
+
+      - name: tests
+        run: |
+          for f in tests/*.sh; do
+            echo "=== $f ==="
+            bash "$f"
+          done
+
+      - name: git diff --check (whitespace エラー)
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: run shellcheck
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning

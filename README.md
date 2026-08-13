@@ -18,6 +18,9 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
   （詳細は下記「起動 / 終了」参照）。
 - **Python 3** — `squad/squad.py` は標準ライブラリのみで動作し、追加パッケージの
   インストールは不要。
+- **flock (util-linux)** — `watch.sh` が複数セッション共有の report ledger を排他制御
+  するために必須。無いと `watch.sh` は起動時にエラー終了する。ほとんどの Linux
+  ディストリに標準搭載（無ければ `apt install util-linux`）。
 
 ### 初回セットアップ
 
@@ -88,6 +91,21 @@ tmux attach -t myproj
 
 `squad` CLI (`squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
 `squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
+
+report を Dispatcher に通知したかどうかは、セッションをまたいで共有する永続 ledger
+`queue/.report_ledger` (1 report につき 1 行、更新は `flock` で直列化) で管理する。
+project の担当セッションが移っても、既に別の watcher が通知した report は再通知されない。
+通知は「配達権の取得 (期限付き lease) → 送信成功で配達済みを確定」の 2 段階で、送信に
+失敗した report や、送信前に watcher が落ちた report は lease 期限切れ後に再送される
+(期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。
+ledger を消す場合は必ず全 watcher を止めてから行うこと。watcher 稼働中に消すと、
+既存 report の一括登録 (seed) は起動時にしか走らないため、次のサイクルで既存 report が
+全件「新着」として一斉再通知される。停止中に消して起動し直せば、seed が既存 report を
+通知済みとして登録し直すので一斉再通知は起きない (ただし停止中の別セッションが担当する
+未通知 report も通知済みとして登録される)。逆に、ledger がある状態で
+`queue/projects/<pj>` を後から配置した場合 (archive からの復元など) は、その project の
+既存 report が新着として一斉に通知される。通知させたくない場合は復元前に watcher を
+止め、ledger に該当行を追記するか ledger ごと作り直す。
 
 ## Dispatcher 起動モデルのカスタマイズ
 
