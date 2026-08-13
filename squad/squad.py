@@ -230,8 +230,10 @@ def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
         model = r['model'] or '-'
         agent = r['agent'] or '-'
         evt = f' evt={r["last_event"]}' if r.get('last_event') else ''
-        print(f'{ic} {r["worker"]:<3} {r["pane"]:<22} {r["status"]:<16} '
-              f'ctx={ctx:<5} model={model:<14} agent={agent}{evt}')
+        print(
+            f'{ic} {r["worker"]:<3} {r["pane"]:<22} {r["status"]:<16} '
+            f'ctx={ctx:<5} model={model:<14} agent={agent}{evt}'
+        )
         if r['status'] in ('permission_wait', 'unreachable'):
             print(f'     ↳ {r["last_line"]}')
     return 0
@@ -277,7 +279,8 @@ def cmd_assign(args: argparse.Namespace, cfg: dict) -> int:
 
     print(f'[assign] {args.worker} ← {task_id} ({project}) "{title[:50]}"')
     print(
-        f'[assign] agent={agent or "?"} model={model or "-"} codex={is_codex} clear={args.clear} no_new={args.no_new}')
+        f'[assign] agent={agent or "?"} model={model or "-"} codex={is_codex} clear={args.clear} no_new={args.no_new}'
+    )
     print(f'[assign] cmd: {" ".join(cmd)}')
 
     if args.dry_run:
@@ -343,7 +346,9 @@ def cmd_dashboard(_: argparse.Namespace, cfg: dict) -> int:
         rep_meta = yaml_shallow(last_report) if last_report else {}
         rep_label = (
             f'{rep_meta.get("task_id", "?")} {rep_meta.get("status", "")} — {rep_meta.get("summary", "")[:60]}'
-            if rep_meta else '-')
+            if rep_meta
+            else '-'
+        )
 
         agent = meta.get('agent', '-')
         state_cell = f'{status}{ctx}'

@@ -107,6 +107,25 @@ ledger を消す場合は必ず全 watcher を止めてから行うこと。watc
 既存 report が新着として一斉に通知される。通知させたくない場合は復元前に watcher を
 止め、ledger に該当行を追記するか ledger ごと作り直す。
 
+### ledger の実体は sqlite3 (`queue/.report_ledger.db`)
+
+`watch.sh` は薄いラッパで、実処理は `squad/watchd.py` (stdlib only) が行う。ledger も
+旧タブ区切りテキスト (`queue/.report_ledger`, `flock` で排他制御) から sqlite3 DB
+(`queue/.report_ledger.db`, `squad/ledger.py` の `BEGIN IMMEDIATE` トランザクションで排他制御)
+に置き換わった。ファイルパスは `WATCH_LEDGER_FILE` 環境変数で上書きできる。
+
+移行は自動で、手動操作は不要:
+
+- watcher 起動時、sqlite3 ledger (`queue/.report_ledger.db`) が無く、旧タブ区切り
+  ledger (`queue/.report_ledger`) が存在する場合、`ReportLedger.migrate_legacy()` が
+  既存の通知済みレコードをそのまま sqlite3 へ取り込んでから起動する
+  (旧ファイルは削除されず残る。ログに移行件数が出力される)。
+- 旧 ledger も sqlite3 ledger も無い場合は、従来通り baseline seed
+  (既存 report を通知済みとして一括登録) が走る。
+
+手動で確認したい場合は `sqlite3 queue/.report_ledger.db 'select * from reports;'`
+のように直接クエリできる (スキーマは `squad/ledger.py` 参照)。
+
 ## Dispatcher 起動モデルのカスタマイズ
 
 Dispatcher (Pane 0) の起動モデルは既定で `opus`（曖昧な指示の明確化・複雑な判断を担うため）。

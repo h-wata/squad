@@ -89,7 +89,8 @@ class Config:
     lease_seconds: int = field(default_factory=lambda: _int_env('WATCH_LEDGER_LEASE', 60))
     ledger_file: str = field(default_factory=lambda: os.environ.get('WATCH_LEDGER_FILE', ''))
     worktree_glob: str = field(
-        default_factory=lambda: os.environ.get('WATCH_WORKTREE_GLOB') or str(REPO_ROOT.parent / '*-wt-*'))
+        default_factory=lambda: os.environ.get('WATCH_WORKTREE_GLOB') or str(REPO_ROOT.parent / '*-wt-*')
+    )
 
     @property
     def dispatcher(self) -> str:
@@ -198,8 +199,10 @@ class Watcher:
         """マーカー未設定 project の可視化 (起動時 1 回のみ。フォールバック挙動は変えない)."""
         for d in sorted(self.cfg.projects_dir.glob('*/')):
             if not (d / '.squad_session').is_file():
-                self.log(f'[WARN] project {d.name} has no .squad_session marker; '
-                         f'falling back to default owner {self.cfg.default_owner}')
+                self.log(
+                    f'[WARN] project {d.name} has no .squad_session marker; '
+                    f'falling back to default owner {self.cfg.default_owner}'
+                )
 
     def refresh_owned_projects(self) -> None:
         """担当 project を毎サイクル再計算する (project 追加やマーカー変更に追従)."""
@@ -255,8 +258,10 @@ class Watcher:
                     # 同じ path・同じ mtime が 2 サイクル連続したときだけ 1 回 WARN する。
                     if stale_prev.get(path) == m and self.stale_logged.get(path) != m:
                         self.stale_logged[path] = m
-                        self.log(f'[WARN] mtime が ledger の記録より古いため通知しません: {path} '
-                                 '(巻き戻し防止。意図した再通知なら touch してください)')
+                        self.log(
+                            f'[WARN] mtime が ledger の記録より古いため通知しません: {path} '
+                            '(巻き戻し防止。意図した再通知なら touch してください)'
+                        )
                 continue
             self._deliver(path, m, claim)
 
@@ -368,12 +373,16 @@ class Watcher:
         pane_short = pane.split(':', 1)[1]
         if hook_event:
             self.log(f'Worker{n}: stall 検知だが hook={hook_event} のため完了通報に分類')
-            msg = (f'Worker{n} は完了 (hook={hook_event}) していますが task が pending のままです '
-                   f'(約{secs}s 経過)。pane {pane_short} を確認し、report を書くよう促してください。')
+            msg = (
+                f'Worker{n} は完了 (hook={hook_event}) していますが task が pending のままです '
+                f'(約{secs}s 経過)。pane {pane_short} を確認し、report を書くよう促してください。'
+            )
         else:
             self.log(f'Worker{n}: 約{secs}s 停止 (タスク未報告) -> Dispatcher 通報')
-            msg = (f'Worker{n} が約{secs}s 停止しています (タスク割当済・report 未出力)。'
-                   f'pane {pane_short} を確認し、必要なら再送/clear してください。')
+            msg = (
+                f'Worker{n} が約{secs}s 停止しています (タスク割当済・report 未出力)。'
+                f'pane {pane_short} を確認し、必要なら再送/clear してください。'
+            )
         # 送信できたときだけ通報済みにする (失敗時は次サイクルで再試行)
         if self.notify_dispatcher(msg):
             self.stall_notified[n] = task_m
@@ -435,8 +444,9 @@ class Watcher:
             args += ['--label', lb]
         args += ['--limit', '30', '--json', 'number,title']
         for i in self._gh_json(args):
-            self._add_candidate(state, f'{pj}:issue:{gh_repo}#{i["number"]}', 'issue', pj,
-                                f'Issue #{i["number"]}: {i["title"]}')
+            self._add_candidate(
+                state, f'{pj}:issue:{gh_repo}#{i["number"]}', 'issue', pj, f'Issue #{i["number"]}: {i["title"]}'
+            )
 
     def _disc_pr(self, state: dict, pj: str, gh_repo: str) -> None:
         args = [
@@ -669,8 +679,10 @@ class Watcher:
         if n >= 0:
             self.log(f'ledger baseline: 既存 report {n} 件を通知済みとして登録 (通知なし)')
         elif n == -2:
-            self.log(f'[WARN] ledger baseline seed に失敗しました: {self.cfg.ledger_path} '
-                     '既存 report が一斉通知される可能性があります')
+            self.log(
+                f'[WARN] ledger baseline seed に失敗しました: {self.cfg.ledger_path} '
+                '既存 report が一斉通知される可能性があります'
+            )
 
     def cycle(self) -> None:
         """1 サイクル分の監視処理."""
@@ -697,10 +709,12 @@ class Watcher:
     def run(self) -> int:
         c = self.cfg
         c.queue_dir.mkdir(parents=True, exist_ok=True)
-        self.log(f'watcher start (session={c.session} interval={c.interval}s stall={c.stall_cycles} '
-                 f'stall_resume={c.stall_resume_cycles} discovery={c.discovery_interval}s '
-                 f'sweep={c.sweep_interval}s gc={c.gc_interval}s boot_delay={c.boot_delay}s '
-                 f'ledger={c.ledger_path})')
+        self.log(
+            f'watcher start (session={c.session} interval={c.interval}s stall={c.stall_cycles} '
+            f'stall_resume={c.stall_resume_cycles} discovery={c.discovery_interval}s '
+            f'sweep={c.sweep_interval}s gc={c.gc_interval}s boot_delay={c.boot_delay}s '
+            f'ledger={c.ledger_path})'
+        )
         self.prepare_ledger()
         self.warn_missing_markers()
         self.sleep(c.boot_delay)

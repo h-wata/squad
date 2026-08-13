@@ -655,8 +655,10 @@ class TestLegacyMigration:
 
     def test_64_migrates_legacy_rows(self, tmp_path: Path) -> None:
         legacy = tmp_path / '.report_ledger'
-        legacy.write_text('100.5\t0\t/q/projects/pj/reports/worker1_report.yaml\n'
-                          '200.0\t123456:1-2\t/q/projects/pj/reports/worker2_report.yaml\n')
+        legacy.write_text(
+            '100.5\t0\t/q/projects/pj/reports/worker1_report.yaml\n'
+            '200.0\t123456:1-2\t/q/projects/pj/reports/worker2_report.yaml\n'
+        )
         led0 = ReportLedger(tmp_path / '.report_ledger.db')
         n = led0.migrate_legacy(legacy)
         assert n == 2

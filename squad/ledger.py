@@ -220,8 +220,9 @@ class ReportLedger:
                 if rec[1] != token:
                     return True  # lease 切れ後に別 watcher が再 claim している
                 if prev_mtime:
-                    conn.execute('UPDATE reports SET mtime = ?, lease = ? WHERE path = ?',
-                                 (prev_mtime, prev_lease, path))
+                    conn.execute(
+                        'UPDATE reports SET mtime = ?, lease = ? WHERE path = ?', (prev_mtime, prev_lease, path)
+                    )
                 else:
                     conn.execute('DELETE FROM reports WHERE path = ?', (path,))
                 return True

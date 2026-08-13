@@ -25,8 +25,11 @@ class FakeTmux:
 
     def __init__(self, session: str, panes: set[str] | None = None) -> None:
         self.session = session
-        self.panes = (panes if panes is not None else
-                      {f'{session}:0.0', f'{session}:0.1', f'{session}:0.2', f'{session}:0.3', f'{session}:0.6'})
+        self.panes = (
+            panes
+            if panes is not None
+            else {f'{session}:0.0', f'{session}:0.1', f'{session}:0.2', f'{session}:0.3', f'{session}:0.6'}
+        )
         self.sent: list[tuple[str, str]] = []
         self.captures: dict[str, list[str]] = {}  # pane -> 順に返す capture 内容 (末尾を使い回す)
         self.fail_send = False
@@ -69,7 +72,6 @@ def watcher(tmp_path: Path) -> tuple[Watcher, Path]:
 
 
 class TestReportBridge:
-
     def test_new_report_notified_once(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
         d = make_project(queue, 'pj', session='testsess')
@@ -145,7 +147,6 @@ class TestReportBridge:
 
 
 class TestStallDetection:
-
     def test_pending_task_stall_notifies_after_n_cycles(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
         d = make_project(queue, 'pj', session='testsess')
@@ -195,7 +196,6 @@ class TestStallDetection:
 
 
 class TestDiscovery:
-
     def test_no_discovery_yaml_is_noop(self, watcher: tuple[Watcher, Path], capsys: pytest.CaptureFixture) -> None:
         w, queue = watcher
         make_project(queue, 'pj', session='testsess')
@@ -235,7 +235,6 @@ class TestDiscovery:
 
 
 class TestSessionMarkerFiltering:
-
     def test_refresh_owned_only_matches_session(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
         make_project(queue, 'mine', session='testsess')
@@ -255,7 +254,6 @@ class TestSessionMarkerFiltering:
 
 
 class TestLedgerPrepare:
-
     def test_prepare_ledger_migrates_legacy_file(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
         queue.mkdir()
