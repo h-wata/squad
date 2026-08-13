@@ -123,7 +123,10 @@ SQUAD_DISPATCHER_MODEL=sonnet ./start.sh <workspace_path>
 
 補足: ponytail のモードフラグ (`~/.claude/.ponytail-active`) は Claude セッション間で
 共有されるが、影響するのはサブエージェント注入とステータスライン表示のみ。各 pane の
-メインルールセットは起動時に環境変数から個別に決まる。Worker が意図的簡略化に残す
+メインルールセットは起動時に環境変数から個別に決まる。なお `off` の Dispatcher pane で
+`/clear` すると SessionStart が再発火してこのフラグが削除され、Worker 側のサブエージェント
+注入も Worker 側で次に SessionStart (起動 / `/clear`) が走るまで止まる (メインルール
+セットは影響を受けない)。Worker が意図的簡略化に残す
 `ponytail:` コメントは `/ponytail-debt` で台帳化できる。
 
 ## 主なコンポーネント
