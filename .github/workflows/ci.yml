@@ -17,13 +17,6 @@ jobs:
         # リストを 2 箇所に持つと新規スクリプトの追加漏れが起きる)
         run: git ls-files -z '*.sh' | xargs -0 -n1 bash -n
 
-      - name: tests
-        run: |
-          for f in tests/*.sh; do
-            echo "=== $f ==="
-            bash "$f"
-          done
-
       - name: git diff --check (whitespace エラー)
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
 
@@ -36,3 +29,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: run shellcheck
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
+
+  python:
+    name: pytest + ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ruff + pytest
+        run: pip install ruff pytest
+      - name: pytest (watchd / report ledger)
+        run: python3 -m pytest tests/ -q
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format --check
+        run: ruff format --check .

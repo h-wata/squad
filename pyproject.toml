@@ -1,0 +1,41 @@
+# squad は配布パッケージではないため build 設定は持たない (lint / test 設定のみ)。
+# Style は ~/work/.github/pyproject.toml (共通規約) に揃える。
+
+[tool.ruff]
+line-length = 119
+
+[tool.ruff.lint]
+preview = true
+select = ["A", "ANN", "C4", "CPY", "D", "D401", "E", "F", "N", "Q", "W", "SLF"]
+ignore = [
+    "ANN002",
+    "ANN003",
+    "ANN1",
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+    "D203",
+    "D212",
+    "D404",
+]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+suppress-dummy-args = true
+
+[tool.ruff.format]
+quote-style = "single"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `watch.sh` (794行 bash) を `squad/watchd.py` + `squad/ledger.py` (stdlib only) へ
+  全面移植し、`watch.sh` はそれを呼ぶ薄いラッパ (797→15行) に置き換えた (Issue #26)。
+  report ledger は旧タブ区切りテキスト + `flock` から sqlite3 (`BEGIN IMMEDIATE`
+  トランザクション) へ移行。旧 ledger からの移行は起動時に自動で行われる
+  (`ReportLedger.migrate_legacy()`、詳細は README「ledger の実体は sqlite3」参照)。
+  pidfile・起動コマンド・env (`SQUAD_SESSION` 等)・`discovery.yaml`・
+  `.squad_session` マーカーによる運用互換は維持。旧 `tests/test_watch_report_ledger.sh`
+  (66ケース) は `tests/test_ledger.py` (67 test) へ、`tests/test_watch_report_bridge.sh`
+  相当の挙動確認は `tests/test_watchd.py` へ pytest として移植。`squad/squad.py` に
+  `ledger claim/commit/release/seed` サブコマンドを追加 (Issue #26 の要求どおり、
+  ledger の手動操作・デバッグ用。`watchd.py` 自体は `ReportLedger` をプロセス内で
+  直接呼ぶため使わない)。
+
 ### Added
 
 - ponytail 連携: `start.sh` が `PONYTAIL_DEFAULT_MODE` をロール別に設定 (Worker 1-3 は
