@@ -650,6 +650,38 @@ class TestBrokenRowsIgnored:
         assert not led.claim(l_path, '500.0').ok
 
 
+class TestSeedDelivered:
+    """seed_delivered(): 既存行を壊さず複数 report を配達済み登録する (SQUAD-210)."""
+
+    def test_68_seed_delivered_registers_new_rows(self, led: ReportLedger) -> None:
+        rows = [(A, '100.5'), (B, '200.0')]
+        assert led.seed_delivered(rows) == 2
+        assert not led.claim(A, '100.5').ok
+        assert not led.claim(B, '200.0').ok
+
+    def test_69_seed_delivered_does_not_overwrite_existing_row(self, led: ReportLedger) -> None:
+        """既に他 watcher が pending lease で claim 済みの行は seed で上書きしない."""
+        c = led.claim(A, '100.5')
+        assert c.ok
+        n = led.seed_delivered([(A, '999.0')])
+        assert n == 0
+        import sqlite3
+
+        conn = sqlite3.connect(led.path)
+        mt, ut = conn.execute('SELECT mtime, lease FROM reports WHERE path=?', (A,)).fetchone()
+        conn.close()
+        assert (mt, ut) == ('100.5', c.token)
+
+    def test_70_seed_delivered_empty_rows_is_noop(self, led: ReportLedger) -> None:
+        assert led.seed_delivered([]) == 0
+        assert not led.exists()
+
+    def test_71_seeded_report_not_renotified_but_newer_version_is(self, led: ReportLedger) -> None:
+        led.seed_delivered([(A, '100.5')])
+        assert not led.claim(A, '100.5').ok
+        assert led.claim(A, '101.0').ok  # seed 後に書かれた新版は通常どおり通知される
+
+
 class TestLegacyMigration:
     """旧タブ区切り ledger からの one-shot 移行 (README 記載手順のテスト)."""
 

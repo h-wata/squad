@@ -100,6 +100,34 @@ $WORKER4_ROW
 DASHEOF
 fi
 
+# --- SQUAD_OWNED_PROJECTS: 起動 session が担当する project の .squad_session マーカーを自動整備 ---
+# 未指定 (既定) ならマーカーには一切触れない (後方互換)。
+# 使い方: カンマ区切りで複数 project を指定できる。
+#   例: SQUAD_OWNED_PROJECTS=squad,note ./start.sh ~/work
+# 既に別 session を指すマーカーがある project は無警告で奪わない (スキップ + 警告表示)。
+if [ -n "${SQUAD_OWNED_PROJECTS:-}" ]; then
+    IFS=',' read -ra _OWNED_PJS <<< "$SQUAD_OWNED_PROJECTS"
+    for _pj in "${_OWNED_PJS[@]}"; do
+        _pj="$(echo "$_pj" | xargs)"
+        [ -z "$_pj" ] && continue
+        _pj_dir="$SCRIPT_DIR/queue/projects/$_pj"
+        if [ ! -d "$_pj_dir" ]; then
+            echo "[WARN] SQUAD_OWNED_PROJECTS: project '$_pj' ($_pj_dir) が存在しないためマーカーをスキップします"
+            continue
+        fi
+        _marker="$_pj_dir/.squad_session"
+        if [ -f "$_marker" ]; then
+            _existing="$(head -n1 "$_marker" | tr -d '[:space:]')"
+            if [ -n "$_existing" ] && [ "$_existing" != "$SESSION_NAME" ]; then
+                echo "警告: queue/projects/$_pj/.squad_session は既に '$_existing' が担当中です。上書きするには手動で編集してください"
+                continue
+            fi
+        fi
+        echo "$SESSION_NAME" > "$_marker"
+        echo "project '$_pj' の .squad_session を '$SESSION_NAME' に設定しました"
+    done
+fi
+
 # SQUAD_DRY_RUN=1: settings/scaffold の pre-flight のみ実行して tmux には触れずに終了
 # (fresh clone 検証・CI での再利用向け。既存の tmux 起動セッションを巻き込まずに検証できる)
 if [ "${SQUAD_DRY_RUN:-0}" = "1" ]; then

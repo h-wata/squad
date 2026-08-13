@@ -293,6 +293,85 @@ class TestSessionMarkerFiltering:
         assert [p.name for p in w.owned] == ['pj']
 
 
+class TestZeroOwnedWarning:
+    """SQUAD-210: 担当 project 0 件の起動を可視化する."""
+
+    def test_warns_when_no_project_owned(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        queue = tmp_path / 'queue'
+        make_project(queue, 'theirs', session='othersess')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.warn_missing_markers()
+        out = capsys.readouterr().out
+        assert '[WARN]' in out and 'no projects owned' in out
+        assert w.owned == []
+
+    def test_no_warning_when_project_owned(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        queue = tmp_path / 'queue'
+        make_project(queue, 'mine', session='testsess')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.warn_missing_markers()
+        out = capsys.readouterr().out
+        assert 'no projects owned' not in out
+        assert [p.name for p in w.owned] == ['mine']
+
+
+class TestOwnershipChangeSeed:
+    """SQUAD-210: 担当変更で新規 owned になった project の既存 report を再通知しない."""
+
+    def test_preexisting_report_not_renotified_after_ownership_gained(self, tmp_path: Path) -> None:
+        queue = tmp_path / 'queue'
+        d = make_project(queue, 'pj', session='othersess')
+        (d / 'reports' / 'worker1_report.yaml').write_text('status: completed\n')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.warn_missing_markers()  # 初回計算: pj は othersess 担当なのでまだ owned でない
+        assert w.owned == []
+
+        (d / '.squad_session').write_text('testsess\n')  # 担当変更
+        w.refresh_owned_projects()
+        assert [p.name for p in w.owned] == ['pj']
+        w.report_bridge()
+        assert w.tmux.sent == []  # 担当変更前から存在していた report は再通知されない
+
+    def test_report_written_after_ownership_change_is_notified(self, tmp_path: Path) -> None:
+        queue = tmp_path / 'queue'
+        d = make_project(queue, 'pj', session='othersess')
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.warn_missing_markers()
+        assert w.owned == []
+
+        (d / '.squad_session').write_text('testsess\n')
+        w.refresh_owned_projects()
+        (d / 'reports' / 'worker1_report.yaml').write_text('status: completed\n')  # 担当変更後に新規作成
+        w.report_bridge()
+        assert len(w.tmux.sent) == 2  # 新規 report は通常どおり通知される
+
+    def test_default_owner_fallback_ownership_gain_also_seeds(self, tmp_path: Path) -> None:
+        """マーカー無し (default_owner フォールバック) で owned になった場合も同様に効く."""
+        queue = tmp_path / 'queue'
+        d = queue / 'projects' / 'pj'
+        (d / 'reports').mkdir(parents=True)
+        (d / 'tasks').mkdir(parents=True)
+        (d / '.squad_session').write_text('othersess\n')
+        (d / 'reports' / 'worker1_report.yaml').write_text('status: completed\n')
+        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.warn_missing_markers()
+        assert w.owned == []
+
+        (d / '.squad_session').unlink()  # マーカー削除 -> default_owner (testsess) が担当
+        w.refresh_owned_projects()
+        assert [p.name for p in w.owned] == ['pj']
+        w.report_bridge()
+        assert w.tmux.sent == []
+
+
 class TestLedgerPrepare:
     def test_prepare_ledger_migrates_legacy_file(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'

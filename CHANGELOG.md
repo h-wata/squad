@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `start.sh` に `SQUAD_OWNED_PROJECTS` (カンマ区切り) を追加。指定した project の
+  `.squad_session` マーカーを起動時に自動生成する。未指定の既定動作は変更なし。
+  既に別 session を指すマーカーは無警告で奪わない (スキップ + 警告表示) (SQUAD-210)。
+- `squad/watchd.py`: 担当 project が 0 件の起動を `warn_missing_markers()` で明示的に
+  `[WARN]` ログするようにした (無言の空回りを可視化)。
+- `squad/ledger.py`: `ReportLedger.seed_delivered()` を追加。既存行を壊さずに複数
+  report を配達済みとして登録できる (`INSERT OR IGNORE` 相当)。`squad/watchd.py` の
+  `refresh_owned_projects()` は project の担当が新規に自セッションへ移ったことを検出
+  すると、その時点で既に存在する report をこれで seed し、担当変更直後に処理済みの
+  report が再通知される事故 (Issue #26 の Python 移植で退行していた SQUAD-016 相当の
+  不具合) を防ぐ (SQUAD-210)。
+
 ### Changed
 
 - `watch.sh` (794行 bash) を `squad/watchd.py` + `squad/ledger.py` (stdlib only) へ

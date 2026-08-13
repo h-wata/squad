@@ -231,6 +231,31 @@ class ReportLedger:
         except sqlite3.Error:
             return False
 
+    def seed_delivered(self, rows: Iterable[tuple[str, str]]) -> int:
+        """(path, mtime) を配達済みとして登録する (INSERT OR IGNORE 相当).
+
+        既に行がある path は触らない (他 watcher が既に claim/配達済みにした行を壊さない)。
+        `.squad_session` の担当変更直後、その時点で存在する report を「新規の未配達」と
+        誤判定して再通知しないための seed 専用 API (baseline_seed と違い、DB が既にあっても
+        使える)。
+
+        Returns:
+            実際に新規登録した件数。DB を操作できなければ -1。
+        """
+        rows = list(rows)
+        if not rows:
+            return 0
+        try:
+            with self._tx() as conn:
+                before = conn.total_changes
+                conn.executemany(
+                    'INSERT OR IGNORE INTO reports(path, mtime, lease) VALUES(?, ?, ?)',
+                    [(p, m, DELIVERED) for p, m in rows],
+                )
+                return conn.total_changes - before
+        except sqlite3.Error:
+            return -1
+
     def exists(self) -> bool:
         return self.path.exists()
 

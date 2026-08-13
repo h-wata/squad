@@ -188,6 +188,7 @@ class Watcher:
         self.tmux = tmux or Tmux(self.cfg.session)
         self.ledger = ReportLedger(self.cfg.ledger_path, lease_seconds=self.cfg.lease_seconds)
         self.owned: list[Path] = []
+        self._owned_initialized = False
         self.pane_hash: dict[int, str] = {}
         self.pane_stall: dict[int, int] = {}
         self.stall_notified: dict[int, str] = {}
@@ -225,16 +226,27 @@ class Watcher:
     # ---- project 担当 ----
 
     def warn_missing_markers(self) -> None:
-        """マーカー未設定 project の可視化 (起動時 1 回のみ。フォールバック挙動は変えない)."""
+        """マーカー未設定 project の可視化 + 担当 project 0 件の可視化 (起動時 1 回のみ)."""
         for d in sorted(self.cfg.projects_dir.glob('*/')):
             if not (d / '.squad_session').is_file():
                 self.log(
                     f'[WARN] project {d.name} has no .squad_session marker; '
                     f'falling back to default owner {self.cfg.default_owner}'
                 )
+        self.refresh_owned_projects()
+        if not self.owned:
+            self.log(
+                f"[WARN] no projects owned by session '{self.cfg.session}'; watcher will idle. "
+                'Check queue/projects/*/.squad_session markers or SQUAD_DEFAULT_OWNER'
+            )
 
     def refresh_owned_projects(self) -> None:
-        """担当 project を毎サイクル再計算する (project 追加やマーカー変更に追従)."""
+        """担当 project を毎サイクル再計算する (project 追加やマーカー変更に追従).
+
+        起動後の初回計算を過ぎてから新規に owned になった project を検出したら、
+        その時点で既に存在する report を ledger に配達済みとして seed する
+        (担当変更直後に、処理済みの既存 report が再通知されるのを防ぐ)。
+        """
         owned: list[Path] = []
         if self.cfg.projects_dir.is_dir():
             for d in sorted(p for p in self.cfg.projects_dir.iterdir() if p.is_dir()):
@@ -248,7 +260,29 @@ class Watcher:
                         owner = ''
                 if owner == self.cfg.session:
                     owned.append(d)
+        prev_names = {d.name for d in self.owned}
+        newly_owned = [d for d in owned if d.name not in prev_names] if self._owned_initialized else []
         self.owned = owned
+        self._owned_initialized = True
+        if newly_owned:
+            self._seed_newly_owned(newly_owned)
+
+    def _seed_newly_owned(self, dirs: list[Path]) -> None:
+        """新規に owned になった project の既存 report を配達済みとして seed する.
+
+        seed 済みの report は mtime が一致する限り再通知されない。seed 後に新しく
+        書かれる report は mtime が異なるため、通常どおり claim() が新規と判定して
+        通知される (seed が新規通知まで殺さない)。
+        """
+        rows = find_reports(dirs)
+        if not rows:
+            return
+        n = self.ledger.seed_delivered(rows)
+        names = ', '.join(d.name for d in dirs)
+        if n > 0:
+            self.log(f'ownership change: {names} の既存 report {n} 件を配達済みとして seed しました')
+        elif n < 0:
+            self.log(f'[WARN] ownership change seed に失敗しました: {names}')
 
     def newest_mtime(self, pattern: str) -> str:
         """担当 project 内で pattern にマッチするファイルの最新 mtime (無ければ '')."""
