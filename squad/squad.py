@@ -11,6 +11,10 @@ Subcommands:
   ls / status               全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
   dashboard                 Worker ステータス表を生成して stdout
+  ledger claim/commit/release/seed
+                             report 配達 ledger (squad/ledger.py, sqlite3) を手動操作する
+                             デバッグ用 CLI。watchd.py 自体は ReportLedger をプロセス内で
+                             直接呼ぶため通常運用では使わない (Issue #26)。
 """
 
 from __future__ import annotations
@@ -25,6 +29,10 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ledger import ReportLedger  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 CONFIG_PATH = ROOT / 'config.json'
@@ -32,6 +40,7 @@ STATE_DIR = ROOT / 'state'
 NOTIFY_WORKER = REPO_ROOT / 'scripts' / 'notify-worker.sh'
 QUEUE_DIR = REPO_ROOT / 'queue' / 'projects'
 CAPTURE_TAIL_LINES = 25
+DEFAULT_LEDGER_PATH = REPO_ROOT / 'queue' / '.report_ledger.db'
 
 # ---------- config ----------
 
@@ -358,6 +367,35 @@ def cmd_dashboard(_: argparse.Namespace, cfg: dict) -> int:
     return 0
 
 
+def _ledger(args: argparse.Namespace) -> ReportLedger:
+    path = Path(args.ledger_file) if args.ledger_file else DEFAULT_LEDGER_PATH
+    return ReportLedger(path)
+
+
+def cmd_ledger_claim(args: argparse.Namespace, _cfg: dict) -> int:
+    c = _ledger(args).claim(args.path, args.mtime)
+    print(json.dumps(c._asdict(), ensure_ascii=False))
+    return 0 if c.ok else 1
+
+
+def cmd_ledger_commit(args: argparse.Namespace, _cfg: dict) -> int:
+    ok = _ledger(args).commit(args.path, args.mtime, args.token)
+    print(json.dumps({'ok': ok}))
+    return 0 if ok else 1
+
+
+def cmd_ledger_release(args: argparse.Namespace, _cfg: dict) -> int:
+    ok = _ledger(args).release(args.path, args.token, args.prev_mtime or '', args.prev_lease or '')
+    print(json.dumps({'ok': ok}))
+    return 0 if ok else 1
+
+
+def cmd_ledger_seed(args: argparse.Namespace, _cfg: dict) -> int:
+    n = _ledger(args).baseline_seed(Path(args.projects_dir))
+    print(json.dumps({'seeded': n}))
+    return 0 if n >= 0 else 1
+
+
 # ---------- entry ----------
 
 
@@ -379,6 +417,29 @@ def main(argv: list[str] | None = None) -> int:
 
     p_db = sub.add_parser('dashboard', help='print worker status table (Markdown)')
     p_db.set_defaults(func=cmd_dashboard)
+
+    p_ledger = sub.add_parser('ledger', help='report 配達 ledger (sqlite3) の手動操作 (デバッグ用)')
+    ledger_sub = p_ledger.add_subparsers(dest='ledger_cmd', required=True)
+    for name, func, extra in (
+        ('claim', cmd_ledger_claim, (('path', {}), ('mtime', {}))),
+        ('commit', cmd_ledger_commit, (('path', {}), ('mtime', {}), ('token', {}))),
+        (
+            'release',
+            cmd_ledger_release,
+            (
+                ('path', {}),
+                ('token', {}),
+                ('prev_mtime', {'nargs': '?', 'default': ''}),
+                ('prev_lease', {'nargs': '?', 'default': ''}),
+            ),
+        ),
+        ('seed', cmd_ledger_seed, (('projects_dir', {}),)),
+    ):
+        p = ledger_sub.add_parser(name)
+        for arg_name, kwargs in extra:
+            p.add_argument(arg_name, **kwargs)
+        p.add_argument('--ledger-file', help=f'ledger DB path (既定: {DEFAULT_LEDGER_PATH})')
+        p.set_defaults(func=func)
 
     args = ap.parse_args(argv)
     cfg = load_config()

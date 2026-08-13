@@ -12,7 +12,10 @@
   pidfile・起動コマンド・env (`SQUAD_SESSION` 等)・`discovery.yaml`・
   `.squad_session` マーカーによる運用互換は維持。旧 `tests/test_watch_report_ledger.sh`
   (66ケース) は `tests/test_ledger.py` (67 test) へ、`tests/test_watch_report_bridge.sh`
-  相当の挙動確認は `tests/test_watchd.py` へ pytest として移植。
+  相当の挙動確認は `tests/test_watchd.py` へ pytest として移植。`squad/squad.py` に
+  `ledger claim/commit/release/seed` サブコマンドを追加 (Issue #26 の要求どおり、
+  ledger の手動操作・デバッグ用。`watchd.py` 自体は `ReportLedger` をプロセス内で
+  直接呼ぶため使わない)。
 
 ### Added
 
