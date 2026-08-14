@@ -179,9 +179,9 @@ created_at: "2026-05-18T12:00:00"
 非コードタスクは省略してよい（worker 側で `verify_status: skipped`）。
 task YAML の詳細生成は task-yaml-author が担う。
 
-### ローカル Qwen (qwen-consultant) の補助利用
+### ローカル LLM (vllm-consultant) の補助利用
 
-環境に `qwen-consultant` agent（pi CLI + LAN vLLM の Qwen3.6、トークンコストゼロ）が
+環境に `vllm-consultant` agent（pi CLI + LAN vLLM のローカルモデル、トークンコストゼロ）が
 あれば、以下の**機械検証できる下流タスク**に限って使ってよい:
 
 - 通知前の task YAML lint（プレースホルダ残留・フォーマット）。結果は grep で裏取りする
