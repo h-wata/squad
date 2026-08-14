@@ -2,6 +2,11 @@
 # コピーして queue/projects/<project>/reports/worker{N}_report.yaml として使用する。
 # 詳細な運用ルールは instructions/dispatcher.md 参照。
 
+# 必須: この報告の配達 ID (UUIDv4)。`python3 -c "import uuid; print(uuid.uuid4())"` 等で
+# report を**新規作成するときに一度だけ**発番する。同じ報告の修正・再出力・archive からの
+# 復帰では変えない (watcher が (project, report_id) で重複配達を抑止する)。
+# 別の報告は内容が同じでも必ず新しい ID にする。欠落・非 UUID は [REPORT-INVALID] 通知になる。
+report_id: "00000000-0000-4000-8000-000000000000"
 # 対応する task.yaml の task_id
 task_id: TASK-XXX
 # 例: my-app
@@ -34,5 +39,7 @@ issues: []
 # - "issue の説明"
 # blocked 時は verdict の絶対パスと残課題を必ず記載
 notes: ""
+# 任意: 作業対象 worktree の HEAD SHA (git を使わないタスクは unknown / 空欄でよい)
+git_head: ""
 # ISO8601形式
 completed_at: "2026-01-01T12:00:00+09:00"

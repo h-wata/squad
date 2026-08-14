@@ -139,6 +139,7 @@ Plan/設計文書を Codex の cross-review に出す前に、author 自身で�
 タスク完了後、`queue/projects/<project>/reports/worker{N}_report.yaml` に報告作成:
 
 ```yaml
+report_id: "3f2b1c8e-..."  # 必須: UUIDv4。新規作成時に一度だけ発番する (下記ルール)
 task_id: TASK-001
 project: my-app
 worker: worker1
@@ -152,10 +153,22 @@ summary: "実行結果の概要"     # 10行以内
 details_path: ""           # 詳細を書いた場合のみ worker{N}_details.md の絶対パスを入れる (通常は空文字のまま)
 issues: []
 notes: ""                  # blocked 時は verdict パス + 残課題を必ず記載
+git_head: ""               # 任意: 作業対象 worktree の HEAD SHA (無ければ空欄)
 completed_at: "2026-05-18T12:00:00"
 ```
 
 テンプレート: `queue/templates/report.yaml`
+
+### report_id の発番ルール（必須・再利用禁止）
+
+`report_id` は watcher が Dispatcher への配達を重複なく行うための主キー。
+
+- **新規作成時に一度だけ発番する**: `python3 -c "import uuid; print(uuid.uuid4())"`
+- **同じ報告の修正・再出力・archive からの復帰では変えない**（内容を書き直しても同じ ID）
+- **別の報告には必ず新しい ID を振る**（内容が前回と同一でも使い回さない）
+- 欠落・UUID でない値は握り潰さず `[REPORT-INVALID]` として Dispatcher に通知され、
+  schema 準拠での再出力を求められる。前回の report をコピーして使うときは
+  **必ず report_id を振り直す**（振り直さないと新しい報告が配達済みとして抑止される）。
 
 `summary` は10行厳守。超過する場合は `details_path` に詳細ファイル
 (`worker{N}_details.md`)を分離して置き、`summary` には結論1-2文と

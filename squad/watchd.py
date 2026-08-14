@@ -21,7 +21,8 @@
   report-bridge / 停止検知 / discovery はそのセッションの watcher だけが行う。
   マーカーが無い project は SQUAD_DEFAULT_OWNER (既定 ros-agents) の担当。
   report の「通知済み」状態は queue/.report_ledger.db (sqlite3, 全 watcher 共有・永続) で
-  管理する。担当セッションが移っても通知済み判定はそのまま引き継がれる。
+  (project, report_id) 単位に管理する。担当セッションが移っても通知済み判定はそのまま
+  引き継がれ、担当変更時に既存 report を配達済みへ seed する処理は持たない (SQUAD-216)。
 """
 
 from __future__ import annotations
@@ -42,9 +43,10 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ledger import Claim  # noqa: E402
+from ledger import delivery_key  # noqa: E402
 from ledger import find_reports  # noqa: E402
-from ledger import mtime_gt  # noqa: E402
-from ledger import mtime_str  # noqa: E402
+from ledger import report_identity  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -91,6 +93,35 @@ def posix_cksum(data: bytes) -> int:
         crc = ((crc << 8) & 0xFFFFFFFF) ^ _CKSUM_TABLE[(crc >> 24) ^ (n & 0xFF)]
         n >>= 8
     return ~crc & 0xFFFFFFFF
+
+
+def mtime_str(path: os.PathLike[str] | str) -> str:
+    """Stat の mtime を「秒.ナノ秒(9桁)」文字列で返す (float 化による桁落ちを避ける).
+
+    停止検知 (task YAML より report が新しいか) 専用。report の配達判定には使わない
+    (配達の同一性は report_id、SQUAD-216)。
+    """
+    ns = os.stat(path).st_mtime_ns
+    return f'{ns // 10**9}.{ns % 10**9:09d}'
+
+
+def mtime_gt(a: str, b: str) -> bool:
+    """Mtime 文字列 a が b より真に新しいか (停止検知専用).
+
+    整数部は数値で、小数部はゼロ詰めした固定長文字列の辞書順で比較する
+    (20 桁 mtime を float にすると下位桁が落ちて誤判定するため)。
+    """
+    if not b:
+        return True
+    ia, _, fa = a.partition('.')
+    ib, _, fb = b.partition('.')
+    try:
+        if int(ia) != int(ib):
+            return int(ia) > int(ib)
+    except ValueError:
+        return a > b
+    width = max(len(fa), len(fb))
+    return fa.ljust(width, '0') > fb.ljust(width, '0')
 
 
 def _int_env(name: str, default: int) -> int:
@@ -192,8 +223,6 @@ class Watcher:
         self.pane_stall: dict[int, int] = {}
         self.stall_notified: dict[int, str] = {}
         self.resume_count: dict[int, int] = {}
-        self.stale_seen: dict[str, str] = {}
-        self.stale_logged: dict[str, str] = {}
         self.pending_nudge = ''
         self.last_discovery = 0.0
         self.last_sweep = 0.0
@@ -225,16 +254,31 @@ class Watcher:
     # ---- project 担当 ----
 
     def warn_missing_markers(self) -> None:
-        """マーカー未設定 project の可視化 (起動時 1 回のみ。フォールバック挙動は変えない)."""
+        """マーカー未設定 project の可視化 + 担当 project 0 件の可視化 (起動時 1 回のみ)."""
         for d in sorted(self.cfg.projects_dir.glob('*/')):
             if not (d / '.squad_session').is_file():
                 self.log(
                     f'[WARN] project {d.name} has no .squad_session marker; '
                     f'falling back to default owner {self.cfg.default_owner}'
                 )
+        self.refresh_owned_projects()
+        if not self.owned:
+            msg = (
+                f"[WARN] no projects owned by session '{self.cfg.session}'; watcher will idle. "
+                'Check queue/projects/*/.squad_session markers or SQUAD_DEFAULT_OWNER'
+            )
+            self.log(msg)
+            self.notify_dispatcher(msg)
 
     def refresh_owned_projects(self) -> None:
-        """担当 project を毎サイクル再計算する (project 追加やマーカー変更に追従)."""
+        """担当 project を毎サイクル再計算する (project 追加やマーカー変更に追従).
+
+        担当を新しく得たときに既存 report を「配達済み」として seed する処理は持たない
+        (SQUAD-216)。所有権の検出と report のスナップショットを原子的に揃えることはできず、
+        その隙間に書かれた report を握り潰す TOCTOU になるため。処理済み report の再通知は
+        共有 ledger の (project, report_id) が抑止し、ledger に無い report は 1 回だけ
+        再通知される (永久沈黙より重複を選ぶ)。
+        """
         owned: list[Path] = []
         if self.cfg.projects_dir.is_dir():
             for d in sorted(p for p in self.cfg.projects_dir.iterdir() if p.is_dir()):
@@ -268,77 +312,79 @@ class Watcher:
     def report_bridge(self) -> None:
         """新規/更新された report を Dispatcher へ橋渡しする.
 
-        通知するかどうかは共有 ledger だけで決める (project の担当が移っても、既に別の
-        watcher が通知した report は再通知されない)。status: blocked (検証ゲート 3 回 fail)
-        は [INBOX] 付きで人間判断に回す。
+        通知するかどうかは共有 ledger の (project, report_id) だけで決める (project の担当が
+        移っても、既に別の watcher が通知した report は再通知されない)。ledger が pending の
+        まま残している report は next_attempt_at に達したサイクルで自動的に再送される
+        (claim() が backoff を判定するので、別途スケジューラは持たない)。
+
+        status: blocked (検証ゲート 3 回 fail) は [INBOX] 付きで人間判断に回す。
+        report_id が無い / YAML を読めない report は握り潰さず [REPORT-INVALID] で通知する。
         """
-        # STALE の「2 サイクル連続」判定用にサイクル単位で集合を入れ替える。入れ替えないと
-        # 「過去に一度でも同じ mtime を見た」だけで WARN になり、良性競合が非連続に 2 回
-        # 起きただけで本物用の 1 回限り WARN を消費してしまう。
-        stale_prev = self.stale_seen
-        self.stale_seen = {}
-        for path, m in find_reports(self.owned):
-            claim = self.ledger.claim(path, m)
+        for project, path in find_reports(self.owned):
+            try:
+                data = Path(path).read_bytes()
+            except OSError:
+                continue  # 走査中に消えた/読めない。次サイクルで再評価する
+            sha, meta, parse_error = report_identity(data)
+            report_id, invalid = delivery_key(meta, sha, parse_error, path)
+            claim = self.ledger.claim(project, report_id, path, sha)
             if not claim.ok:
-                if claim.status == 'stale':
-                    self.stale_seen[path] = m
-                    # 2 watcher が同じ project を走査する切替の瞬間には、古いスナップ
-                    # ショットを掴んだ側にも STALE が出る (次サイクルで解消する良性競合)。
-                    # 同じ path・同じ mtime が 2 サイクル連続したときだけ 1 回 WARN する。
-                    if stale_prev.get(path) == m and self.stale_logged.get(path) != m:
-                        self.stale_logged[path] = m
-                        self.log(
-                            f'[WARN] mtime が ledger の記録より古いため通知しません: {path} '
-                            '(巻き戻し防止。意図した再通知なら touch してください)'
-                        )
                 continue
-            self._deliver(path, m, claim)
+            self._deliver(project, report_id, path, sha, meta, invalid, claim)
 
-    def _deliver(self, path: str, m: str, claim: object) -> None:
-        name = Path(path).name
-        wm = WORKER_NUM_RE.search(name)
-        wnum = wm.group(1) if wm else '?'
-        kind = 'review' if '_review.yaml' in name else 'report'
-        status = self._report_status(Path(path))
-        if status == 'blocked':
-            self.log(f'report 検知(blocked): {path} -> Dispatcher [INBOX] 通知')
-            blocked_msg = f'[INBOX] Worker{wnum} が blocked: 検証ゲート未通過。'
-            blocked_msg += f'{path} の notes/verdict を確認し、ユーザーに優先報告してください。'
-            sent = self.notify_dispatcher(blocked_msg)
+    def _deliver(
+        self,
+        project: str,
+        report_id: str,
+        path: str,
+        sha: str,
+        meta: dict[str, str],
+        invalid: str,
+        claim: Claim,
+    ) -> None:
+        if invalid:
+            self.log(f'report 検知(invalid): {path} -> Dispatcher [REPORT-INVALID] 通知 ({invalid})')
+            msg = (
+                f'[REPORT-INVALID project={project} path={path} content_sha256={sha} error={invalid}] '
+                'report_id が無いか YAML を解釈できません。担当 worker に schema 準拠 '
+                '(report_id: UUIDv4) での再出力を指示してください。'
+            )
+            sent = self.notify_dispatcher(msg)
         else:
-            self.log(f'report 検知: {path} -> Dispatcher 通知')
-            sent = self.notify_dispatcher(f'Worker{wnum} {kind}: {path} を確認してください。(watcher 自動橋渡し)')
+            name = Path(path).name
+            wm = WORKER_NUM_RE.search(name)
+            wnum = wm.group(1) if wm else '?'
+            kind = 'review' if '_review.yaml' in name else 'report'
+            tag = (
+                f'[REPORT project={project} worker={wnum} task_id={meta.get("task_id") or "unknown"} '
+                f'report_id={report_id} content_sha256={sha} git_head={meta.get("git_head") or "unknown"} '
+                f'attempt={claim.attempt}]'
+            )
+            if meta.get('status') == 'blocked':
+                self.log(f'report 検知(blocked): {path} -> Dispatcher [INBOX] 通知')
+                body = (
+                    f'[INBOX] Worker{wnum} が blocked: 検証ゲート未通過。'
+                    f'{path} の notes/verdict を確認し、ユーザーに優先報告してください。'
+                )
+            else:
+                self.log(f'report 検知: {path} -> Dispatcher 通知 (attempt={claim.attempt})')
+                body = f'Worker{wnum} {kind}: {path} を確認してください。(watcher 自動橋渡し)'
+            # 1 行に収める: 本文を改行で分けると tmux send-keys が途中で確定してしまう。
+            sent = self.notify_dispatcher(f'{body} {tag}')
 
-        # 送信できて初めて「配達済み」に確定する。失敗したら claim 前の記録に戻して次
-        # サイクルで再送する。commit / release 自体に失敗しても lease 期限切れで再び
-        # claim されるので、通知が永久に消えることはない。token が空 = claim は fail-open
-        # した (ledger に記録が無い) ので、実態と逆のログを出さない。
-        token = claim.token  # type: ignore[attr-defined]
+        # 送信できて初めて delivered に確定する。失敗したら pending のまま backoff を進め、
+        # next_attempt_at に達したサイクルで再送する。token が空 = claim は fail-open した
+        # (ledger に記録が無い) ので、実態と逆のログを出さない。
+        token = claim.token
+        if sent and self.ledger.commit(project, report_id, token):
+            return
         if sent:
-            if not token:
-                warn = f'[WARN] 通知したが ledger に claim を記録できていません: {path}'
-                self.log(warn)
-            elif not self.ledger.commit(path, m, token):
-                warn = f'[WARN] ledger を更新できず: {path} (約{self.cfg.lease_seconds}s 後に再通知の可能性)'
-                self.log(warn)
-        elif not token:
-            self.log(f'[WARN] Dispatcher への送信に失敗: {path} (claim 未記録、次サイクルで再送)')
-        elif self.ledger.release(path, token, claim.prev_mtime, claim.prev_lease):  # type: ignore[attr-defined]
-            self.log(f'[WARN] Dispatcher への送信に失敗: {path} (claim 取消、次サイクルで再送)')
+            self.log(f'[WARN] 通知したが ledger を更新できず: {path} (再通知の可能性あり)')
         else:
-            warn = f'[WARN] Dispatcher への送信に失敗: {path} (約{self.cfg.lease_seconds}s 後に再送)'
-            self.log(warn)
-
-    @staticmethod
-    def _report_status(path: Path) -> str:
-        try:
-            for line in path.read_text(errors='replace').splitlines():
-                if line.startswith('status:'):
-                    parts = line.split()
-                    return parts[1] if len(parts) > 1 else ''
-        except OSError:
-            return ''
-        return ''
+            self.log(f'[WARN] Dispatcher への送信に失敗: {path} (attempt={claim.attempt}, backoff 後に再送)')
+        wait = self.ledger.fail(project, report_id, token)
+        if not wait:
+            self.log(f'[WARN] ledger に再送予定を記録できませんでした: {path} (lease 期限切れ後に再 claim)')
 
     # ---- 2 & 3. 承認オートアンサー + 停止検知 ----
 
@@ -694,35 +740,28 @@ class Watcher:
     # ---- ループ ----
 
     def prepare_ledger(self) -> None:
-        """Ledger が無ければ旧タブ区切りから移行、それも無ければ baseline seed する."""
-        if self.ledger.exists():
-            if self.ledger.is_sqlite():
-                return
-            # WATCH_LEDGER_FILE が旧テキスト ledger を直接指している運用。放置すると
-            # sqlite3 open が毎回失敗し、claim が fail-open して同じ report を再通知し続ける。
-            n = self.ledger.migrate_legacy(self.cfg.ledger_path, replace=True)
-            if n >= 0:
-                self.log(f'ledger migration: 旧テキスト {self.cfg.ledger_path} を sqlite3 化しました ({n} 件)')
-            else:
-                self.log(f'[WARN] 旧テキスト ledger ({self.cfg.ledger_path}) の sqlite3 化に失敗しました')
+        """旧 schema の ledger を新 schema へ移行する.
+
+        旧 ledger (path + mtime) の行は report_id を復元できないため引き継がない。移行後は
+        reports/ に残る report が最大 1 回だけ再通知されるので、その旨を起動時に 1 度だけ
+        Dispatcher にも伝える (重複を「異常」と誤解させないため)。
+
+        ledger が最初から無い場合も seed はしない。「新規導入だから鳴らさない」を
+        「ledger が (何らかの理由で) 存在しない」と区別できず、DB 消失や再作成のたびに
+        report を delivered へ登録して永久沈黙させてしまうため。導入直後の一斉通知は、
+        鳴らさないことより確実に鳴ることを優先するユーザー方針のもとでは許容する。
+        """
+        kind = self.ledger.migrate(self.cfg.legacy_ledger_path)
+        if not kind:
             return
-        legacy = self.cfg.legacy_ledger_path
-        if legacy.is_file():
-            n = self.ledger.migrate_legacy(legacy)
-            if n >= 0:
-                msg = f'ledger migration: 旧 {legacy} から {n} 件を sqlite3 へ取り込みました'
-                msg += f' ({self.cfg.ledger_path})'
-                self.log(msg)
-                return
-            self.log(f'[WARN] 旧 ledger ({legacy}) の移行に失敗しました。baseline seed に切り替えます')
-        n = self.ledger.baseline_seed(self.cfg.projects_dir)
-        if n >= 0:
-            self.log(f'ledger baseline: 既存 report {n} 件を通知済みとして登録 (通知なし)')
-        elif n == -2:
-            self.log(
-                f'[WARN] ledger baseline seed に失敗しました: {self.cfg.ledger_path} '
-                '既存 report が一斉通知される可能性があります'
-            )
+        msg = (
+            f'[LEDGER] 配達 ledger を report_id ベースの新 schema へ移行しました '
+            f'({self.cfg.ledger_path}, {kind})。旧記録 (path+mtime) からは report_id を '
+            '復元できないため配達済みへは変換していません。既存 report が最大 1 回だけ '
+            '再通知されます。report_id が既知のものと一致する通知は重複として無視してください。'
+        )
+        self.log(msg)
+        self.notify_dispatcher(msg)
 
     def cycle(self) -> None:
         """1 サイクル分の監視処理."""

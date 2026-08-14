@@ -101,15 +101,21 @@ criteria が検証形式を指定していればそちらを優先する。自�
 `worker4_review.yaml` に報告する。既存の `queue/templates/report.yaml` または
 `queue/templates/review.yaml` に従い、次を守る。
 
+- `report_id`: **必須**。UUIDv4 (`python3 -c "import uuid; print(uuid.uuid4())"`) を
+  report を新規作成するときに一度だけ発番する。同じ報告の修正・再出力・archive からの
+  復帰では変えない。別の報告には内容が同じでも必ず新しい ID を振る。前回の report を
+  コピーして使う場合は必ず振り直す (振り直さないと新しい報告が配達済みとして抑止される)
 - `agent: codex`
 - 通常タスクの `author_agent: codex`
 - cross-review の `author_agent`: レビュー対象 PR の作成 agent
 - PR を作成した場合は `pr_url` を記載
 - verify を行った場合は `verdict_path` に絶対パスを記載
 - blocked の場合は `issues` / `notes` にブロッカーと残作業を記載
+- `git_head` (任意): 作業対象 worktree の HEAD SHA
 - `summary` は結果中心に短く書く
 
-report を正しく保存すれば watcher が Dispatcher へ通知する。
+report を正しく保存すれば watcher が Dispatcher へ通知する。`report_id` が無い / UUID で
+ない report は握り潰されず `[REPORT-INVALID]` として通知され、再出力を求められる。
 
 ## 自律性と安全
 

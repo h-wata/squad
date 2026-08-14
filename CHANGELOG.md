@@ -2,18 +2,78 @@
 
 ## [Unreleased]
 
+### Added
+
+- `start.sh` に `SQUAD_OWNED_PROJECTS` (カンマ区切り) を追加。指定した project の
+  `.squad_session` マーカーを起動時に自動生成する。未指定の既定動作は変更なし。
+  既に別 session を指すマーカーは無警告で奪わない (スキップ + 警告表示) (SQUAD-210)。
+- `squad/watchd.py`: 担当 project が 0 件の起動を `warn_missing_markers()` で明示的に
+  `[WARN]` ログするようにした (無言の空回りを可視化)。
+- report YAML に必須フィールド `report_id` (UUIDv4) と任意の `git_head` を追加。
+  `report_id` は report を新規作成するときに一度だけ発番し、修正・再出力・archive からの
+  復帰では変えない。`queue/templates/report.yaml` / `instructions/worker.md` /
+  `instructions/worker-codex.md` / `instructions/dispatcher.md` に発番ルールと Dispatcher
+  側の重複判定手順を追記した (SQUAD-215/216)。
+- report 通知に機械可読な識別子を付加:
+  `[REPORT project=… worker=… task_id=… report_id=… content_sha256=… git_head=… attempt=N]`。
+  Dispatcher は `(project, report_id)` の一致で重複を判定でき、`attempt` で再送かどうかが
+  分かる (SQUAD-216)。
+- `report_id` が無い / UUID でない / YAML を解釈できない report を握り潰さず、
+  `[REPORT-INVALID]` として path・SHA-256・エラー内容付きで通知するようにした。UUID を
+  後付けで推測することはしない (SQUAD-216)。
+
+### Fixed
+
+- `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
+  届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
+  呼び出しを追加した (SQUAD-212)。
+- `squad/ledger.py`: `ReportLedger.baseline_seed()` を廃止した。ledger が存在しない
+  ことを「新規導入」と「DB 消失・再作成」で区別できないまま delivered 登録していたため、
+  DB 消失からの再作成時にまだ配達していない report まで永久に沈黙させる経路になっていた
+  (SQUAD-218)。`Watcher.prepare_ledger()` からも呼び出しを削除し、`squad ledger seed`
+  CLI サブコマンドも撤去した。導入直後は既存 report が一斉通知されるが、鳴らない経路を
+  ゼロにする方針の下ではこれを受け入れる。
+- `squad/ledger.py`: `delivery_key()` が返す invalid (`[REPORT-INVALID]`) 用キーに
+  `path` を追加した。同一 project 内で report_id 欠落の別 worker が偶然同一内容の
+  report を書くと、内容ハッシュだけをキーにしていたため一方だけが delivered となり、
+  もう一方が永久に沈黙していた (SQUAD-218)。
+
 ### Changed
 
+- report の配達判定を **mtime ベースから `(project, report_id)` ベースへ全面的に置換**
+  (SQUAD-215 設計 / SQUAD-216 実装)。mtime は変更時刻であって到着時刻ではなく、mv/cp や
+  archive からの復帰で過去の値を保てるため、同一性・順序の代理に使うと report を握り潰す。
+  - `squad/ledger.py`: schema を `deliveries` (`(project, report_id)` 主キー、path、
+    content_sha256、state、lease、attempt_count、next_attempt_at) へ移行。`claim/commit`
+    を ID ベースに置換し、`release()` は再送予定を記録する `fail()` になった。
+    `mtime_str` / `mtime_gt` / `seed_delivered()` は配達 API から削除
+    (mtime 系は停止検知専用として `squad/watchd.py` へ移動)。
+  - `squad/watchd.py`: 担当変更時の seed (`_seed_newly_owned()` / `_owned_initialized` /
+    cutoff helper) と mtime による `stale` 分岐・「touch してください」WARN を**全廃**した。
+    所有権の検出と report スナップショットを原子的に揃えることはできず、その隙間に書かれた
+    report を永久に握り潰す TOCTOU になるため (PR #28 で 2 巡続けて blocking になった箇所)。
+    処理済み report の再通知は共有 ledger が抑止し、ledger に無い report は 1 回だけ
+    再通知される (永久沈黙より重複を選ぶ)。
+  - 送信 / ledger 更新に失敗した report だけを 15秒 → 60秒 → 5分 → 30分 → 以降 30分ごとで
+    再送する。**試行回数の上限は設けない** (有限上限は通信不能時に report を永久沈黙させる)。
+    `next_attempt_at` / `attempt_count` は sqlite3 に永続化し、watcher 再起動後も維持する。
+    DB を扱えない fail-open 時はプロセス内メモリで同じ backoff を適用する。
+  - 旧 ledger (`reports` テーブル、または旧タブ区切りテキスト) は **delivered ID へ推測変換
+    せず**空の配達表へ移行する。移行完了は log と Dispatcher 通知 (`[LEDGER] …`) で明示し、
+    既存 report は最大 1 回だけ再通知される。旧テキストは `.legacy` へ退避する。
+  - `squad/squad.py` の `ledger` サブコマンドを `claim/commit/fail` へ更新
+    (claim は `<project> <report_id> <path> <sha>` を取る。`seed` は後日 baseline_seed
+    廃止に伴い削除、詳細は Fixed 参照)。
 - `watch.sh` (794行 bash) を `squad/watchd.py` + `squad/ledger.py` (stdlib only) へ
   全面移植し、`watch.sh` はそれを呼ぶ薄いラッパ (797→15行) に置き換えた (Issue #26)。
   report ledger は旧タブ区切りテキスト + `flock` から sqlite3 (`BEGIN IMMEDIATE`
   トランザクション) へ移行。旧 ledger からの移行は起動時に自動で行われる
-  (`ReportLedger.migrate_legacy()`、詳細は README「ledger の実体は sqlite3」参照)。
+  (`ReportLedger.migrate()`、詳細は README「ledger の実体は sqlite3」参照)。
   pidfile・起動コマンド・env (`SQUAD_SESSION` 等)・`discovery.yaml`・
   `.squad_session` マーカーによる運用互換は維持。旧 `tests/test_watch_report_ledger.sh`
   (66ケース) は `tests/test_ledger.py` (67 test) へ、`tests/test_watch_report_bridge.sh`
   相当の挙動確認は `tests/test_watchd.py` へ pytest として移植。`squad/squad.py` に
-  `ledger claim/commit/release/seed` サブコマンドを追加 (Issue #26 の要求どおり、
+  `ledger` サブコマンドを追加 (Issue #26 の要求どおり、
   ledger の手動操作・デバッグ用。`watchd.py` 自体は `ReportLedger` をプロセス内で
   直接呼ぶため使わない)。
 

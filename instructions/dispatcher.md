@@ -201,6 +201,12 @@ task-yaml-author に渡した場合はその値を、task-yaml-author に選ば�
 - pane: W1=`{SQUAD_SESSION}:0.1` W2=`0.2` W3=`0.3` Codex W4=`0.6` (0.4/0.5 は worker ではない)。
   自分の tmux session は `{SQUAD_SESSION}`。**他の session (別 Squad) の pane には絶対に send-keys しない。**
 - Codex (W4) には `/model` も `/clear` も無い。タスク通知のみ。
+- `queue/projects/<pj>/.squad_session` に担当 session 名を書くと、その project の
+  report-bridge / 停止検知 / discovery はその session の watcher だけが行う。マーカーが
+  無い project は `SQUAD_DEFAULT_OWNER` の担当。担当を移しても配達済み判定は共有 ledger
+  (`queue/.report_ledger.db`) の `(project, report_id)` が引き継ぐ。担当変更時に既存 report
+  を「配達済み」へ一括登録する処理は持たない (SQUAD-216)。ledger に無い report は 1 回だけ
+  再通知されるので、`report_id` で重複と判断してよい。
 
 ## 報告受け取り
 
@@ -227,10 +233,39 @@ report の `details_path` は判断に必要な場合のみ読む（通常は su
 watch.sh は status を読み、blocked の report は `[INBOX]` 付きであなたに通知する。
 
 report YAML に含まれる必須フィールド (worker 側責務):
+- `report_id:` (UUIDv4。配達の主キー。worker が新規作成時に一度だけ発番する)
 - `agent: claude | codex`
 - `author_agent:` (同上、cross-review 用)
 - `verify_status: pass | fail | skipped` (検証ゲートの結果)
 - `pr_url:` (PR を投げた場合は必須)
+- `git_head:` (任意。作業対象 worktree の HEAD SHA)
+
+### 通知に付く識別子の読み方 (SQUAD-216)
+
+report 通知の末尾には機械可読な 1 行が付く:
+
+```
+[REPORT project=squad worker=1 task_id=SQUAD-216 report_id=<uuid> content_sha256=<64hex> git_head=<40hex|unknown> attempt=1]
+```
+
+- `report_id` が**最初に比較する値**。過去に受領した `(project, report_id)` と一致すれば
+  **重複通知**なので内容確認を省いてよい (再送・DB 消失・移行境界で起こる。異常ではない)
+- 同じ `report_id` で `content_sha256` が変わっていたら「同一 ID の内容変化」= writer 異常。
+  worker に確認する
+- `report_id` が異なれば `task_id` / `git_head` / hash が同じでも**別の報告**として扱う
+  (同じタスクで progress / final の複数 report があり得るため、task_id は重複キーではない)
+- `attempt` は当該 report_id の通知試行回数。2 以上なら再送 (送信失敗か ledger 更新失敗)
+- report を `archive/` へ移動しても配達判定は変わらない (配達の正本は ledger であって
+  ファイルの場所や mtime ではない)
+
+`[REPORT-INVALID project=... path=... content_sha256=... error=...]` が届いたら、その report は
+`report_id` が無いか YAML を解釈できない。**握り潰されてはいないが未受領扱い**なので、担当
+worker に `report_id: <UUIDv4>` 付きでの再出力を指示する (Dispatcher 側で UUID を推測して
+補わない)。内容が直れば別キーとして改めて通知される。
+
+`[LEDGER] 配達 ledger を ... 新 schema へ移行しました` が届いた場合、旧 ledger の記録は
+report_id へ変換できないため引き継いでいない。直後に既存 report が最大 1 回だけ再通知されるので、
+既知の `report_id` と一致するものは無視してよい。
 
 ## Cross-review (手動運用)
 
