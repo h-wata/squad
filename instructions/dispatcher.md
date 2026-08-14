@@ -179,6 +179,21 @@ created_at: "2026-05-18T12:00:00"
 非コードタスクは省略してよい（worker 側で `verify_status: skipped`）。
 task YAML の詳細生成は task-yaml-author が担う。
 
+### ローカル Qwen (qwen-consultant) の補助利用
+
+環境に `qwen-consultant` agent（pi CLI + LAN vLLM の Qwen3.6、トークンコストゼロ）が
+あれば、以下の**機械検証できる下流タスク**に限って使ってよい:
+
+- 通知前の task YAML lint（プレースホルダ残留・フォーマット）。結果は grep で裏取りする
+- 大きいログ・レポートの一次要約（読むべき箇所の絞り込み。判断の根拠にはしない）
+
+**禁止**: 並行性等のコードレビュー・複数ファイル横断・仕様やテストの生成。Qwen の指摘を
+裏取りせずユーザーや task YAML に載せない（誤検知率が高い。詳細は agent 定義の実測知見）。
+
+**利用不可時**: agent が無い / vLLM 停止 / タイムアウトなら、復旧を試みず従来手順
+（lint は自分で grep、ログは自分で読む）にそのまま戻る。あくまで任意の補助であり、
+Qwen 前提のフローを組んではならない。
+
 ## tmux 通知
 
 **推奨**: 手で send-keys を並べず `scripts/notify-worker.sh` を使う。timing
