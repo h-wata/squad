@@ -3,30 +3,37 @@
 """report 配達 ledger (sqlite3, stdlib only).
 
 report を Dispatcher へ橋渡ししたかどうかを、全 watcher (全セッション) で共有する
-永続ストアで管理する。旧 watch.sh の「awk + flock + タブ区切りテキストを read-modify-
-rename」実装を sqlite3 の BEGIN IMMEDIATE トランザクションに置き換えたもの
-(Issue #26)。排他は DB に任せ、自前のロックファイルは持たない。
+永続ストアで管理する。旧 watch.sh の「awk + flock + タブ区切りテキスト」実装を sqlite3 の
+BEGIN IMMEDIATE トランザクションに置き換えたもの (Issue #26)。排他は DB に任せ、自前の
+ロックファイルは持たない。
+
+配達の主キーは **(project, report_id)** である (SQUAD-215/216)。report_id は writer が
+report を新規作成するときに一度だけ発番する UUIDv4 で、同じ報告の修正・再出力・archive
+からの復帰では変わらない。別の報告は内容が同じでも別 ID になる。
+
+mtime は配達の同一性・到着順序・新旧判定のどれにも使わない。mtime は「変更時刻」であって
+「到着時刻」ではなく、mv/cp/archive 復帰で過去の値を保てるうえ、時計後退や分解能でも壊れる。
+比較すべきなのは到着時刻ではなく「その identity をもう配達したか」だけである。
 
 配達は 2 段階:
   claim   配達権 (期限付き lease) を取る。取れた watcher だけが送信する。
-  commit  送信成功後に「配達済み」(lease = '0') へ確定する。
-  release 送信失敗時に claim 前の記録へ戻す (行を消すのではなく戻す)。
+  commit  送信成功後に delivered へ確定する。以後 同じ DB からは再送しない。
+  fail    送信/commit 失敗時に pending のまま次回試行時刻 (next_attempt_at) を後ろへずらす。
 
-claim を即「配達済み」にしないのは、送信に失敗した report や送信前に落ちた watcher の
-report が二度と橋渡しされなくなるため。lease にしておけば期限切れ後に誰か (別セッション
-の watcher でもよい) が再び claim して配達をやり直せる。
+claim を即 delivered にしないのは、送信に失敗した report や送信前に落ちた watcher の report が
+二度と橋渡しされなくなるため。lease にしておけば期限切れ後に誰か (別セッションの watcher でも
+よい) が再び claim して配達をやり直せる。commit / fail は claim 時に発行した token で所有者を
+照合する。照合しないと、A の lease が切れた後に B が claim した状況で、遅れて戻ってきた A が
+B の claim を勝手に commit したり壊したりできてしまう。
 
-commit / release は claim 時に発行した token で所有者を照合する。mtime だけで照合すると、
-A の lease が切れた後に B が同じ mtime を再 claim した状況で、遅れて戻ってきた A が B の
-claim を勝手に commit したり release で壊したりできてしまう。
+再試行間隔は 15秒 -> 60秒 -> 5分 -> 30分 -> 以降 30分ごと。**試行回数の上限は設けない**。
+有限上限は通信不能時に report を永久沈黙させるため禁止する。30分 cap なら障害が長引いても
+可視性を保ちつつ、通常時に鳴り続けることもない。
 
-異常時 (DB を開けない・書けない) は「未配達」側に倒す (fail-open)。握り潰し (気づけない)
-より再通知 (煩いが気づける) を選ぶ、という watcher 全体の方針に合わせる。この場合 claim は
-成功扱いだが token は返さない (呼び出し側が「claim 未記録」を WARN できるようにするため)。
-
-mtime は「秒.ナノ秒 (9 桁ゼロ詰め)」の文字列として記録・比較する。float に落とすと同一秒内に
-書き直された report (例: in_progress -> blocked) や下位桁だけ違う mtime を同じ版とみなして
-恒久的に握り潰す。同一版かどうかは文字列一致、新旧の判定だけ mtime_gt() で行う。
+異常時 (DB を開けない・書けない) は「未配達」側に倒す (fail-open)。握り潰し (気づけない) より
+再通知 (煩いが気づける) を選ぶ。この場合 claim は成功扱いだが token は返さない (呼び出し側が
+「claim 未記録」を WARN できるようにするため)。再送間隔だけはプロセス内のメモリで同じ backoff を
+適用する (再起動でリセットされるのは許容する = 重複側に倒す)。
 """
 
 from __future__ import annotations
@@ -35,70 +42,134 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import random
+import re
 import sqlite3
 import time
 from typing import NamedTuple
+import uuid
 
-DELIVERED = '0'
+PENDING = 'pending'
+DELIVERED = 'delivered'
 SQLITE_MAGIC = b'SQLite format 3\x00'
-SCHEMA = 'CREATE TABLE IF NOT EXISTS reports (path TEXT PRIMARY KEY, mtime TEXT NOT NULL, lease TEXT NOT NULL)'
+SCHEMA = (
+    'CREATE TABLE IF NOT EXISTS deliveries ('
+    'project TEXT NOT NULL, '
+    'report_id TEXT NOT NULL, '
+    'path TEXT NOT NULL, '
+    'content_sha256 TEXT NOT NULL, '
+    'state TEXT NOT NULL, '
+    'lease TEXT NOT NULL, '
+    'attempt_count INTEGER NOT NULL, '
+    'next_attempt_at INTEGER NOT NULL, '
+    'PRIMARY KEY (project, report_id))'
+)
+LEGACY_TABLE = 'reports'
 
-# 監視対象 report のファイル名パターン (queue/projects 配下)
+# 送信/commit 失敗時の再試行間隔。末尾の値が cap で、以降はその間隔で無限に再送する。
+BACKOFF_SECONDS = (15, 60, 300, 1800)
+
+# 監視対象 report のファイル名パターン (queue/projects/<project> 配下)
 REPORT_GLOBS = ('**/reports/worker*_report.yaml', '**/reports/worker*_review.yaml')
+
+# report_id が無い / 壊れている report の配達キーに使う接頭辞。UUID を後付けで推測せず、
+# 内容が変わらない限り 1 回だけ [REPORT-INVALID] を通知するための決定的なキー。
+INVALID_PREFIX = 'INVALID:'
+
+_SCALAR_RE = re.compile(r'^([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$')
+_BLOCK_MARKERS = ('|', '>', '|-', '>-', '|+', '>+')
+
+
+def backoff_seconds(attempt: int) -> int:
+    """Attempt 回目の失敗のあと、次に再送するまで待つ秒数 (最後の値が cap)."""
+    return BACKOFF_SECONDS[min(max(attempt, 1), len(BACKOFF_SECONDS)) - 1]
+
+
+def parse_scalars(text: str) -> dict[str, str]:
+    """top-level の `key: value` だけ拾う簡易 YAML リーダー (block scalar 本文は読まない)."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line or line[0].isspace() or line.startswith('#'):
+            continue
+        m = _SCALAR_RE.match(line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2)
+        if val in _BLOCK_MARKERS:
+            continue
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in '"\'':
+            val = val[1:-1]
+        out.setdefault(key, val)
+    return out
+
+
+def normalize_report_id(raw: str) -> str:
+    """Report_id を UUID の正準形へ正規化する (UUID でなければ空文字).
+
+    大文字小文字やハイフン省略の揺れで同じ報告が二重に配達されないよう正準化する。
+    UUID として読めない値 ('TBD' 等) を通してしまうと、その文字列を一度配達した時点で
+    以後同じ値を書く report がすべて握り潰されるため、無効として扱う。
+    """
+    try:
+        return str(uuid.UUID(raw.strip()))
+    except (ValueError, AttributeError):
+        return ''
+
+
+def report_identity(data: bytes) -> tuple[str, dict[str, str], str]:
+    """Report の生 bytes から (content_sha256, top-level scalars, parse error) を返す."""
+    sha = hashlib.sha256(data).hexdigest()
+    try:
+        text = data.decode()
+    except UnicodeDecodeError as e:
+        return sha, {}, f'decode error: {e}'
+    return sha, parse_scalars(text), ''
+
+
+def delivery_key(meta: dict[str, str], sha: str, parse_error: str) -> tuple[str, str]:
+    """配達キーとして使う report_id と、無効な場合の理由を返す.
+
+    Returns:
+        (report_id, invalid_reason)。invalid_reason が空でなければ [REPORT-INVALID] 扱い。
+        その場合 report_id は内容ハッシュ由来の決定的なキーになり、内容が直るまで
+        1 回だけ通知され、直せば別キーとして改めて通知される。
+    """
+    if parse_error:
+        return f'{INVALID_PREFIX}{sha}', parse_error
+    raw = meta.get('report_id', '')
+    if not raw:
+        return f'{INVALID_PREFIX}{sha}', 'report_id 欠落'
+    rid = normalize_report_id(raw)
+    if not rid:
+        return f'{INVALID_PREFIX}{sha}', f'report_id が UUID ではありません: {raw!r}'
+    return rid, ''
 
 
 class Claim(NamedTuple):
     """claim の結果.
 
     Attributes:
-        status: 'claim' (配達権を取れた) / 'seen' (配達済みか他が配達中) /
-            'stale' (記録より古い mtime なので通知しない)。
+        status: 'claim' (配達権を取れた) / 'seen' (配達済み) /
+            'held' (他 watcher が配達中、または backoff 待ちで再送時刻に達していない)。
         token: 'claim' 時の所有権 token。None は ledger に記録できなかったことを表す
-            (fail-open。呼び出し側は commit / release を呼んでも空振りする)。
-        prev_mtime: claim 前に記録されていた mtime (未登録なら '')。
-        prev_lease: claim 前に記録されていた lease (未登録なら '')。
+            (fail-open。commit / fail はメモリ上の backoff だけを更新する)。
+        attempt: この送信が当該 report_id にとって何回目か (1 始まり)。
     """
 
     status: str
     token: str | None
-    prev_mtime: str
-    prev_lease: str
+    attempt: int
 
     @property
     def ok(self) -> bool:
         return self.status == 'claim'
 
 
-def mtime_str(path: os.PathLike[str] | str) -> str:
-    """Stat の mtime を「秒.ナノ秒(9桁)」文字列で返す (float 化による桁落ちを避ける)."""
-    ns = os.stat(path).st_mtime_ns
-    return f'{ns // 10**9}.{ns % 10**9:09d}'
-
-
-def mtime_gt(a: str, b: str) -> bool:
-    """Mtime 文字列 a が b より真に新しいか.
-
-    整数部は数値で、小数部はゼロ詰めした固定長文字列の辞書順で比較する
-    (find %T@ の 20 桁 mtime を float にすると下位桁が落ちて誤判定するため)。
-    """
-    if not b:
-        return True
-    ia, _, fa = a.partition('.')
-    ib, _, fb = b.partition('.')
-    try:
-        if int(ia) != int(ib):
-            return int(ia) > int(ib)
-    except ValueError:
-        return a > b
-    width = max(len(fa), len(fb))
-    return fa.ljust(width, '0') > fb.ljust(width, '0')
-
-
 def _lease_deadline(lease: str) -> int:
-    """Lease 値 '<期限 epoch 秒>:<nonce>' から期限だけ取り出す (壊れていれば 0)."""
+    """Lease 値 '<期限 epoch 秒>:<nonce>' から期限だけ取り出す (空/壊れていれば 0)."""
     head = lease.split(':', 1)[0]
     try:
         return int(head)
@@ -107,15 +178,15 @@ def _lease_deadline(lease: str) -> int:
 
 
 def find_reports(dirs: Iterable[Path]) -> list[tuple[str, str]]:
-    """担当 project 配下の report / review を (path, mtime) で列挙する."""
+    """担当 project 配下の report / review を (project, path) で列挙する.
+
+    project は project ディレクトリ名。配達キー (project, report_id) の前半に使う。
+    """
     out: list[tuple[str, str]] = []
     for d in dirs:
         for pattern in REPORT_GLOBS:
             for p in sorted(d.glob(pattern)):
-                try:
-                    out.append((str(p), mtime_str(p)))
-                except OSError:
-                    continue
+                out.append((d.name, str(p)))
     return out
 
 
@@ -126,6 +197,8 @@ class ReportLedger:
         self.path = Path(db_path)
         self.lease_seconds = lease_seconds
         self.timeout = timeout
+        # DB を使えないときの backoff だけを保持する (再起動でリセットされてよい)
+        self._mem: dict[tuple[str, str], tuple[int, int]] = {}
 
     # ---- 内部 ----
 
@@ -151,110 +224,109 @@ class ReportLedger:
             conn.close()
 
     @staticmethod
-    def _lookup(conn: sqlite3.Connection, path: str) -> tuple[str, str] | None:
-        row = conn.execute('SELECT mtime, lease FROM reports WHERE path = ?', (path,)).fetchone()
-        return (row[0], row[1]) if row else None
+    def _lookup(conn: sqlite3.Connection, project: str, report_id: str) -> tuple[str, str, int, int] | None:
+        row = conn.execute(
+            'SELECT state, lease, attempt_count, next_attempt_at FROM deliveries WHERE project = ? AND report_id = ?',
+            (project, report_id),
+        ).fetchone()
+        return (row[0], row[1], int(row[2]), int(row[3])) if row else None
 
     def _new_token(self, now: int) -> str:
-        # 期限値だけでは一意にならない (新しい mtime の claim は既存 lease を待たずに成立
-        # するため、同じ秒に 2 watcher が claim すると期限が一致する)。PID と乱数を混ぜる。
+        # 期限値だけでは一意にならない (同じ秒に 2 watcher が claim すると期限が一致する)。
         return f'{now + self.lease_seconds}:{os.getpid()}-{random.randrange(1 << 30)}'
 
     # ---- 公開 API ----
 
-    def claim(self, path: str, mtime: str) -> Claim:
-        """配達権を取る."""
+    def claim(self, project: str, report_id: str, path: str, content_sha256: str) -> Claim:
+        """配達権を取る (未配達で、再送時刻に達していて、他 watcher が配達中でないとき)."""
         now = int(time.time())
+        key = (project, report_id)
         try:
             with self._tx() as conn:
-                rec = self._lookup(conn, path)
-                prev_mt, prev_ut = rec if rec else ('', '')
+                rec = self._lookup(conn, project, report_id)
+                attempts = 0
                 if rec:
-                    if mtime == prev_mt:
-                        # 同じ版。配達済み、または他 watcher が配達中なら触らない。
-                        if prev_ut == DELIVERED or now < _lease_deadline(prev_ut):
-                            return Claim('seen', None, prev_mt, prev_ut)
-                    elif not mtime_gt(mtime, prev_mt):
-                        # 記録より古い版は lease の状態によらず常に skip。claim を許すと
-                        # 記録の mtime と呼び出し側の mtime が食い違い、commit が空振りして
-                        # lease 切れ後に二重通知される。
-                        return Claim('stale', None, prev_mt, prev_ut)
+                    state, lease, attempts, next_at = rec
+                    if state == DELIVERED:
+                        return Claim('seen', None, attempts)
+                    if now < next_at or now < _lease_deadline(lease):
+                        # backoff 待ち、または他 watcher が配達中
+                        return Claim('held', None, attempts)
                 token = self._new_token(now)
                 conn.execute(
-                    'INSERT INTO reports(path, mtime, lease) VALUES(?, ?, ?) '
-                    'ON CONFLICT(path) DO UPDATE SET mtime = excluded.mtime, lease = excluded.lease',
-                    (path, mtime, token),
+                    'INSERT INTO deliveries'
+                    '(project, report_id, path, content_sha256, state, lease, attempt_count, next_attempt_at) '
+                    'VALUES(?, ?, ?, ?, ?, ?, ?, 0) '
+                    'ON CONFLICT(project, report_id) DO UPDATE SET '
+                    'path = excluded.path, content_sha256 = excluded.content_sha256, lease = excluded.lease',
+                    (project, report_id, path, content_sha256, PENDING, token, attempts),
                 )
-                return Claim('claim', token, prev_mt, prev_ut)
+                self._mem.pop(key, None)
+                return Claim('claim', token, attempts + 1)
         except sqlite3.Error:
-            return Claim('claim', None, '', '')
+            return self._mem_claim(key, now)
 
-    def commit(self, path: str, mtime: str, token: str | None) -> bool:
-        """送信成功後に配達済みへ確定する.
+    def _mem_claim(self, key: tuple[str, str], now: int) -> Claim:
+        """DB を使えないときの fail-open claim (backoff だけメモリで守る)."""
+        attempts, next_at = self._mem.get(key, (0, 0))
+        if now < next_at:
+            return Claim('held', None, attempts)
+        return Claim('claim', None, attempts + 1)
+
+    def commit(self, project: str, report_id: str, token: str | None) -> bool:
+        """送信成功後に delivered へ確定する.
 
         自分の claim でなくなっていれば何もしない (成功扱い)。ledger を操作できなければ
-        False を返す (lease 期限切れ後に再 claim されるので通知は消えない)。
+        False を返す (呼び出し側が fail() で backoff を進め、いずれ再通知される)。
         """
+        if token is None:
+            return False
         try:
             with self._tx() as conn:
-                rec = self._lookup(conn, path)
+                rec = self._lookup(conn, project, report_id)
                 if rec is None:
                     return False
-                mt, ut = rec
-                if mt != mtime or ut == DELIVERED or ut != token:
+                state, lease, _attempts, _next_at = rec
+                if state == DELIVERED or lease != token:
                     return True
-                conn.execute('UPDATE reports SET lease = ? WHERE path = ?', (DELIVERED, path))
+                conn.execute(
+                    'UPDATE deliveries SET state = ?, lease = ?, next_attempt_at = 0 '
+                    'WHERE project = ? AND report_id = ?',
+                    (DELIVERED, '', project, report_id),
+                )
                 return True
         except sqlite3.Error:
             return False
 
-    def release(self, path: str, token: str | None, prev_mtime: str, prev_lease: str) -> bool:
-        """送信失敗時に claim を取り消し、claim 前の記録へ戻す.
+    def fail(self, project: str, report_id: str, token: str | None) -> bool:
+        """送信/commit 失敗時に pending のまま次回試行時刻を backoff だけ後ろへずらす.
 
-        行を消すのではなく戻すのが重要。単に消すと直前に配達済みだった古い版の記録まで
-        失われ、更新前の mtime を掴んでいた別 watcher がその古い版を再 claim できてしまう。
+        行は消さない。消すと「未登録 = 初回」に戻り、backoff が効かず失敗のたびに
+        全速力で再送してしまう。試行回数の上限は設けない (永久沈黙を作らないため)。
         """
+        now = int(time.time())
+        key = (project, report_id)
+        if token is None:
+            attempts = self._mem.get(key, (0, 0))[0] + 1
+            self._mem[key] = (attempts, now + backoff_seconds(attempts))
+            return True
         try:
             with self._tx() as conn:
-                rec = self._lookup(conn, path)
+                rec = self._lookup(conn, project, report_id)
                 if rec is None:
                     return True
-                if rec[1] != token:
+                state, lease, attempts, _next_at = rec
+                if state == DELIVERED or lease != token:
                     return True  # lease 切れ後に別 watcher が再 claim している
-                if prev_mtime:
-                    conn.execute(
-                        'UPDATE reports SET mtime = ?, lease = ? WHERE path = ?', (prev_mtime, prev_lease, path)
-                    )
-                else:
-                    conn.execute('DELETE FROM reports WHERE path = ?', (path,))
+                attempts += 1
+                conn.execute(
+                    'UPDATE deliveries SET lease = ?, attempt_count = ?, next_attempt_at = ? '
+                    'WHERE project = ? AND report_id = ?',
+                    ('', attempts, now + backoff_seconds(attempts), project, report_id),
+                )
                 return True
         except sqlite3.Error:
             return False
-
-    def seed_delivered(self, rows: Iterable[tuple[str, str]]) -> int:
-        """(path, mtime) を配達済みとして登録する (INSERT OR IGNORE 相当).
-
-        既に行がある path は触らない (他 watcher が既に claim/配達済みにした行を壊さない)。
-        `.squad_session` の担当変更直後、その時点で存在する report を「新規の未配達」と
-        誤判定して再通知しないための seed 専用 API (baseline_seed と違い、DB が既にあっても
-        使える)。
-
-        Returns:
-            実際に新規登録した件数。DB を操作できなければ -1。
-        """
-        rows = list(rows)
-        if not rows:
-            return 0
-        try:
-            with self._tx() as conn:
-                before = conn.total_changes
-                conn.executemany(
-                    'INSERT OR IGNORE INTO reports(path, mtime, lease) VALUES(?, ?, ?)',
-                    [(p, m, DELIVERED) for p, m in rows],
-                )
-                return conn.total_changes - before
-        except sqlite3.Error:
-            return -1
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -267,11 +339,11 @@ class ReportLedger:
         except OSError:
             return False
 
-    def _build(self, rows: Iterable[tuple[str, str, str]], replace: bool = False) -> int:
-        """一時 DB を作って rows を入れ、DB がまだ無ければ atomic に据える.
+    def _build(self, rows: Iterable[tuple[str, str, str, str]], replace: bool = False) -> int:
+        """一時 DB を作って rows を配達済みとして入れ、DB がまだ無ければ atomic に据える.
 
         Args:
-            rows: (path, mtime, lease) の並び。
+            rows: (project, report_id, path, content_sha256) の並び。
             replace: True なら既存ファイルを上書きする (旧テキスト ledger の in-place 移行用)。
 
         Returns:
@@ -282,8 +354,13 @@ class ReportLedger:
         try:
             conn = self._connect(tmp)
             try:
-                conn.executemany('INSERT OR REPLACE INTO reports(path, mtime, lease) VALUES(?, ?, ?)', rows)
-                count = conn.execute('SELECT count(*) FROM reports').fetchone()[0]
+                conn.executemany(
+                    'INSERT OR REPLACE INTO deliveries'
+                    '(project, report_id, path, content_sha256, state, lease, attempt_count, next_attempt_at) '
+                    f"VALUES(?, ?, ?, ?, '{DELIVERED}', '', 0, 0)",
+                    rows,
+                )
+                count = conn.execute('SELECT count(*) FROM deliveries').fetchone()[0]
             finally:
                 conn.close()
             if replace:
@@ -310,7 +387,11 @@ class ReportLedger:
             tmp.unlink(missing_ok=True)
 
     def baseline_seed(self, projects_dir: Path) -> int:
-        """既存 report を「通知済み」として一括登録する (導入時の一斉通知を防ぐ).
+        """導入時に既存 report を配達済みとして一括登録する (初回起動の一斉通知を防ぐ).
+
+        ledger がまだ 1 つも無い状態 (= 新規導入) でのみ実行する。report_id は各 report を
+        実際に読んで取得するので、mtime による推測は行わない。report_id を持たない legacy
+        report は登録せず、[REPORT-INVALID] として 1 回通知される (握り潰さない)。
 
         対象は担当 project ではなく queue/projects 配下の全 report。後から起動した別
         セッションの watcher は「ledger がある = seed 済み」としか判断しないため、担当分
@@ -322,32 +403,53 @@ class ReportLedger:
         if self.path.exists():
             return -1
         try:
-            rows = [(p, m, DELIVERED) for p, m in find_reports([projects_dir])]
+            dirs = sorted(p for p in projects_dir.iterdir() if p.is_dir()) if projects_dir.is_dir() else []
+            rows: list[tuple[str, str, str, str]] = []
+            for project, path in find_reports(dirs):
+                try:
+                    sha, meta, err = report_identity(Path(path).read_bytes())
+                except OSError:
+                    continue
+                rid, invalid = delivery_key(meta, sha, err)
+                if invalid:
+                    continue  # 推測でキーを作らない。初回に [REPORT-INVALID] として鳴らす
+                rows.append((project, rid, path, sha))
             return self._build(rows)
         except (OSError, sqlite3.Error):
             return -2
 
-    def migrate_legacy(self, legacy_path: Path, replace: bool = False) -> int:
-        r"""旧タブ区切り ledger (`<mtime>\t<lease>\t<path>`) を sqlite3 へ取り込む.
+    def migrate(self, legacy_text: Path | None = None) -> str:
+        """旧 ledger を report_id ベースの新 schema へ移行する.
+
+        旧 ledger の行は `path + mtime` しか持たず、そこから report_id を安全に復元する
+        手段が無い。推測で delivered として登録すると「まだ配達していない report を配達済み
+        にする」= 永久沈黙を作り得るため、**旧行は一切引き継がない**。空の配達表へ移行し、
+        reports/ に残る legacy report は最大 1 回だけ再通知されるほうに倒す。
 
         Args:
-            legacy_path: 旧テキスト ledger。replace=True なら自分自身 (ledger_path) でもよい。
-            replace: True なら既存の ledger_path を上書きする (WATCH_LEDGER_FILE が
-                旧テキスト ledger を直接指している場合の in-place 移行)。
+            legacy_text: 別パスにある旧タブ区切り ledger (queue/.report_ledger)。参照用に
+                `.legacy` へ退避し、新 schema は空の配達表から始める。
 
         Returns:
-            取り込み件数。既に ledger がある場合は -1、失敗した場合は -2。
+            'legacy-text' (別パスの旧テキストを退避) / 'text' (ledger_path 自体が旧テキスト
+            だったので置換) / 'legacy-table' (旧 sqlite schema を破棄) /
+            '' (移行不要、または移行できなかった)。
         """
-        if self.path.exists() and not replace:
-            return -1
+        if legacy_text is not None and legacy_text.is_file() and not self.path.exists():
+            legacy_text.replace(legacy_text.with_name(f'{legacy_text.name}.legacy'))
+            return 'legacy-text' if self._build([]) >= 0 else ''
+        if not self.path.exists():
+            return ''
+        if not self.is_sqlite():
+            return 'text' if self._build([], replace=True) >= 0 else ''
         try:
-            rows: list[tuple[str, str, str]] = []
-            for line in legacy_path.read_text(errors='replace').splitlines():
-                cols = line.split('\t')
-                if len(cols) < 3:
-                    continue  # 壊れた行 / 旧中間形式は無視する
-                mt, ut, path = cols[0], cols[1], '\t'.join(cols[2:])
-                rows.append((path, mt, ut))
-            return self._build(rows, replace=replace)
-        except (OSError, sqlite3.Error):
-            return -2
+            with self._tx() as conn:
+                row = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (LEGACY_TABLE,)
+                ).fetchone()
+                if not row:
+                    return ''
+                conn.execute(f'DROP TABLE {LEGACY_TABLE}')
+            return 'legacy-table'
+        except sqlite3.Error:
+            return ''

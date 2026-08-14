@@ -2,11 +2,8 @@
 # ruff: noqa: CPY001
 """squad.ledger.ReportLedger のテスト.
 
-tests/test_watch_report_ledger.sh (旧 watch.sh の awk+flock 実装, 66 ケース) を 1:1 で
-pytest へ移植し、sqlite3 実装が同じ挙動をすることを確認する (Issue #26)。
-
-旧テストの check()/assert_eq() の呼び出し順・入力値をそのまま踏襲しているため、テスト名は
-旧テストのコメント番号に対応する。
+配達の主キーは (project, report_id) であり、mtime は一切使わない (SQUAD-215/216)。
+旧テスト (mtime ベースの claim/stale/seed 契約) は ID ベース契約へ置換した。
 """
 
 from __future__ import annotations
@@ -14,17 +11,30 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import sqlite3
 import stat
 import sys
+import time
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
-from ledger import Claim  # noqa: E402
+from ledger import backoff_seconds  # noqa: E402
+from ledger import BACKOFF_SECONDS  # noqa: E402
+from ledger import delivery_key  # noqa: E402
+from ledger import DELIVERED  # noqa: E402
+from ledger import find_reports  # noqa: E402
+from ledger import normalize_report_id  # noqa: E402
+from ledger import report_identity  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
 
-A = '/q/projects/pj_a/reports/worker1_report.yaml'
-B = '/q/projects/pj_b/reports/worker2_review.yaml'
+PJ_A, PJ_B = 'pj_a', 'pj_b'
+ID1 = '11111111-1111-4111-8111-111111111111'
+ID2 = '22222222-2222-4222-8222-222222222222'
+PATH_A = '/q/projects/pj_a/reports/worker1_report.yaml'
+PATH_B = '/q/projects/pj_b/reports/worker2_review.yaml'
+SHA1 = 'a' * 64
+SHA2 = 'b' * 64
 
 
 @pytest.fixture
@@ -32,691 +42,474 @@ def led(tmp_path: Path) -> ReportLedger:
     return ReportLedger(tmp_path / 'ledger.db', lease_seconds=60)
 
 
-def _delivered(led: ReportLedger, path: str, mtime: str) -> Claim:
+def _delivered(led: ReportLedger, project: str, rid: str, path: str = PATH_A, sha: str = SHA1) -> None:
     """Claim -> commit までを 1 回分行う (実運用の正常系と同じ手順)."""
-    c = led.claim(path, mtime)
+    c = led.claim(project, rid, path, sha)
     assert c.ok
-    assert led.commit(path, mtime, c.token)
-    return c
+    assert led.commit(project, rid, c.token)
+
+
+def _row(led: ReportLedger, project: str, rid: str) -> tuple:
+    conn = sqlite3.connect(led.path)
+    try:
+        return conn.execute(
+            'SELECT path, content_sha256, state, lease, attempt_count, next_attempt_at '
+            'FROM deliveries WHERE project=? AND report_id=?',
+            (project, rid),
+        ).fetchone()
+    finally:
+        conn.close()
 
 
 class TestBasicClaimCommit:
-    """1-9: 初回 claim / 配達済み判定 / 小数秒 / mtime 前進 / path 独立性."""
+    def test_initial_claim_notifies(self, led: ReportLedger) -> None:
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).ok
 
-    def test_01_initial_claim_notifies(self, led: ReportLedger) -> None:
-        assert led.claim(A, '100.5').ok
-
-    def test_02_ledger_file_created(self, led: ReportLedger) -> None:
-        led.claim(A, '100.5')
+    def test_ledger_file_created(self, led: ReportLedger) -> None:
+        led.claim(PJ_A, ID1, PATH_A, SHA1)
         assert led.exists()
 
-    def test_03_claim_is_pending_lease(self, led: ReportLedger, tmp_path: Path) -> None:
-        c = led.claim(A, '100.5')
-        # sqlite 経由で直接確認 (公開 API に生の lease read は無いため commit 前後で判定)
+    def test_claim_returns_token_and_first_attempt(self, led: ReportLedger) -> None:
+        c = led.claim(PJ_A, ID1, PATH_A, SHA1)
         assert c.token is not None
+        assert c.attempt == 1
 
-    def test_04_second_claim_same_mtime_skips(self, led: ReportLedger) -> None:
-        led.claim(A, '100.5')
-        assert not led.claim(A, '100.5').ok
+    def test_second_claim_while_leased_is_held(self, led: ReportLedger) -> None:
+        led.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).status == 'held'
 
-    def test_05_commit_marks_delivered(self, led: ReportLedger) -> None:
-        c = led.claim(A, '100.5')
-        assert led.commit(A, '100.5', c.token)
+    def test_delivered_report_not_renotified(self, led: ReportLedger) -> None:
+        _delivered(led, PJ_A, ID1)
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).status == 'seen'
 
-    def test_06_delivered_report_not_renotified(self, led: ReportLedger) -> None:
-        _delivered(led, A, '100.5')
-        assert not led.claim(A, '100.5').ok
+    def test_same_project_other_id_is_independent(self, led: ReportLedger) -> None:
+        _delivered(led, PJ_A, ID1)
+        assert led.claim(PJ_A, ID2, PATH_A, SHA2).ok
 
-    def test_07_same_second_different_fraction_notifies(self, led: ReportLedger) -> None:
-        _delivered(led, A, '100.5')
-        assert led.claim(A, '100.9').ok
+    def test_same_id_other_project_is_independent(self, led: ReportLedger) -> None:
+        _delivered(led, PJ_A, ID1)
+        assert led.claim(PJ_B, ID1, PATH_B, SHA1).ok
 
-    def test_08_no_rollback_to_older_fraction(self, led: ReportLedger) -> None:
-        _delivered(led, A, '100.5')
-        _delivered(led, A, '100.9')
-        assert not led.claim(A, '100.5').ok
-
-    def test_09_mtime_advance_notifies_and_delivers(self, led: ReportLedger) -> None:
-        _delivered(led, A, '100.5')
-        _delivered(led, A, '100.9')
-        assert led.claim(A, '101.0').ok
-        assert led.commit(A, '101.0', led.claim(A, '101.0').token) or True  # 二重 claim 保護は下で検証
-
-    def test_09b_delivered_same_mtime_skipped_then_newer_notifies(self, led: ReportLedger) -> None:
-        _delivered(led, A, '100.5')
-        _delivered(led, A, '100.9')
-        _delivered(led, A, '101.0')
-        assert not led.claim(A, '101.0').ok
-        assert led.claim(A, '101.2').ok
-
-    def test_10_independent_paths_first_claim(self, led: ReportLedger) -> None:
-        _delivered(led, A, '101.2')
-        assert led.claim(B, '100.5').ok
-
-    def test_11_independent_paths_second_claim_skips(self, led: ReportLedger) -> None:
-        led.claim(B, '100.5')
-        assert not led.claim(B, '100.5').ok
+    def test_commit_records_delivered_state(self, led: ReportLedger) -> None:
+        _delivered(led, PJ_A, ID1)
+        _path, _sha, state, lease, _attempts, next_at = _row(led, PJ_A, ID1)
+        assert (state, lease, next_at) == (DELIVERED, '', 0)
 
 
-class TestSingleRowPerPath:
-    """7: 1 path につき最新版のみ保持する."""
+class TestMtimeIndependence:
+    """mtime は配達の同一性・順序・seed 判定のどれにも使わない (SQUAD-216 の核)."""
 
-    def test_12_one_row_per_path_and_latest_mtime(self, led: ReportLedger, tmp_path: Path) -> None:
-        _delivered(led, A, '100.5')
-        _delivered(led, A, '100.9')
-        _delivered(led, A, '101.0')
-        _delivered(led, A, '101.2')
-        led.claim(B, '100.5')
-        import sqlite3
+    def test_same_content_different_id_is_new_delivery(self, led: ReportLedger) -> None:
+        """内容が完全に同じでも report_id が違えば別の報告として通知する."""
+        _delivered(led, PJ_A, ID1, PATH_A, SHA1)
+        assert led.claim(PJ_A, ID2, PATH_A, SHA1).ok
 
-        conn = sqlite3.connect(led.path)
-        rows = conn.execute('SELECT path, mtime FROM reports').fetchall()
-        conn.close()
-        assert len(rows) == 2
-        assert dict(rows)[A] == '101.2'
+    def test_moved_report_same_id_is_not_renotified(self, led: ReportLedger) -> None:
+        """mv/cp で path が変わり mtime が過去へ戻っても、同じ ID なら再通知しない."""
+        _delivered(led, PJ_A, ID1, PATH_A, SHA1)
+        moved = '/q/projects/pj_a/reports/archive/worker1_report.yaml'
+        assert led.claim(PJ_A, ID1, moved, SHA1).status == 'seen'
+
+    def test_edited_report_same_id_is_not_renotified(self, led: ReportLedger) -> None:
+        """同じ ID のまま内容だけ書き換えても配達済みは覆らない (再通知は ID の更新で行う)."""
+        _delivered(led, PJ_A, ID1, PATH_A, SHA1)
+        assert led.claim(PJ_A, ID1, PATH_A, SHA2).status == 'seen'
+
+    def test_ledger_has_no_mtime_api(self) -> None:
+        import ledger
+
+        assert not hasattr(ledger, 'mtime_str')
+        assert not hasattr(ledger, 'mtime_gt')
+        assert not hasattr(ReportLedger, 'seed_delivered')  # 担当変更 seed 用 API も廃止
+        assert not hasattr(ReportLedger, 'release')  # 再送予定を記録する fail() に置換
+
+
+class TestClockWindBack:
+    """時計が後退しても配達判定は壊れない (時刻は backoff にしか使わない)."""
+
+    def test_delivered_stays_delivered_when_clock_goes_back(
+        self, led: ReportLedger, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _delivered(led, PJ_A, ID1)
+        monkeypatch.setattr(time, 'time', lambda: 0.0)  # 時計が 1970 まで巻き戻る
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).status == 'seen'
+
+    def test_new_id_still_notified_when_clock_goes_back(
+        self, led: ReportLedger, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _delivered(led, PJ_A, ID1)
+        monkeypatch.setattr(time, 'time', lambda: 0.0)
+        assert led.claim(PJ_A, ID2, PATH_A, SHA2).ok
 
 
 class TestCrossProcess:
-    """8-9 (F1 回帰): 別プロセス (別セッション watcher) が配達済みなら再通知しない."""
-
-    def test_13_other_process_delivery_succeeds(self, tmp_path: Path) -> None:
-        c = '/q/projects/pj_c/reports/worker3_report.yaml'
-        led_b = ReportLedger(tmp_path / 'ledger.db')  # 別インスタンス = 別プロセス相当
-        claim = led_b.claim(c, '200.0')
-        assert claim.ok
-        assert led_b.commit(c, '200.0', claim.token)
-
-    def test_14_delivered_by_other_process_not_renotified(self, tmp_path: Path) -> None:
+    def test_delivered_by_other_process_not_renotified(self, tmp_path: Path) -> None:
         led_a = ReportLedger(tmp_path / 'ledger.db')
-        c = '/q/projects/pj_c/reports/worker3_report.yaml'
-        _delivered(led_a, c, '200.0')
-        led_b = ReportLedger(tmp_path / 'ledger.db')
-        assert not led_b.claim(c, '200.0').ok
+        _delivered(led_a, PJ_A, ID1)
+        led_b = ReportLedger(tmp_path / 'ledger.db')  # 別インスタンス = 別セッション watcher
+        assert not led_b.claim(PJ_A, ID1, PATH_A, SHA1).ok
 
-    def test_15_update_after_other_process_delivery_notifies(self, tmp_path: Path) -> None:
+    def test_new_id_after_other_process_delivery_notifies(self, tmp_path: Path) -> None:
         led_a = ReportLedger(tmp_path / 'ledger.db')
-        c = '/q/projects/pj_c/reports/worker3_report.yaml'
-        _delivered(led_a, c, '200.0')
+        _delivered(led_a, PJ_A, ID1)
         led_b = ReportLedger(tmp_path / 'ledger.db')
-        assert led_b.claim(c, '201.0').ok
+        assert led_b.claim(PJ_A, ID2, PATH_A, SHA2).ok
 
 
 class TestConcurrentClaim:
-    """10: 同時 claim (BEGIN IMMEDIATE による直列化): 成功するのは 1 プロセスだけ."""
-
-    def test_16_concurrent_claim_only_one_succeeds(self, tmp_path: Path) -> None:
-        d = '/q/projects/pj_d/reports/worker1_report.yaml'
-
+    def test_concurrent_claim_only_one_succeeds(self, tmp_path: Path) -> None:
         def try_claim(_: int) -> bool:
-            return ReportLedger(tmp_path / 'ledger.db').claim(d, '300.0').ok
+            return ReportLedger(tmp_path / 'ledger.db').claim(PJ_A, ID1, PATH_A, SHA1).ok
 
         with ThreadPoolExecutor(max_workers=5) as ex:
             results = list(ex.map(try_claim, range(5)))
         assert sum(results) == 1
 
+    def test_concurrent_claim_after_delivery_all_skip(self, tmp_path: Path) -> None:
+        _delivered(ReportLedger(tmp_path / 'ledger.db'), PJ_A, ID1)
+
+        def try_claim(_: int) -> bool:
+            return ReportLedger(tmp_path / 'ledger.db').claim(PJ_A, ID1, PATH_A, SHA1).ok
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            assert sum(ex.map(try_claim, range(5))) == 0
+
 
 class TestLeaseExpiry:
-    """11: lease 期限切れ後は別 watcher が再 claim できる."""
-
-    def test_17_lease_zero_allows_reclaim(self, tmp_path: Path) -> None:
-        k = '/q/projects/pj_k/reports/worker1_report.yaml'
+    def test_expired_lease_allows_reclaim(self, tmp_path: Path) -> None:
         led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        assert led0.claim(k, '400.0').ok
-        assert led0.claim(k, '400.0').ok  # lease 期限切れなので再 claim できる
+        assert led0.claim(PJ_A, ID1, PATH_A, SHA1).ok
+        assert led0.claim(PJ_A, ID1, PATH_A, SHA1).ok  # lease 期限切れなので再 claim できる
 
-    def test_18_delivered_ignores_lease(self, tmp_path: Path) -> None:
-        k = '/q/projects/pj_k/reports/worker1_report.yaml'
+    def test_delivered_ignores_expired_lease(self, tmp_path: Path) -> None:
         led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        led0.claim(k, '400.0')
-        led0.claim(k, '400.0')
-        assert led0.commit(k, '400.0', led0.claim(k, '400.0').token)
-        assert not led0.claim(k, '400.0').ok
+        c = led0.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert led0.commit(PJ_A, ID1, c.token)
+        assert not led0.claim(PJ_A, ID1, PATH_A, SHA1).ok
 
-
-class TestNoRollback:
-    """12: 古い mtime を掴んだ watcher が ledger を巻き戻さない."""
-
-    def test_19_old_mtime_snapshot_not_claimed(self, led: ReportLedger) -> None:
-        e = '/q/projects/pj_e/reports/worker1_report.yaml'
-        _delivered(led, e, '101.0')
-        assert not led.claim(e, '100.0').ok
-
-    def test_20_ledger_does_not_roll_back(self, led: ReportLedger, tmp_path: Path) -> None:
-        e = '/q/projects/pj_e/reports/worker1_report.yaml'
-        _delivered(led, e, '101.0')
-        led.claim(e, '100.0')
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        mt = conn.execute('SELECT mtime FROM reports WHERE path=?', (e,)).fetchone()[0]
-        conn.close()
-        assert mt == '101.0'
-
-
-class TestRelease:
-    """13-15: ledger_release (送信失敗時のロールバック)."""
-
-    def test_21_unregistered_claim_has_empty_prev(self, led: ReportLedger) -> None:
-        g = '/q/projects/pj_g/reports/worker2_report.yaml'
-        c = led.claim(g, '300.0')
-        assert c.prev_mtime == '' and c.prev_lease == ''
-
-    def test_22_release_removes_row_when_no_prev(self, led: ReportLedger, tmp_path: Path) -> None:
-        g = '/q/projects/pj_g/reports/worker2_report.yaml'
-        c = led.claim(g, '300.0')
-        assert led.release(g, c.token, c.prev_mtime, c.prev_lease)
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        row = conn.execute('SELECT 1 FROM reports WHERE path=?', (g,)).fetchone()
-        conn.close()
-        assert row is None
-
-    def test_23_release_allows_renotify(self, led: ReportLedger) -> None:
-        g = '/q/projects/pj_g/reports/worker2_report.yaml'
-        c = led.claim(g, '300.0')
-        led.release(g, c.token, c.prev_mtime, c.prev_lease)
-        assert led.claim(g, '300.0').ok
-
-    def test_24_claim_returns_prev_record(self, led: ReportLedger) -> None:
-        i = '/q/projects/pj_i/reports/worker1_report.yaml'
-        _delivered(led, i, '100.0')
-        c = led.claim(i, '101.0')
-        assert (c.prev_mtime, c.prev_lease) == ('100.0', '0')
-
-    def test_25_release_restores_prev_record_not_delete(self, led: ReportLedger, tmp_path: Path) -> None:
-        i = '/q/projects/pj_i/reports/worker1_report.yaml'
-        _delivered(led, i, '100.0')
-        c = led.claim(i, '101.0')
-        led.release(i, c.token, c.prev_mtime, c.prev_lease)
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        mt, ut = conn.execute('SELECT mtime, lease FROM reports WHERE path=?', (i,)).fetchone()
-        conn.close()
-        assert (mt, ut) == ('100.0', '0')
-
-    def test_26_old_version_still_blocked_after_release(self, led: ReportLedger) -> None:
-        i = '/q/projects/pj_i/reports/worker1_report.yaml'
-        _delivered(led, i, '100.0')
-        c = led.claim(i, '101.0')
-        led.release(i, c.token, c.prev_mtime, c.prev_lease)
-        assert not led.claim(i, '100.0').ok
-
-    def test_27_new_version_notifiable_after_release(self, led: ReportLedger) -> None:
-        i = '/q/projects/pj_i/reports/worker1_report.yaml'
-        _delivered(led, i, '100.0')
-        c = led.claim(i, '101.0')
-        led.release(i, c.token, c.prev_mtime, c.prev_lease)
-        assert led.claim(i, '101.0').ok
-
-    def test_28_release_does_not_break_newer_claim(self, led: ReportLedger, tmp_path: Path) -> None:
-        i = '/q/projects/pj_i/reports/worker1_report.yaml'
-        _delivered(led, i, '101.0')
-        led.release(i, '999999999', '', '')
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        mt = conn.execute('SELECT mtime FROM reports WHERE path=?', (i,)).fetchone()[0]
-        conn.close()
-        assert mt == '101.0'
-
-
-class TestLeaseCollisionRegressions:
-    """16b-16d (PR #24 Codex review 4th round B1/B2, Claude review #1): token 衝突・巻き戻し防止."""
-
-    def test_29_lease_expired_old_mtime_not_claimable(self, tmp_path: Path) -> None:
-        n1 = '/q/projects/pj_n1/reports/worker1_report.yaml'
+    def test_reclaim_token_differs_from_original(self, tmp_path: Path) -> None:
         led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        assert led0.claim(n1, '101.0').ok
-        assert not led0.claim(n1, '100.0').ok
-
-    def test_30_ledger_not_rolled_back_after_rejecting_old_claim(self, tmp_path: Path) -> None:
-        n1 = '/q/projects/pj_n1/reports/worker1_report.yaml'
-        led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        led0.claim(n1, '101.0')
-        led0.claim(n1, '100.0')
-        import sqlite3
-
-        conn = sqlite3.connect(led0.path)
-        mt = conn.execute('SELECT mtime FROM reports WHERE path=?', (n1,)).fetchone()[0]
-        conn.close()
-        assert mt == '101.0'
-
-    def test_31_expired_same_version_reclaimable(self, tmp_path: Path) -> None:
-        n1 = '/q/projects/pj_n1/reports/worker1_report.yaml'
-        led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        led0.claim(n1, '101.0')
-        led0.claim(n1, '100.0')
-        assert led0.claim(n1, '101.0').ok
-
-    def test_32_reclaim_token_differs_from_original(self, tmp_path: Path) -> None:
-        n2 = '/q/projects/pj_n2/reports/worker1_report.yaml'
-        led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        tok_a = led0.claim(n2, '700.0').token
+        tok_a = led0.claim(PJ_A, ID1, PATH_A, SHA1).token
         led1 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=60)
-        tok_b = led1.claim(n2, '700.0').token
+        tok_b = led1.claim(PJ_A, ID1, PATH_A, SHA1).token
         assert tok_a != tok_b
 
-    def test_33_late_commit_from_expired_claim_ignored(self, tmp_path: Path) -> None:
-        n2 = '/q/projects/pj_n2/reports/worker1_report.yaml'
+    def test_late_commit_from_expired_claim_ignored(self, tmp_path: Path) -> None:
+        """期限切れ claim を持つ A が、B の claim を勝手に配達済みにできない."""
         led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        tok_a = led0.claim(n2, '700.0').token
+        tok_a = led0.claim(PJ_A, ID1, PATH_A, SHA1).token
         led1 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=60)
-        tok_b = led1.claim(n2, '700.0').token
-        led0.commit(n2, '700.0', tok_a)
-        import sqlite3
+        tok_b = led1.claim(PJ_A, ID1, PATH_A, SHA1).token
+        led0.commit(PJ_A, ID1, tok_a)
+        assert _row(led0, PJ_A, ID1)[3] == tok_b  # lease は B のまま
 
-        conn = sqlite3.connect(led0.path)
-        ut = conn.execute('SELECT lease FROM reports WHERE path=?', (n2,)).fetchone()[0]
-        conn.close()
-        assert ut == tok_b
-
-    def test_34_late_release_from_expired_claim_ignored(self, tmp_path: Path) -> None:
-        n2 = '/q/projects/pj_n2/reports/worker1_report.yaml'
+    def test_late_fail_from_expired_claim_ignored(self, tmp_path: Path) -> None:
         led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        tok_a = led0.claim(n2, '700.0').token
+        tok_a = led0.claim(PJ_A, ID1, PATH_A, SHA1).token
         led1 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=60)
-        tok_b = led1.claim(n2, '700.0').token
-        led0.release(n2, tok_a, '', '')
-        import sqlite3
+        tok_b = led1.claim(PJ_A, ID1, PATH_A, SHA1).token
+        led0.fail(PJ_A, ID1, tok_a)
+        assert _row(led0, PJ_A, ID1)[3] == tok_b
 
-        conn = sqlite3.connect(led0.path)
-        ut = conn.execute('SELECT lease FROM reports WHERE path=?', (n2,)).fetchone()[0]
-        conn.close()
-        assert ut == tok_b
-
-    def test_35_reclaiming_watcher_can_commit(self, tmp_path: Path) -> None:
-        n2 = '/q/projects/pj_n2/reports/worker1_report.yaml'
+    def test_reclaiming_watcher_can_commit(self, tmp_path: Path) -> None:
         led0 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=0)
-        led0.claim(n2, '700.0')
+        led0.claim(PJ_A, ID1, PATH_A, SHA1)
         led1 = ReportLedger(tmp_path / 'ledger.db', lease_seconds=60)
-        c_b = led1.claim(n2, '700.0')
-        assert led1.commit(n2, '700.0', c_b.token)
-        import sqlite3
-
-        conn = sqlite3.connect(led1.path)
-        ut = conn.execute('SELECT lease FROM reports WHERE path=?', (n2,)).fetchone()[0]
-        conn.close()
-        assert ut == '0'
-
-    def test_36_same_second_claims_have_different_tokens(self, led: ReportLedger) -> None:
-        n3 = '/q/projects/pj_n3/reports/worker1_report.yaml'
-        tok_1 = led.claim(n3, '800.0').token
-        tok_2 = led.claim(n3, '800.5').token
-        assert tok_1 != tok_2
-
-    def test_37_earlier_claim_release_does_not_break_later_claim(self, led: ReportLedger) -> None:
-        n3 = '/q/projects/pj_n3/reports/worker1_report.yaml'
-        tok_1 = led.claim(n3, '800.0').token
-        tok_2 = led.claim(n3, '800.5').token
-        led.release(n3, tok_1, '', '')
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        ut = conn.execute('SELECT lease FROM reports WHERE path=?', (n3,)).fetchone()[0]
-        conn.close()
-        assert ut == tok_2
+        c_b = led1.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert led1.commit(PJ_A, ID1, c_b.token)
+        assert _row(led1, PJ_A, ID1)[2] == DELIVERED
 
 
-class TestStaleStatus:
-    """16e: 巻き戻し skip と配達済み skip を区別できる (status フィールドで判定)."""
+class TestRetryBackoff:
+    """送信/commit 失敗時だけ backoff で再送する (試行回数の上限は設けない)."""
 
-    def test_38_rollback_skip_is_stale_status(self, led: ReportLedger) -> None:
-        n3 = '/q/projects/pj_n3/reports/worker1_report.yaml'
-        _delivered(led, n3, '801.0')
-        assert led.claim(n3, '800.0').status == 'stale'
+    def test_backoff_schedule_is_15s_60s_5m_30m_capped(self) -> None:
+        assert BACKOFF_SECONDS == (15, 60, 300, 1800)
+        assert [backoff_seconds(n) for n in (1, 2, 3, 4)] == [15, 60, 300, 1800]
 
-    def test_39_delivered_skip_is_seen_status(self, led: ReportLedger) -> None:
-        n3 = '/q/projects/pj_n3/reports/worker1_report.yaml'
-        _delivered(led, n3, '801.0')
-        assert led.claim(n3, '801.0').status == 'seen'
+    def test_backoff_has_no_attempt_limit(self) -> None:
+        """何回失敗しても間隔は 30 分で頭打ちになり、諦めて 0 にはならない."""
+        assert backoff_seconds(5) == 1800
+        assert backoff_seconds(100) == 1800
+        assert backoff_seconds(10_000) == 1800
+
+    def test_fail_keeps_row_pending_and_schedules_retry(self, led: ReportLedger) -> None:
+        c = led.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert led.fail(PJ_A, ID1, c.token)
+        _path, _sha, state, lease, attempts, next_at = _row(led, PJ_A, ID1)
+        assert (state, lease, attempts) == ('pending', '', 1)
+        assert next_at >= int(time.time()) + backoff_seconds(1) - 1
+
+    def test_claim_held_until_next_attempt_at(self, led: ReportLedger) -> None:
+        c = led.claim(PJ_A, ID1, PATH_A, SHA1)
+        led.fail(PJ_A, ID1, c.token)
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).status == 'held'  # まだ 15 秒経っていない
+
+    def test_claim_resumes_after_next_attempt_at(self, led: ReportLedger, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = led.claim(PJ_A, ID1, PATH_A, SHA1)
+        led.fail(PJ_A, ID1, c.token)
+        later = time.time() + BACKOFF_SECONDS[0] + 1
+        monkeypatch.setattr(time, 'time', lambda: later)
+        c2 = led.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert c2.ok
+        assert c2.attempt == 2  # 再送であることが通知に出せる
+
+    def test_attempt_count_grows_across_failures(self, led: ReportLedger, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = time.time()
+        for expected in (1, 2, 3):
+            monkeypatch.setattr(time, 'time', lambda now=now: now)
+            c = led.claim(PJ_A, ID1, PATH_A, SHA1)
+            assert c.attempt == expected
+            led.fail(PJ_A, ID1, c.token)
+            now += backoff_seconds(expected) + 1
+
+    def test_persisted_backoff_survives_process_restart(self, tmp_path: Path) -> None:
+        led_a = ReportLedger(tmp_path / 'ledger.db')
+        c = led_a.claim(PJ_A, ID1, PATH_A, SHA1)
+        led_a.fail(PJ_A, ID1, c.token)
+        led_b = ReportLedger(tmp_path / 'ledger.db')  # 再起動相当 (メモリ状態は失われる)
+        assert led_b.claim(PJ_A, ID1, PATH_A, SHA1).status == 'held'
+
+    def test_delivered_after_retry_stops_resending(self, led: ReportLedger, monkeypatch: pytest.MonkeyPatch) -> None:
+        c = led.claim(PJ_A, ID1, PATH_A, SHA1)
+        led.fail(PJ_A, ID1, c.token)
+        later = time.time() + BACKOFF_SECONDS[0] + 1
+        monkeypatch.setattr(time, 'time', lambda: later)
+        c2 = led.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert led.commit(PJ_A, ID1, c2.token)
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).status == 'seen'
 
 
-class TestUnreadableLedger:
-    """16f (PR #24 Claude review 6th #1): DB を読めなくても既存の配達済み記録を消さない."""
+class TestFailOpen:
+    """DB を扱えないときは通知側へ倒す (握り潰さない)."""
 
-    def test_40_claim_fails_open_when_db_unreadable(self, led: ReportLedger, tmp_path: Path) -> None:
+    def test_claim_fails_open_when_db_unreadable(self, led: ReportLedger) -> None:
         if os.geteuid() == 0:
             pytest.skip('root では chmod による読み取り不可を再現できない')
-        r1 = '/q/projects/pj_r/reports/worker1_report.yaml'
-        r2 = '/q/projects/pj_r/reports/worker2_report.yaml'
-        _delivered(led, r1, '950.0')
+        _delivered(led, PJ_A, ID1)
         os.chmod(led.path, 0)
         try:
-            assert led.claim(r2, '951.0').ok  # fail-open: 通知側に倒れる
+            c = led.claim(PJ_A, ID2, PATH_A, SHA2)
+            assert c.ok
+            assert c.token is None  # 記録できていないことを呼び出し側に伝える
         finally:
             os.chmod(led.path, stat.S_IRUSR | stat.S_IWUSR)
 
-    def test_41_unreadable_db_not_partially_overwritten(self, led: ReportLedger, tmp_path: Path) -> None:
+    def test_unreadable_db_not_partially_overwritten(self, led: ReportLedger) -> None:
         if os.geteuid() == 0:
             pytest.skip('root では chmod による読み取り不可を再現できない')
-        r1 = '/q/projects/pj_r/reports/worker1_report.yaml'
-        _delivered(led, r1, '950.0')
+        _delivered(led, PJ_A, ID1)
         before = led.path.read_bytes()
         os.chmod(led.path, 0)
-        led.claim('/q/projects/pj_r/reports/worker2_report.yaml', '951.0')
+        led.claim(PJ_A, ID2, PATH_A, SHA2)
         os.chmod(led.path, stat.S_IRUSR | stat.S_IWUSR)
         assert led.path.read_bytes() == before
 
-
-class TestPrecisionRegression:
-    """16g (PR #24 Claude review 6th #8): 20 桁 mtime の下位桁差分を正しく比較する."""
-
-    def test_42_lower_digit_newer_notifies(self, led: ReportLedger) -> None:
-        g2 = '/q/projects/pj_g2/reports/worker1_report.yaml'
-        _delivered(led, g2, '1786499353.1215575750')
-        assert led.claim(g2, '1786499353.1215575751').ok
-
-    def test_43_lower_digit_older_not_claimed(self, led: ReportLedger) -> None:
-        g2 = '/q/projects/pj_g2/reports/worker1_report.yaml'
-        _delivered(led, g2, '1786499353.1215575750')
-        _delivered(led, g2, '1786499353.1215575751')
-        assert not led.claim(g2, '1786499353.1215575750').ok
-
-
-class TestWriteFailure:
-    """17 (PR #24 Claude review #10): 書けない場合 commit/release は失敗を返し、記録は変えない."""
-
-    def test_44_commit_fails_when_unwritable(self, led: ReportLedger, tmp_path: Path) -> None:
-        if os.geteuid() == 0:
-            pytest.skip('root では chmod による書き込み不可を再現できない')
-        m = '/q/projects/pj_m/reports/worker1_report.yaml'
-        tok = led.claim(m, '600.0').token
-        ro_parent = led.path.parent
-        os.chmod(ro_parent, 0o500)
-        try:
-            assert not led.commit(m, '600.0', tok)
-        finally:
-            os.chmod(ro_parent, 0o700)
-
-    def test_45_release_fails_when_unwritable(self, led: ReportLedger, tmp_path: Path) -> None:
-        if os.geteuid() == 0:
-            pytest.skip('root では chmod による書き込み不可を再現できない')
-        m = '/q/projects/pj_m/reports/worker1_report.yaml'
-        tok = led.claim(m, '600.0').token
-        ro_parent = led.path.parent
-        os.chmod(ro_parent, 0o500)
-        try:
-            assert not led.release(m, tok, '', '')
-        finally:
-            os.chmod(ro_parent, 0o700)
-
-    def test_46_failed_write_does_not_change_record(self, led: ReportLedger, tmp_path: Path) -> None:
-        if os.geteuid() == 0:
-            pytest.skip('root では chmod による書き込み不可を再現できない')
-        m = '/q/projects/pj_m/reports/worker1_report.yaml'
-        tok = led.claim(m, '600.0').token
-        ro_parent = led.path.parent
-        os.chmod(ro_parent, 0o500)
-        try:
-            led.commit(m, '600.0', tok)
-            led.release(m, tok, '', '')
-        finally:
-            os.chmod(ro_parent, 0o700)
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        mt = conn.execute('SELECT mtime FROM reports WHERE path=?', (m,)).fetchone()[0]
-        conn.close()
-        assert mt == '600.0'
-
-
-class TestClaimFailOpen:
-    """17b (PR #24 Claude review #10): claim 側の異常系は通知側に倒れる."""
-
-    def test_47_claim_fails_open_when_db_dir_unwritable(self, led: ReportLedger, tmp_path: Path) -> None:
-        if os.geteuid() == 0:
-            pytest.skip('root では chmod による書き込み不可を再現できない')
-        p1 = '/q/projects/pj_p1/reports/worker1_report.yaml'
-        ro_parent = led.path.parent
-        os.chmod(ro_parent, 0o500)
-        try:
-            assert led.claim(p1, '900.0').ok
-        finally:
-            os.chmod(ro_parent, 0o700)
-
-    def test_48_failed_claim_returns_no_token(self, led: ReportLedger, tmp_path: Path) -> None:
-        if os.geteuid() == 0:
-            pytest.skip('root では chmod による書き込み不可を再現できない')
-        p1 = '/q/projects/pj_p1/reports/worker1_report.yaml'
-        ro_parent = led.path.parent
-        os.chmod(ro_parent, 0o500)
-        try:
-            rec = led.claim(p1, '900.5')
-        finally:
-            os.chmod(ro_parent, 0o700)
-        assert rec.token is None
-
-
-class TestUnopenableDb:
-    """17c: DB 自体を開けない場合も通知側に倒れる."""
-
-    def test_49_unopenable_db_path_fails_open(self, tmp_path: Path) -> None:
-        p2 = '/q/projects/pj_p2/reports/worker1_report.yaml'
+    def test_unopenable_db_path_fails_open(self, tmp_path: Path) -> None:
         led0 = ReportLedger(tmp_path / 'no_such_dir' / 'ledger.db')
-        assert led0.claim(p2, '910.0').ok
+        assert led0.claim(PJ_A, ID1, PATH_A, SHA1).ok
+
+    def test_commit_fails_when_unwritable(self, led: ReportLedger) -> None:
+        if os.geteuid() == 0:
+            pytest.skip('root では chmod による書き込み不可を再現できない')
+        tok = led.claim(PJ_A, ID1, PATH_A, SHA1).token
+        os.chmod(led.path.parent, 0o500)
+        try:
+            assert not led.commit(PJ_A, ID1, tok)
+        finally:
+            os.chmod(led.path.parent, 0o700)
+
+    def test_memory_backoff_applies_when_db_unusable(self, tmp_path: Path) -> None:
+        """DB が使えない間も同じ backoff を適用する (毎サイクル全速力で鳴らさない)."""
+        led0 = ReportLedger(tmp_path / 'no_such_dir' / 'ledger.db')
+        c = led0.claim(PJ_A, ID1, PATH_A, SHA1)
+        assert c.ok and c.token is None
+        led0.fail(PJ_A, ID1, c.token)
+        assert led0.claim(PJ_A, ID1, PATH_A, SHA1).status == 'held'
+
+    def test_memory_backoff_expires_and_resends(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        led0 = ReportLedger(tmp_path / 'no_such_dir' / 'ledger.db')
+        c = led0.claim(PJ_A, ID1, PATH_A, SHA1)
+        led0.fail(PJ_A, ID1, c.token)
+        later = time.time() + BACKOFF_SECONDS[0] + 1
+        monkeypatch.setattr(time, 'time', lambda: later)
+        assert led0.claim(PJ_A, ID1, PATH_A, SHA1).ok  # 沈黙せず再送する
 
 
-class TestBaselineSeed:
-    """18: baseline seed は queue/projects 配下の全 report を配達済みとして登録する."""
+class TestDbReset:
+    """DB を失っても沈黙しない (重複側へ倒れる)."""
 
-    def test_50_seed_creates_ledger(self, tmp_path: Path) -> None:
-        queue = tmp_path / 'queue'
-        pj_a, pj_b = queue / 'projects' / 'pj_a' / 'reports', queue / 'projects' / 'pj_b' / 'reports'
-        pj_a.mkdir(parents=True)
-        pj_b.mkdir(parents=True)
-        (pj_a / 'worker1_report.yaml').write_text('status: completed\n')
-        (pj_b / 'worker2_report.yaml').write_text('status: completed\n')
-        (pj_b / 'worker3_review.yaml').write_text('status: completed\n')
-        (pj_b / 'notes.md').write_text('not a report\n')
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        n = led0.baseline_seed(queue / 'projects')
-        assert n == 3
-        assert led0.exists()
-
-    def test_51_seed_registers_only_reports(self, tmp_path: Path) -> None:
-        queue = tmp_path / 'queue'
-        pj_a, pj_b = queue / 'projects' / 'pj_a' / 'reports', queue / 'projects' / 'pj_b' / 'reports'
-        pj_a.mkdir(parents=True)
-        pj_b.mkdir(parents=True)
-        (pj_a / 'worker1_report.yaml').write_text('status: completed\n')
-        r2 = pj_b / 'worker2_report.yaml'
-        r2.write_text('status: completed\n')
-        (pj_b / 'worker3_review.yaml').write_text('status: completed\n')
-        (pj_b / 'notes.md').write_text('not a report\n')
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        led0.baseline_seed(queue / 'projects')
-        import sqlite3
-
-        conn = sqlite3.connect(led0.path)
-        lease = conn.execute('SELECT lease FROM reports WHERE path=?', (str(r2),)).fetchone()[0]
-        conn.close()
-        assert lease == '0'
-
-    def test_52_seeded_report_not_renotified(self, tmp_path: Path) -> None:
-        from ledger import mtime_str
-
-        queue = tmp_path / 'queue'
-        pj_b = queue / 'projects' / 'pj_b' / 'reports'
-        pj_b.mkdir(parents=True)
-        r2 = pj_b / 'worker2_report.yaml'
-        r2.write_text('status: completed\n')
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        led0.baseline_seed(queue / 'projects')
-        assert not led0.claim(str(r2), mtime_str(r2)).ok
-
-    def test_53_seed_lock_failure_logs_and_returns_error(self, tmp_path: Path) -> None:
-        """18c: DB を開けない場所への seed は失敗 (-2) を返し、ledger を作らない."""
-        led0 = ReportLedger(tmp_path / 'no_such_dir_seed' / 'ledger.db')
-        n = led0.baseline_seed(tmp_path / 'nonexistent_projects')
-        assert n == -2
-        assert not led0.exists()
-
-    def test_54_seed_does_not_overwrite_existing(self, tmp_path: Path) -> None:
-        """19: seed 済み ledger がある状態で再実行しても上書きしない (先着優先)."""
-        queue = tmp_path / 'queue'
-        pj_a = queue / 'projects' / 'pj_a' / 'reports'
-        pj_a.mkdir(parents=True)
-        (pj_a / 'worker1_report.yaml').write_text('status: completed\n')
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        led0.baseline_seed(queue / 'projects')
-        import sqlite3
-
-        conn = sqlite3.connect(led0.path)
-        before = conn.execute('SELECT path, mtime, lease FROM reports').fetchall()
-        conn.close()
-        (pj_a / 'worker4_report.yaml').write_text('status: completed\n')
-        assert led0.baseline_seed(queue / 'projects') == -1
-        conn = sqlite3.connect(led0.path)
-        after = conn.execute('SELECT path, mtime, lease FROM reports').fetchall()
-        conn.close()
-        assert before == after
-
-    def test_55_report_written_after_seed_is_notified(self, tmp_path: Path) -> None:
-        from ledger import mtime_str
-
-        queue = tmp_path / 'queue'
-        pj_a = queue / 'projects' / 'pj_a' / 'reports'
-        pj_a.mkdir(parents=True)
-        (pj_a / 'worker1_report.yaml').write_text('status: completed\n')
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        led0.baseline_seed(queue / 'projects')
-        new_report = pj_a / 'worker4_report.yaml'
-        new_report.write_text('status: completed\n')
-        assert led0.claim(str(new_report), mtime_str(new_report)).ok
+    def test_report_renotified_after_db_loss(self, led: ReportLedger) -> None:
+        _delivered(led, PJ_A, ID1)
+        led.path.unlink()
+        assert led.claim(PJ_A, ID1, PATH_A, SHA1).ok
 
 
-class TestMtimeGt:
-    """mtime_gt() 単体: 整数部優先 + 小数部ゼロ詰め辞書順比較."""
+class TestReportIdentity:
+    def test_identity_extracts_sha_and_scalars(self) -> None:
+        sha, meta, err = report_identity(b'report_id: "abc"\ntask_id: T1\nsummary: |\n  block body\n')
+        assert err == ''
+        assert meta['report_id'] == 'abc'
+        assert meta['task_id'] == 'T1'
+        assert 'summary' not in meta  # block scalar 本文は読まない
+        assert len(sha) == 64
 
-    def test_56_equal_is_not_gt(self) -> None:
-        from ledger import mtime_gt
+    def test_identity_reports_decode_error(self) -> None:
+        _sha, meta, err = report_identity(b'\xff\xfe not utf-8')
+        assert err and meta == {}
 
-        assert not mtime_gt('100.5', '100.5')
+    def test_normalize_accepts_uuid_variants(self) -> None:
+        canonical = normalize_report_id(ID1)
+        assert normalize_report_id(ID1.upper()) == canonical
+        assert normalize_report_id(ID1.replace('-', '')) == canonical
 
-    def test_57_empty_prev_is_always_gt(self) -> None:
-        from ledger import mtime_gt
+    def test_normalize_rejects_non_uuid(self) -> None:
+        assert normalize_report_id('TBD') == ''
+        assert normalize_report_id('') == ''
 
-        assert mtime_gt('0.0', '')
+    def test_delivery_key_uses_report_id(self) -> None:
+        rid, invalid = delivery_key({'report_id': ID1}, SHA1, '')
+        assert (rid, invalid) == (ID1, '')
 
-    def test_58_integer_part_dominates(self) -> None:
-        from ledger import mtime_gt
+    def test_delivery_key_flags_missing_id(self) -> None:
+        rid, invalid = delivery_key({}, SHA1, '')
+        assert invalid
+        assert rid == f'INVALID:{SHA1}'  # 内容ハッシュ由来。UUID は推測しない
 
-        assert mtime_gt('101.0', '100.999999999')
+    def test_delivery_key_flags_non_uuid_id(self) -> None:
+        _rid, invalid = delivery_key({'report_id': 'TBD'}, SHA1, '')
+        assert invalid
 
-    def test_59_fraction_zero_padded_compare(self) -> None:
-        from ledger import mtime_gt
+    def test_delivery_key_flags_parse_error(self) -> None:
+        rid, invalid = delivery_key({}, SHA1, 'decode error')
+        assert invalid == 'decode error'
+        assert rid == f'INVALID:{SHA1}'
 
-        assert mtime_gt('100.2', '100.1')
-        assert not mtime_gt('100.1', '100.2')
+    def test_invalid_key_changes_when_content_changes(self) -> None:
+        """Schema 準拠に直せば別キーとして改めて通知される (直したのに黙らない)."""
+        assert delivery_key({}, SHA1, '')[0] != delivery_key({}, SHA2, '')[0]
 
 
 class TestFindReports:
-    """find_reports(): report/review パターンのみ列挙する."""
-
-    def test_60_finds_only_report_and_review(self, tmp_path: Path) -> None:
-        from ledger import find_reports
-
-        d = tmp_path / 'projects' / 'pj' / 'reports'
+    def test_finds_only_report_and_review_with_project(self, tmp_path: Path) -> None:
+        pj = tmp_path / 'projects' / 'pj'
+        d = pj / 'reports'
         d.mkdir(parents=True)
         (d / 'worker1_report.yaml').write_text('x')
         (d / 'worker2_review.yaml').write_text('x')
         (d / 'notes.md').write_text('x')
-        found = {p for p, _ in find_reports([tmp_path / 'projects' / 'pj'])}
-        assert found == {str(d / 'worker1_report.yaml'), str(d / 'worker2_review.yaml')}
+        assert set(find_reports([pj])) == {
+            ('pj', str(d / 'worker1_report.yaml')),
+            ('pj', str(d / 'worker2_review.yaml')),
+        }
 
-    def test_61_missing_dir_is_silently_empty(self, tmp_path: Path) -> None:
-        from ledger import find_reports
+    def test_archive_subdir_is_not_scanned(self, tmp_path: Path) -> None:
+        pj = tmp_path / 'projects' / 'pj'
+        (pj / 'reports' / 'archive').mkdir(parents=True)
+        (pj / 'reports' / 'archive' / 'worker1_report.yaml').write_text('x')
+        assert find_reports([pj]) == []
 
+    def test_missing_dir_is_silently_empty(self, tmp_path: Path) -> None:
         assert find_reports([tmp_path / 'does_not_exist']) == []
 
 
-class TestBrokenRowsIgnored:
-    """16: DB に無関係な操作をしても正常な判定は壊れない (sqlite3 なので破損行は原理的に生じない).
+class TestBaselineSeed:
+    """導入時 (ledger がまだ無い) の一斉通知だけを防ぐ. ID は実ファイルから読む."""
 
-    旧 awk 実装は「タブ 3 列に満たない行を無視する」耐性が必要だったが、sqlite3 化で
-    行の破損自体が構造的に起きなくなった。同等の頑健性 (新規 report は独立して通知される)
-    を新規 path での確認として残す。
-    """
+    def _queue(self, tmp_path: Path) -> Path:
+        queue = tmp_path / 'queue'
+        pj_a = queue / 'projects' / 'pj_a' / 'reports'
+        pj_a.mkdir(parents=True)
+        (pj_a / 'worker1_report.yaml').write_text(f'report_id: "{ID1}"\nstatus: completed\n')
+        (pj_a / 'worker2_review.yaml').write_text(f'report_id: "{ID2}"\nstatus: completed\n')
+        (pj_a / 'notes.md').write_text('not a report\n')
+        return queue
 
-    def test_62_new_report_notified_independently(self, led: ReportLedger) -> None:
-        l_path = '/q/projects/pj_l/reports/worker1_report.yaml'
-        assert led.claim(l_path, '500.0').ok
+    def test_seed_registers_reports_by_id(self, tmp_path: Path) -> None:
+        queue = self._queue(tmp_path)
+        led0 = ReportLedger(queue / '.report_ledger.db')
+        assert led0.baseline_seed(queue / 'projects') == 2
+        assert led0.claim('pj_a', ID1, 'x', SHA1).status == 'seen'
 
-    def test_63_delivered_report_skipped(self, led: ReportLedger) -> None:
-        l_path = '/q/projects/pj_l/reports/worker1_report.yaml'
-        _delivered(led, l_path, '500.0')
-        assert not led.claim(l_path, '500.0').ok
+    def test_seed_skips_reports_without_id(self, tmp_path: Path) -> None:
+        """ID の無い legacy report は推測キーで seed せず、後で 1 回 INVALID 通知させる."""
+        queue = self._queue(tmp_path)
+        (queue / 'projects' / 'pj_a' / 'reports' / 'worker3_report.yaml').write_text('status: completed\n')
+        led0 = ReportLedger(queue / '.report_ledger.db')
+        assert led0.baseline_seed(queue / 'projects') == 2
 
+    def test_seed_does_not_overwrite_existing_ledger(self, tmp_path: Path) -> None:
+        queue = self._queue(tmp_path)
+        led0 = ReportLedger(queue / '.report_ledger.db')
+        led0.baseline_seed(queue / 'projects')
+        assert led0.baseline_seed(queue / 'projects') == -1
 
-class TestSeedDelivered:
-    """seed_delivered(): 既存行を壊さず複数 report を配達済み登録する (SQUAD-210)."""
+    def test_seed_failure_creates_no_ledger(self, tmp_path: Path) -> None:
+        led0 = ReportLedger(tmp_path / 'no_such_dir_seed' / 'ledger.db')
+        assert led0.baseline_seed(tmp_path / 'nonexistent_projects') == -2
+        assert not led0.exists()
 
-    def test_68_seed_delivered_registers_new_rows(self, led: ReportLedger) -> None:
-        rows = [(A, '100.5'), (B, '200.0')]
-        assert led.seed_delivered(rows) == 2
-        assert not led.claim(A, '100.5').ok
-        assert not led.claim(B, '200.0').ok
-
-    def test_69_seed_delivered_does_not_overwrite_existing_row(self, led: ReportLedger) -> None:
-        """既に他 watcher が pending lease で claim 済みの行は seed で上書きしない."""
-        c = led.claim(A, '100.5')
-        assert c.ok
-        n = led.seed_delivered([(A, '999.0')])
-        assert n == 0
-        import sqlite3
-
-        conn = sqlite3.connect(led.path)
-        mt, ut = conn.execute('SELECT mtime, lease FROM reports WHERE path=?', (A,)).fetchone()
-        conn.close()
-        assert (mt, ut) == ('100.5', c.token)
-
-    def test_70_seed_delivered_empty_rows_is_noop(self, led: ReportLedger) -> None:
-        assert led.seed_delivered([]) == 0
-        assert not led.exists()
-
-    def test_71_seeded_report_not_renotified_but_newer_version_is(self, led: ReportLedger) -> None:
-        led.seed_delivered([(A, '100.5')])
-        assert not led.claim(A, '100.5').ok
-        assert led.claim(A, '101.0').ok  # seed 後に書かれた新版は通常どおり通知される
+    def test_report_written_after_seed_is_notified(self, tmp_path: Path) -> None:
+        queue = self._queue(tmp_path)
+        led0 = ReportLedger(queue / '.report_ledger.db')
+        led0.baseline_seed(queue / 'projects')
+        new_id = '33333333-3333-4333-8333-333333333333'
+        assert led0.claim('pj_a', new_id, 'x', SHA1).ok
 
 
-class TestLegacyMigration:
-    """旧タブ区切り ledger からの one-shot 移行 (README 記載手順のテスト)."""
+class TestMigration:
+    """旧 ledger は delivered ID へ推測変換せず、空の配達表へ移行する."""
 
-    def test_64_migrates_legacy_rows(self, tmp_path: Path) -> None:
-        legacy = tmp_path / '.report_ledger'
-        legacy.write_text(
-            '100.5\t0\t/q/projects/pj/reports/worker1_report.yaml\n'
-            '200.0\t123456:1-2\t/q/projects/pj/reports/worker2_report.yaml\n'
-        )
-        led0 = ReportLedger(tmp_path / '.report_ledger.db')
-        n = led0.migrate_legacy(legacy)
-        assert n == 2
-        assert not led0.claim('/q/projects/pj/reports/worker1_report.yaml', '100.5').ok
+    def test_legacy_text_at_ledger_path_is_replaced_with_empty_table(self, tmp_path: Path) -> None:
+        custom = tmp_path / 'custom-ledger'
+        custom.write_text('100.5\t0\t/q/projects/pj/reports/worker1_report.yaml\n')
+        led0 = ReportLedger(custom)
+        assert led0.migrate() == 'text'
+        assert led0.is_sqlite()
+        assert led0.claim('pj', ID1, 'x', SHA1).ok  # 旧行は引き継がない = 1 回再通知される
 
-    def test_65_migration_ignores_broken_rows(self, tmp_path: Path) -> None:
-        legacy = tmp_path / '.report_ledger'
-        legacy.write_text('broken-line\n100.5\t0\t/q/projects/pj/reports/worker1_report.yaml\n')
-        led0 = ReportLedger(tmp_path / '.report_ledger.db')
-        assert led0.migrate_legacy(legacy) == 1
-
-    def test_66_migration_skips_if_ledger_exists(self, tmp_path: Path) -> None:
+    def test_legacy_text_at_default_path_is_set_aside(self, tmp_path: Path) -> None:
         legacy = tmp_path / '.report_ledger'
         legacy.write_text('100.5\t0\t/q/projects/pj/reports/worker1_report.yaml\n')
         led0 = ReportLedger(tmp_path / '.report_ledger.db')
-        led0.claim('/some/other/path', '1.0')
-        assert led0.migrate_legacy(legacy) == -1
+        assert led0.migrate(legacy) == 'legacy-text'
+        assert led0.is_sqlite()
+        assert not legacy.exists()
+        assert (tmp_path / '.report_ledger.legacy').exists()  # 参照用に残す
 
-    def test_67_concurrent_replace_true_does_not_erase_migrated_records(self, tmp_path: Path) -> None:
-        """WATCH_LEDGER_FILE の in-place 移行で 2 watcher が同時に旧形式判定しても壊れない (F4)."""
+    def test_legacy_sqlite_schema_is_dropped(self, tmp_path: Path) -> None:
+        db = tmp_path / 'ledger.db'
+        conn = sqlite3.connect(db)
+        conn.execute('CREATE TABLE reports (path TEXT PRIMARY KEY, mtime TEXT NOT NULL, lease TEXT NOT NULL)')
+        conn.execute("INSERT INTO reports VALUES('/q/projects/pj/reports/worker1_report.yaml', '100.5', '0')")
+        conn.commit()
+        conn.close()
+        led0 = ReportLedger(db)
+        assert led0.migrate() == 'legacy-table'
+        assert led0.claim('pj', ID1, 'x', SHA1).ok
+        conn = sqlite3.connect(db)
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        conn.close()
+        assert 'reports' not in tables and 'deliveries' in tables
+
+    def test_migrate_is_noop_on_new_schema(self, tmp_path: Path) -> None:
+        led0 = ReportLedger(tmp_path / 'ledger.db')
+        _delivered(led0, PJ_A, ID1)
+        assert led0.migrate() == ''
+        assert led0.claim(PJ_A, ID1, PATH_A, SHA1).status == 'seen'  # 記録が消えていない
+
+    def test_migrate_is_noop_when_no_ledger(self, tmp_path: Path) -> None:
+        led0 = ReportLedger(tmp_path / 'ledger.db')
+        assert led0.migrate(tmp_path / 'nope') == ''
+        assert not led0.exists()
+
+    def test_concurrent_text_migration_does_not_erase_migrated_records(self, tmp_path: Path) -> None:
+        """2 watcher が同時に旧形式と判定しても、後から来た側が空 DB で上書きしない."""
         legacy = tmp_path / 'custom-ledger'
         legacy.write_text('100.5\t0\t/some/report.yaml\n')
-        a = ReportLedger(legacy)
-        b = ReportLedger(legacy)
-        assert not a.is_sqlite()
-        assert not b.is_sqlite()  # 両方が旧形式と判定した後で A→B の順に移行を実行する
-        assert a.migrate_legacy(legacy, replace=True) == 1
-        assert b.migrate_legacy(legacy, replace=True) == -1  # 既に sqlite3 化済みなので上書きしない
-        assert not b.claim('/some/report.yaml', '100.5').ok  # 移行済みレコードが残っている
+        a, b = ReportLedger(legacy), ReportLedger(legacy)
+        assert not a.is_sqlite() and not b.is_sqlite()
+        assert a.migrate() == 'text'
+        _delivered(a, PJ_A, ID1)
+        assert b.migrate() == ''  # 既に sqlite3 化済みなので触らない
+        assert b.claim(PJ_A, ID1, PATH_A, SHA1).status == 'seen'

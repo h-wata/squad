@@ -94,39 +94,44 @@ tmux attach -t myproj
 `squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
 
 report を Dispatcher に通知したかどうかは、セッションをまたいで共有する永続 ledger
-`queue/.report_ledger.db` (sqlite3, 更新は `BEGIN IMMEDIATE` で直列化) で管理する。
+`queue/.report_ledger.db` (sqlite3, 更新は `BEGIN IMMEDIATE` で直列化) が
+**`(project, report_id)`** 単位で管理する。`report_id` は worker が report を新規作成する
+ときに一度だけ発番する UUIDv4 で、修正・再出力・archive への移動では変えない。
 project の担当セッションが移っても、既に別の watcher が通知した report は再通知されない。
 通知は「配達権の取得 (期限付き lease) → 送信成功で配達済みを確定」の 2 段階で、送信に
-失敗した report や、送信前に watcher が落ちた report は lease 期限切れ後に再送される
-(期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。
-ledger を消す場合は必ず全 watcher を止めてから行うこと。watcher 稼働中に消すと、
-既存 report の一括登録 (seed) は起動時にしか走らないため、次のサイクルで既存 report が
-全件「新着」として一斉再通知される。停止中に消して起動し直せば、seed が既存 report を
-通知済みとして登録し直すので一斉再通知は起きない (ただし停止中の別セッションが担当する
-未通知 report も通知済みとして登録される)。逆に、ledger がある状態で
-`queue/projects/<pj>` を後から配置した場合 (archive からの復元など) は、その project の
-既存 report が新着として一斉に通知される。通知させたくない場合は復元前に watcher を
-止め、ledger に該当行を追記するか ledger ごと作り直す。
+失敗した report は 15秒 → 60秒 → 5分 → 30分 → 以降 30分ごとで再送される (試行回数の上限は
+無い。lease 期限は `WATCH_LEDGER_LEASE`、既定 60 秒)。
+
+mtime は配達判定に使わない。mtime は変更時刻であって到着時刻ではなく、mv/cp や archive
+からの復帰で過去の値を保てるため、同一性・順序の代理にすると report を握り潰す。
+`report_id` が無い / UUID でない / YAML を解釈できない report は握り潰さず、
+`[REPORT-INVALID]` として Dispatcher に通知され、schema 準拠での再出力を促す。
+
+ledger を消したり `queue/projects/<pj>` を後から配置したりすると、その project の既存
+report が 1 回だけ再通知される (以後は `report_id` で抑止される)。Dispatcher は通知末尾の
+`report_id` が既知のものと一致すれば重複として無視してよい。
 
 ### ledger の実体は sqlite3 (`queue/.report_ledger.db`)
 
-`watch.sh` は薄いラッパで、実処理は `squad/watchd.py` (stdlib only) が行う。ledger も
-旧タブ区切りテキスト (`queue/.report_ledger`, `flock` で排他制御) から sqlite3 DB
-(`queue/.report_ledger.db`, `squad/ledger.py` の `BEGIN IMMEDIATE` トランザクションで排他制御)
-に置き換わった。ファイルパスは `WATCH_LEDGER_FILE` 環境変数で上書きできる。
+`watch.sh` は薄いラッパで、実処理は `squad/watchd.py` (stdlib only) が行う。ledger は
+`squad/ledger.py` の `deliveries` テーブル (`(project, report_id)` 主キー、path、
+content_sha256、state、lease、attempt_count、next_attempt_at) で、排他は
+`BEGIN IMMEDIATE` トランザクションで行う。ファイルパスは `WATCH_LEDGER_FILE` 環境変数で
+上書きできる。
 
 移行は自動で、手動操作は不要:
 
-- watcher 起動時、sqlite3 ledger (`queue/.report_ledger.db`) が無く、旧タブ区切り
-  ledger (`queue/.report_ledger`) が存在する場合、`ReportLedger.migrate_legacy()` が
-  既存の通知済みレコードをそのまま sqlite3 へ取り込んでから起動する
-  (旧ファイルは削除されず残る。ログに移行件数が出力される)。
-- `WATCH_LEDGER_FILE` が旧タブ区切りテキストを直接指している場合も、起動時にその場で
-  sqlite3 へ変換して置き換える (変換できないときは WARN を出す)。
-- 旧 ledger も sqlite3 ledger も無い場合は、従来通り baseline seed
-  (既存 report を通知済みとして一括登録) が走る。
+- 旧 schema (`reports` テーブル: path + mtime) や旧タブ区切りテキスト
+  (`queue/.report_ledger`) が見つかった場合、**旧行は引き継がず**空の配達表へ移行する。
+  旧行は path と mtime しか持たず `report_id` を安全に復元できないため、推測で「配達済み」
+  にすると未配達 report を永久に沈黙させ得るからである。移行後は既存 report が最大 1 回だけ
+  再通知され、その旨が起動時に log と Dispatcher 通知 (`[LEDGER] ...`) で明示される。
+- 旧タブ区切りテキストは `queue/.report_ledger.legacy` へ退避される (参照用)。
+- ledger がまだ 1 つも無い新規導入時のみ、baseline seed が既存 report を
+  (実ファイルから読んだ `report_id` で) 通知済みとして登録する。`report_id` を持たない
+  report は seed されず、後から `[REPORT-INVALID]` として 1 回通知される。
 
-手動で確認したい場合は `sqlite3 queue/.report_ledger.db 'select * from reports;'`
+手動で確認したい場合は `sqlite3 queue/.report_ledger.db 'select * from deliveries;'`
 のように直接クエリできる (スキーマは `squad/ledger.py` 参照)。
 
 ## Dispatcher 起動モデルのカスタマイズ

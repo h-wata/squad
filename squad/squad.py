@@ -11,7 +11,7 @@ Subcommands:
   ls / status               全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
   dashboard                 Worker ステータス表を生成して stdout
-  ledger claim/commit/release/seed
+  ledger claim/commit/fail/seed
                              report 配達 ledger (squad/ledger.py, sqlite3) を手動操作する
                              デバッグ用 CLI。watchd.py 自体は ReportLedger をプロセス内で
                              直接呼ぶため通常運用では使わない (Issue #26)。
@@ -373,19 +373,19 @@ def _ledger(args: argparse.Namespace) -> ReportLedger:
 
 
 def cmd_ledger_claim(args: argparse.Namespace, _cfg: dict) -> int:
-    c = _ledger(args).claim(args.path, args.mtime)
+    c = _ledger(args).claim(args.project, args.report_id, args.path, args.sha)
     print(json.dumps(c._asdict(), ensure_ascii=False))
     return 0 if c.ok else 1
 
 
 def cmd_ledger_commit(args: argparse.Namespace, _cfg: dict) -> int:
-    ok = _ledger(args).commit(args.path, args.mtime, args.token)
+    ok = _ledger(args).commit(args.project, args.report_id, args.token)
     print(json.dumps({'ok': ok}))
     return 0 if ok else 1
 
 
-def cmd_ledger_release(args: argparse.Namespace, _cfg: dict) -> int:
-    ok = _ledger(args).release(args.path, args.token, args.prev_mtime or '', args.prev_lease or '')
+def cmd_ledger_fail(args: argparse.Namespace, _cfg: dict) -> int:
+    ok = _ledger(args).fail(args.project, args.report_id, args.token)
     print(json.dumps({'ok': ok}))
     return 0 if ok else 1
 
@@ -421,18 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     p_ledger = sub.add_parser('ledger', help='report 配達 ledger (sqlite3) の手動操作 (デバッグ用)')
     ledger_sub = p_ledger.add_subparsers(dest='ledger_cmd', required=True)
     for name, func, extra in (
-        ('claim', cmd_ledger_claim, (('path', {}), ('mtime', {}))),
-        ('commit', cmd_ledger_commit, (('path', {}), ('mtime', {}), ('token', {}))),
-        (
-            'release',
-            cmd_ledger_release,
-            (
-                ('path', {}),
-                ('token', {}),
-                ('prev_mtime', {'nargs': '?', 'default': ''}),
-                ('prev_lease', {'nargs': '?', 'default': ''}),
-            ),
-        ),
+        ('claim', cmd_ledger_claim, (('project', {}), ('report_id', {}), ('path', {}), ('sha', {}))),
+        ('commit', cmd_ledger_commit, (('project', {}), ('report_id', {}), ('token', {}))),
+        ('fail', cmd_ledger_fail, (('project', {}), ('report_id', {}), ('token', {}))),
         ('seed', cmd_ledger_seed, (('projects_dir', {}),)),
     ):
         p = ledger_sub.add_parser(name)
