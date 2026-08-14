@@ -127,9 +127,10 @@ content_sha256、state、lease、attempt_count、next_attempt_at) で、排他�
   にすると未配達 report を永久に沈黙させ得るからである。移行後は既存 report が最大 1 回だけ
   再通知され、その旨が起動時に log と Dispatcher 通知 (`[LEDGER] ...`) で明示される。
 - 旧タブ区切りテキストは `queue/.report_ledger.legacy` へ退避される (参照用)。
-- ledger がまだ 1 つも無い新規導入時のみ、baseline seed が既存 report を
-  (実ファイルから読んだ `report_id` で) 通知済みとして登録する。`report_id` を持たない
-  report は seed されず、後から `[REPORT-INVALID]` として 1 回通知される。
+- ledger がまだ 1 つも無い場合の一括登録 (baseline seed) は行わない。新規導入・DB 消失・
+  再作成のいずれも区別できず、区別せずに登録すると未配達 report を永久に沈黙させ得るため。
+  この場合も reports/ にある report はそのまま通常どおり通知される (導入直後は一斉通知に
+  なるが、鳴らさないより鳴らす方を優先する)。
 
 手動で確認したい場合は `sqlite3 queue/.report_ledger.db 'select * from deliveries;'`
 のように直接クエリできる (スキーマは `squad/ledger.py` 参照)。

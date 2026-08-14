@@ -326,7 +326,7 @@ class Watcher:
             except OSError:
                 continue  # 走査中に消えた/読めない。次サイクルで再評価する
             sha, meta, parse_error = report_identity(data)
-            report_id, invalid = delivery_key(meta, sha, parse_error)
+            report_id, invalid = delivery_key(meta, sha, parse_error, path)
             claim = self.ledger.claim(project, report_id, path, sha)
             if not claim.ok:
                 continue
@@ -740,33 +740,28 @@ class Watcher:
     # ---- ループ ----
 
     def prepare_ledger(self) -> None:
-        """旧 schema の ledger を新 schema へ移行し、ledger 自体が無ければ baseline seed する.
+        """旧 schema の ledger を新 schema へ移行する.
 
         旧 ledger (path + mtime) の行は report_id を復元できないため引き継がない。移行後は
         reports/ に残る report が最大 1 回だけ再通知されるので、その旨を起動時に 1 度だけ
         Dispatcher にも伝える (重複を「異常」と誤解させないため)。
+
+        ledger が最初から無い場合も seed はしない。「新規導入だから鳴らさない」を
+        「ledger が (何らかの理由で) 存在しない」と区別できず、DB 消失や再作成のたびに
+        report を delivered へ登録して永久沈黙させてしまうため。導入直後の一斉通知は、
+        鳴らさないことより確実に鳴ることを優先するユーザー方針のもとでは許容する。
         """
         kind = self.ledger.migrate(self.cfg.legacy_ledger_path)
-        if kind:
-            msg = (
-                f'[LEDGER] 配達 ledger を report_id ベースの新 schema へ移行しました '
-                f'({self.cfg.ledger_path}, {kind})。旧記録 (path+mtime) からは report_id を '
-                '復元できないため配達済みへは変換していません。既存 report が最大 1 回だけ '
-                '再通知されます。report_id が既知のものと一致する通知は重複として無視してください。'
-            )
-            self.log(msg)
-            self.notify_dispatcher(msg)
+        if not kind:
             return
-        if self.ledger.exists():
-            return
-        n = self.ledger.baseline_seed(self.cfg.projects_dir)
-        if n >= 0:
-            self.log(f'ledger baseline: 既存 report {n} 件を通知済みとして登録 (通知なし)')
-        elif n == -2:
-            self.log(
-                f'[WARN] ledger baseline seed に失敗しました: {self.cfg.ledger_path} '
-                '既存 report が一斉通知される可能性があります'
-            )
+        msg = (
+            f'[LEDGER] 配達 ledger を report_id ベースの新 schema へ移行しました '
+            f'({self.cfg.ledger_path}, {kind})。旧記録 (path+mtime) からは report_id を '
+            '復元できないため配達済みへは変換していません。既存 report が最大 1 回だけ '
+            '再通知されます。report_id が既知のものと一致する通知は重複として無視してください。'
+        )
+        self.log(msg)
+        self.notify_dispatcher(msg)
 
     def cycle(self) -> None:
         """1 サイクル分の監視処理."""

@@ -339,6 +339,25 @@ class TestInvalidReport:
         w.report_bridge()
         assert len(notifications(w.tmux.sent)) == 1
 
+    def test_same_content_invalid_reports_at_different_paths_both_notified(
+        self, watcher: tuple[Watcher, Path]
+    ) -> None:
+        """F2 回帰: 別 worker が偶然同じ内容 (report_id 欠落) の report を書いても両方通知される.
+
+        配達キーが内容ハッシュだけだと、同じ project 内で同一 bytes の別ファイルが
+        キーを共有し、先に claim された方だけが delivered になって 2 件目が握り潰される。
+        """
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, name='worker1_report.yaml', report_id=None)
+        write_report(d, name='worker2_report.yaml', report_id=None)  # worker1 と同一 bytes
+        w.refresh_owned_projects()
+        w.report_bridge()
+        msgs = notifications(w.tmux.sent, '[REPORT-INVALID')
+        assert len(msgs) == 2
+        assert any('worker1_report.yaml' in m for m in msgs)
+        assert any('worker2_report.yaml' in m for m in msgs)
+
 
 class TestStallDetection:
     def test_pending_task_stall_notifies_after_n_cycles(self, watcher: tuple[Watcher, Path]) -> None:
@@ -657,16 +676,46 @@ class TestLedgerPrepare:
         assert not w.ledger.claim('pj', ID1, '/some/report.yaml', 'a' * 64).ok  # 記録が消えていない
         assert w.tmux.sent == []  # 移行していないので通知もしない
 
-    def test_prepare_ledger_seeds_existing_reports_on_first_install(self, tmp_path: Path) -> None:
+    def test_prepare_ledger_does_not_seed_existing_reports(self, tmp_path: Path) -> None:
+        """F1 回帰: ledger が無い状態からの一括登録 (baseline seed) は行わない.
+
+        新規導入と DB 消失/再作成は「ledger が存在しない」という観測だけでは区別できない。
+        区別せずに既存 report を delivered へ登録すると、DB 消失時にまだ配達していない
+        report まで沈黙させてしまう。導入直後は一斉通知になる方を受け入れる。
+        """
         queue = tmp_path / 'queue'
         d = make_project(queue, 'pj', session='testsess')
         write_report(d)
         w = self._watcher(queue)
         w.prepare_ledger()
-        assert w.ledger.exists()
         w.refresh_owned_projects()
         w.report_bridge()
-        assert notifications(w.tmux.sent) == []  # 導入時に過去 report を一斉通知しない
+        assert len(notifications(w.tmux.sent)) == 1  # 沈黙せず通知される
+
+    def test_prepare_ledger_does_not_create_ledger_file_by_itself(self, tmp_path: Path) -> None:
+        """Seed が無いので、report が無ければ prepare_ledger() だけでは ledger を作らない."""
+        queue = tmp_path / 'queue'
+        queue.mkdir()
+        w = self._watcher(queue)
+        w.prepare_ledger()
+        assert not w.ledger.exists()
+
+    def test_ledger_lost_between_cycles_renotifies_once(self, tmp_path: Path) -> None:
+        """DB 消失からの再作成でも、未配達 report を沈黙させない (F1 の核心)."""
+        queue = tmp_path / 'queue'
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)
+        w = self._watcher(queue)
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert len(notifications(w.tmux.sent)) == 1
+
+        w.ledger.path.unlink()  # DB 消失
+        w.prepare_ledger()  # 再作成 (migrate() は旧 schema が無いので no-op)
+        write_report(d, name='worker2_report.yaml', report_id=ID2)  # 消失中に届いた新規 report
+        w.report_bridge()
+        # worker1 (再通知, DB 消失で未配達扱いに戻る) + worker2 (新規) の 2 件が今回追加で届く
+        assert len(notifications(w.tmux.sent)) == 3
 
 
 def test_posix_cksum_matches_coreutils() -> None:

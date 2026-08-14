@@ -11,7 +11,7 @@ Subcommands:
   ls / status               全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
   dashboard                 Worker ステータス表を生成して stdout
-  ledger claim/commit/fail/seed
+  ledger claim/commit/fail
                              report 配達 ledger (squad/ledger.py, sqlite3) を手動操作する
                              デバッグ用 CLI。watchd.py 自体は ReportLedger をプロセス内で
                              直接呼ぶため通常運用では使わない (Issue #26)。
@@ -390,12 +390,6 @@ def cmd_ledger_fail(args: argparse.Namespace, _cfg: dict) -> int:
     return 0 if ok else 1
 
 
-def cmd_ledger_seed(args: argparse.Namespace, _cfg: dict) -> int:
-    n = _ledger(args).baseline_seed(Path(args.projects_dir))
-    print(json.dumps({'seeded': n}))
-    return 0 if n >= 0 else 1
-
-
 # ---------- entry ----------
 
 
@@ -424,7 +418,6 @@ def main(argv: list[str] | None = None) -> int:
         ('claim', cmd_ledger_claim, (('project', {}), ('report_id', {}), ('path', {}), ('sha', {}))),
         ('commit', cmd_ledger_commit, (('project', {}), ('report_id', {}), ('token', {}))),
         ('fail', cmd_ledger_fail, (('project', {}), ('report_id', {}), ('token', {}))),
-        ('seed', cmd_ledger_seed, (('projects_dir', {}),)),
     ):
         p = ledger_sub.add_parser(name)
         for arg_name, kwargs in extra:

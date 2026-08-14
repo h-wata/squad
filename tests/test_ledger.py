@@ -368,26 +368,32 @@ class TestReportIdentity:
         assert normalize_report_id('') == ''
 
     def test_delivery_key_uses_report_id(self) -> None:
-        rid, invalid = delivery_key({'report_id': ID1}, SHA1, '')
+        rid, invalid = delivery_key({'report_id': ID1}, SHA1, '', PATH_A)
         assert (rid, invalid) == (ID1, '')
 
     def test_delivery_key_flags_missing_id(self) -> None:
-        rid, invalid = delivery_key({}, SHA1, '')
+        rid, invalid = delivery_key({}, SHA1, '', PATH_A)
         assert invalid
-        assert rid == f'INVALID:{SHA1}'  # 内容ハッシュ由来。UUID は推測しない
+        assert rid == f'INVALID:{PATH_A}:{SHA1}'  # path + 内容ハッシュ由来。UUID は推測しない
 
     def test_delivery_key_flags_non_uuid_id(self) -> None:
-        _rid, invalid = delivery_key({'report_id': 'TBD'}, SHA1, '')
+        _rid, invalid = delivery_key({'report_id': 'TBD'}, SHA1, '', PATH_A)
         assert invalid
 
     def test_delivery_key_flags_parse_error(self) -> None:
-        rid, invalid = delivery_key({}, SHA1, 'decode error')
+        rid, invalid = delivery_key({}, SHA1, 'decode error', PATH_A)
         assert invalid == 'decode error'
-        assert rid == f'INVALID:{SHA1}'
+        assert rid == f'INVALID:{PATH_A}:{SHA1}'
 
     def test_invalid_key_changes_when_content_changes(self) -> None:
         """Schema 準拠に直せば別キーとして改めて通知される (直したのに黙らない)."""
-        assert delivery_key({}, SHA1, '')[0] != delivery_key({}, SHA2, '')[0]
+        assert delivery_key({}, SHA1, '', PATH_A)[0] != delivery_key({}, SHA2, '', PATH_A)[0]
+
+    def test_invalid_key_differs_by_path_for_same_content(self) -> None:
+        """同一内容・別 path の invalid report はキーが衝突せず両方通知対象になる (F2 回帰)."""
+        key_a, _ = delivery_key({}, SHA1, '', PATH_A)
+        key_b, _ = delivery_key({}, SHA1, '', PATH_B)
+        assert key_a != key_b
 
 
 class TestFindReports:
@@ -413,48 +419,17 @@ class TestFindReports:
         assert find_reports([tmp_path / 'does_not_exist']) == []
 
 
-class TestBaselineSeed:
-    """導入時 (ledger がまだ無い) の一斉通知だけを防ぐ. ID は実ファイルから読む."""
+class TestNoBaselineSeed:
+    """ledger が無い状態からの一括登録 (baseline seed) は行わない (F1 回帰).
 
-    def _queue(self, tmp_path: Path) -> Path:
-        queue = tmp_path / 'queue'
-        pj_a = queue / 'projects' / 'pj_a' / 'reports'
-        pj_a.mkdir(parents=True)
-        (pj_a / 'worker1_report.yaml').write_text(f'report_id: "{ID1}"\nstatus: completed\n')
-        (pj_a / 'worker2_review.yaml').write_text(f'report_id: "{ID2}"\nstatus: completed\n')
-        (pj_a / 'notes.md').write_text('not a report\n')
-        return queue
+    新規導入・DB 消失・再作成のいずれも「ledger が存在しない」という観測だけでは区別
+    できない。区別せずに既存 report を delivered へ登録すると、DB 消失時にまだ配達して
+    いない report まで沈黙させてしまう。鳴らない経路をゼロにする方針のもとでは、
+    導入直後に一斉通知になる方を受け入れる。
+    """
 
-    def test_seed_registers_reports_by_id(self, tmp_path: Path) -> None:
-        queue = self._queue(tmp_path)
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        assert led0.baseline_seed(queue / 'projects') == 2
-        assert led0.claim('pj_a', ID1, 'x', SHA1).status == 'seen'
-
-    def test_seed_skips_reports_without_id(self, tmp_path: Path) -> None:
-        """ID の無い legacy report は推測キーで seed せず、後で 1 回 INVALID 通知させる."""
-        queue = self._queue(tmp_path)
-        (queue / 'projects' / 'pj_a' / 'reports' / 'worker3_report.yaml').write_text('status: completed\n')
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        assert led0.baseline_seed(queue / 'projects') == 2
-
-    def test_seed_does_not_overwrite_existing_ledger(self, tmp_path: Path) -> None:
-        queue = self._queue(tmp_path)
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        led0.baseline_seed(queue / 'projects')
-        assert led0.baseline_seed(queue / 'projects') == -1
-
-    def test_seed_failure_creates_no_ledger(self, tmp_path: Path) -> None:
-        led0 = ReportLedger(tmp_path / 'no_such_dir_seed' / 'ledger.db')
-        assert led0.baseline_seed(tmp_path / 'nonexistent_projects') == -2
-        assert not led0.exists()
-
-    def test_report_written_after_seed_is_notified(self, tmp_path: Path) -> None:
-        queue = self._queue(tmp_path)
-        led0 = ReportLedger(queue / '.report_ledger.db')
-        led0.baseline_seed(queue / 'projects')
-        new_id = '33333333-3333-4333-8333-333333333333'
-        assert led0.claim('pj_a', new_id, 'x', SHA1).ok
+    def test_baseline_seed_api_is_gone(self) -> None:
+        assert not hasattr(ReportLedger, 'baseline_seed')
 
 
 class TestMigration:

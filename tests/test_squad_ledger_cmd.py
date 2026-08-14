@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ruff: noqa: CPY001
-"""squad.py `ledger` サブコマンド (claim/commit/fail/seed) のテスト.
+"""squad.py `ledger` サブコマンド (claim/commit/fail) のテスト.
 
 watchd.py は ReportLedger をプロセス内で直接呼ぶため使わないが、Issue #26 が要求する
 手動操作用 CLI として squad.py に実装したもの (squad/ledger.py の薄いラッパ)。
@@ -25,7 +25,7 @@ def _run(*argv: str, capsys: pytest.CaptureFixture) -> tuple[int, str]:
     return code, capsys.readouterr().out.strip()
 
 
-def test_claim_commit_seed_roundtrip(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+def test_claim_commit_roundtrip(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     db = tmp_path / 'ledger.db'
     report = tmp_path / 'report.yaml'
     report.write_text('x')
@@ -43,8 +43,10 @@ def test_claim_commit_seed_roundtrip(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert code == 1  # 配達済みなので claim できない
     assert '"status": "seen"' in out
 
-    code, out = _run('ledger', 'seed', str(tmp_path), '--ledger-file', str(db), capsys=capsys)
-    assert code == 1  # ledger が既にあるので baseline_seed は -1 (seeded 済み扱い)
+
+def test_seed_subcommand_is_gone(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    with pytest.raises(SystemExit):
+        _run('ledger', 'seed', str(tmp_path), capsys=capsys)
 
 
 def test_fail_schedules_retry(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

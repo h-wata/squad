@@ -27,6 +27,16 @@
 - `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
   届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
   呼び出しを追加した (SQUAD-212)。
+- `squad/ledger.py`: `ReportLedger.baseline_seed()` を廃止した。ledger が存在しない
+  ことを「新規導入」と「DB 消失・再作成」で区別できないまま delivered 登録していたため、
+  DB 消失からの再作成時にまだ配達していない report まで永久に沈黙させる経路になっていた
+  (SQUAD-218)。`Watcher.prepare_ledger()` からも呼び出しを削除し、`squad ledger seed`
+  CLI サブコマンドも撤去した。導入直後は既存 report が一斉通知されるが、鳴らない経路を
+  ゼロにする方針の下ではこれを受け入れる。
+- `squad/ledger.py`: `delivery_key()` が返す invalid (`[REPORT-INVALID]`) 用キーに
+  `path` を追加した。同一 project 内で report_id 欠落の別 worker が偶然同一内容の
+  report を書くと、内容ハッシュだけをキーにしていたため一方だけが delivered となり、
+  もう一方が永久に沈黙していた (SQUAD-218)。
 
 ### Changed
 
@@ -51,8 +61,9 @@
   - 旧 ledger (`reports` テーブル、または旧タブ区切りテキスト) は **delivered ID へ推測変換
     せず**空の配達表へ移行する。移行完了は log と Dispatcher 通知 (`[LEDGER] …`) で明示し、
     既存 report は最大 1 回だけ再通知される。旧テキストは `.legacy` へ退避する。
-  - `squad/squad.py` の `ledger` サブコマンドを `claim/commit/fail/seed` へ更新
-    (claim は `<project> <report_id> <path> <sha>` を取る)。
+  - `squad/squad.py` の `ledger` サブコマンドを `claim/commit/fail` へ更新
+    (claim は `<project> <report_id> <path> <sha>` を取る。`seed` は後日 baseline_seed
+    廃止に伴い削除、詳細は Fixed 参照)。
 - `watch.sh` (794行 bash) を `squad/watchd.py` + `squad/ledger.py` (stdlib only) へ
   全面移植し、`watch.sh` はそれを呼ぶ薄いラッパ (797→15行) に置き換えた (Issue #26)。
   report ledger は旧タブ区切りテキスト + `flock` から sqlite3 (`BEGIN IMMEDIATE`

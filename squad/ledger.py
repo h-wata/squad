@@ -129,22 +129,25 @@ def report_identity(data: bytes) -> tuple[str, dict[str, str], str]:
     return sha, parse_scalars(text), ''
 
 
-def delivery_key(meta: dict[str, str], sha: str, parse_error: str) -> tuple[str, str]:
+def delivery_key(meta: dict[str, str], sha: str, parse_error: str, path: str) -> tuple[str, str]:
     """配達キーとして使う report_id と、無効な場合の理由を返す.
 
     Returns:
         (report_id, invalid_reason)。invalid_reason が空でなければ [REPORT-INVALID] 扱い。
-        その場合 report_id は内容ハッシュ由来の決定的なキーになり、内容が直るまで
-        1 回だけ通知され、直せば別キーとして改めて通知される。
+        その場合の配達キーは path + 内容ハッシュ由来の決定的なキーになる。path を含めるのは、
+        同じ project 内で report_id 欠落の別 worker が偶然同じ内容 (例: 同じテンプレートの
+        コピペ漏れ) の report を書いたとき、sha だけをキーにすると片方が「配達済み」を共有して
+        もう片方が永久に通知されなくなるため。内容が直るまで path ごとに 1 回だけ通知され、
+        直せば別キー (正規の report_id) として改めて通知される。
     """
     if parse_error:
-        return f'{INVALID_PREFIX}{sha}', parse_error
+        return f'{INVALID_PREFIX}{path}:{sha}', parse_error
     raw = meta.get('report_id', '')
     if not raw:
-        return f'{INVALID_PREFIX}{sha}', 'report_id 欠落'
+        return f'{INVALID_PREFIX}{path}:{sha}', 'report_id 欠落'
     rid = normalize_report_id(raw)
     if not rid:
-        return f'{INVALID_PREFIX}{sha}', f'report_id が UUID ではありません: {raw!r}'
+        return f'{INVALID_PREFIX}{path}:{sha}', f'report_id が UUID ではありません: {raw!r}'
     return rid, ''
 
 
@@ -385,38 +388,6 @@ class ReportLedger:
             return int(count)
         finally:
             tmp.unlink(missing_ok=True)
-
-    def baseline_seed(self, projects_dir: Path) -> int:
-        """導入時に既存 report を配達済みとして一括登録する (初回起動の一斉通知を防ぐ).
-
-        ledger がまだ 1 つも無い状態 (= 新規導入) でのみ実行する。report_id は各 report を
-        実際に読んで取得するので、mtime による推測は行わない。report_id を持たない legacy
-        report は登録せず、[REPORT-INVALID] として 1 回通知される (握り潰さない)。
-
-        対象は担当 project ではなく queue/projects 配下の全 report。後から起動した別
-        セッションの watcher は「ledger がある = seed 済み」としか判断しないため、担当分
-        しか seed しないとその watcher が過去 report を一斉通知してしまう。
-
-        Returns:
-            登録件数。既に ledger がある場合は -1、失敗した場合は -2。
-        """
-        if self.path.exists():
-            return -1
-        try:
-            dirs = sorted(p for p in projects_dir.iterdir() if p.is_dir()) if projects_dir.is_dir() else []
-            rows: list[tuple[str, str, str, str]] = []
-            for project, path in find_reports(dirs):
-                try:
-                    sha, meta, err = report_identity(Path(path).read_bytes())
-                except OSError:
-                    continue
-                rid, invalid = delivery_key(meta, sha, err)
-                if invalid:
-                    continue  # 推測でキーを作らない。初回に [REPORT-INVALID] として鳴らす
-                rows.append((project, rid, path, sha))
-            return self._build(rows)
-        except (OSError, sqlite3.Error):
-            return -2
 
     def migrate(self, legacy_text: Path | None = None) -> str:
         """旧 ledger を report_id ベースの新 schema へ移行する.
