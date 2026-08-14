@@ -331,6 +331,25 @@ class ReportLedger:
         except sqlite3.Error:
             return False
 
+    def is_delivered(self, project: str, report_id: str) -> bool:
+        """(project, report_id) が既に delivered 状態か (読み取り専用、fail-closed).
+
+        DB を開けない場合は False を返す (「配達済みと誤認して停止検知を止める」方向には
+        絶対に倒さない。呼び出し側の Step 6 判定は「わからなければ従来どおり停止判定する」
+        設計なので、ここは fail-open ではなく fail-closed が正しい)。
+        """
+        try:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    'SELECT state FROM deliveries WHERE project = ? AND report_id = ?', (project, report_id)
+                ).fetchone()
+            finally:
+                conn.close()
+            return bool(row) and row[0] == DELIVERED
+        except sqlite3.Error:
+            return False
+
     def exists(self) -> bool:
         return self.path.exists()
 
