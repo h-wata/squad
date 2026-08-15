@@ -154,6 +154,16 @@ description: |
   - test 結果
   - 報告は `queue/projects/<project>/reports/worker<N>_report.yaml` に書く
 
+evidence_card:               # 任意。ただし過去ログ/メトリクスの集計 (historical measurement) や
+  claim: "..."               # DB の件数・棚卸し (data inventory) を根拠にする task では必須。
+  evidence_as_of: "..."      # Dispatcher から根拠の出所が渡っていなければ、埋めずに
+  data_window: "..."         # 「evidence_card 未記入のため dispatch 不可」と返す。
+  semantic_definition: "..."  # raw / logical / effective のどれを指すか
+  current_state_check: "..."  # git log / merged PR / CHANGELOG / ADR 確認結果 (該当なしも明記)
+  disconfirming_check: "..."
+  decision_if_false: "..."   # 反証時の扱い (例: 調査で打ち切り、修正 task を作らない)
+                             # 免除: 非コードタスク・typo/小修正。定義は queue/templates/task.yaml
+
 acceptance_criteria:
   - "..."
   - "..."

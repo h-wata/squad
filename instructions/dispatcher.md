@@ -162,6 +162,14 @@ priority: high
 title: "タスクのタイトル"
 description: |
   詳細
+evidence_card:           # 任意。過去の実測・DB 棚卸しを根拠にする task では必須 (下記 preflight)
+  claim: "..."
+  evidence_as_of: "..."
+  data_window: "..."
+  semantic_definition: "..."
+  current_state_check: "..."
+  disconfirming_check: "..."
+  decision_if_false: "..."
 acceptance_criteria:
   - 完了条件
 verify:                  # コードタスクは必須。verifier が worktree で実走する機械検証
@@ -178,6 +186,26 @@ created_at: "2026-05-18T12:00:00"
 `verify:` はコード変更タスクに必ず付ける。ドキュメント/設計レビュー/PR レビュー等の
 非コードタスクは省略してよい（worker 側で `verify_status: skipped`）。
 task YAML の詳細生成は task-yaml-author が担う。
+
+### 起票前 preflight (evidence card)
+
+**historical measurement（過去ログ/メトリクスの集計）または data inventory（DB の件数・
+棚卸し）を根拠にする task** は、起票前に 10-15 分かけて次を確認する:
+
+- `git log` / merged PR / CHANGELOG を見て、観測期間より後にその問題を解決した変更が
+  入っていないか確認する（手戻り例: 5/26-8/11 の集計を根拠に起票したが、PR #285 が
+  8/11 に既に解決済みだった）
+- 関連 ADR を読み、その指標の意味論（raw / logical / effective）が定義済みでないか確認する
+- 確認結果を `evidence_card.current_state_check` に一行で残す。該当変更が無かった場合も
+  「確認したが該当変更なし」と明記する
+- **evidence_card が必須なのに未記入の task は dispatch しない。**
+
+非コードタスク、および typo 修正・既存挙動の範囲内の小修正は evidence_card 不要。
+7 field の定義と記入例は `queue/templates/task.yaml` を参照。
+
+worker が task の前提を反証したときは、それを成功（`status: completed`）として受理し、
+report の `decision_bearing_claims` に `falsified` として記録させる。**falsified な claim から
+follow-up の修正 task を作らない。**
 
 ### ローカル LLM (vllm-consultant) の補助利用
 
