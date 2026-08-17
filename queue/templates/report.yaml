@@ -34,6 +34,17 @@ summary: "作業結果の概要を1-2文で"
 # 詳細を書いた場合のみ queue/projects/<project>/reports/worker{N}_details.md の絶対パスを入れる
 # (書かない場合は空文字のままでよい)
 details_path: ""
+# 任意 (省略可。既存 report との後方互換を壊さない)。
+# task の前提や結論として downstream の判断を拘束する claim を **最大3件だけ** 書く。
+# status は confirmed | falsified | uncertain。
+# - **falsified の claim から follow-up の修正 task を作らない。** 誤った前提を潰したこと
+#   自体が成果であり、そこで打ち切る。
+# - worker は task の前提を反証した時点で成功として report してよい
+#   (status: completed のままでよい。反証は失敗ではない)。
+decision_bearing_claims: []
+# - claim: "project 空の observation に重複書き込みがある"
+#   status: falsified
+#   evidence: "330 組すべてが supersedes による backfill copy。raw と logical の混同だった"
 # ブロッカーや懸念点があれば記述
 issues: []
 # - "issue の説明"

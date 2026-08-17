@@ -22,6 +22,40 @@ description: |
   - 具体的な要件
   - 期待される成果物
   - 参考にすべき既存ファイル・過去タスクがあれば明記
+# 任意 field (既存 task YAML との後方互換のため未記入でも valid)。
+# ただし **historical measurement (過去ログ/メトリクスの集計) または data inventory
+# (DB の件数・棚卸し) を根拠にする task** では必須。未記入なら dispatch しない。
+# 免除: 非コードタスク (ドキュメント/レビュー/調査方針) および typo 修正・既存挙動の
+# 範囲内の小修正など軽微なタスクは記入不要。
+# 目的: 観測時点・集計意味論・反証条件を持たない claim が task の前提へ昇格するのを防ぐ。
+evidence_card:
+  # 何を事実として主張しているか (1文)
+  claim: ""
+  # その観測・確認を行った日時 or commit/PR
+  evidence_as_of: ""
+  # 集計対象の期間 or DB snapshot (該当なしなら「該当なし」と明記)
+  data_window: ""
+  # 「件数」等の指標が raw / logical / effective のどれを指すか
+  semantic_definition: ""
+  # 起票前に git log / merged PR / CHANGELOG / ADR を確認した結果を一行で
+  # (該当なしも「確認したが該当変更なし」と明記する)
+  current_state_check: ""
+  # この claim を反証する最も安い方法
+  disconfirming_check: ""
+  # 反証された場合に task をどう扱うか (例: 調査で打ち切り、修正 task を作らない)
+  decision_if_false: ""
+# 記入例 — 実際に手戻りになった TASK-367「重複書き込みバグ」の起票を題材にすると、
+# semantic_definition と current_state_check の2つで起票前に止まっていた:
+# evidence_card:
+#   claim: "project が空の observation に重複書き込みが起きており、生 132 件 / 論理 77 件に水増しされている"
+#   evidence_as_of: "2026-08-15 の TASK-361 調査 (reports/worker3_details.md)"
+#   data_window: "本番 DB snapshot 2026-08-15 時点、全期間"
+#   semantic_definition: "132 は raw row 数 (deleted_at IS NULL のみ)、77 は supersedes を除外した
+#                         logical 件数。異なる意味論の2値の差なので『重複』とは呼べない ← ここで claim が崩れる"
+#   current_state_check: "backfill-metadata --apply の実装と ADR-0028 を確認。元 row を更新せず
+#                         修復 copy を append する正規動作であり、バグではない"
+#   disconfirming_check: "supersedes/superseded_by を除外した logical view で数え直す (SQL 1本)"
+#   decision_if_false: "調査で打ち切り。修正 task は作らない"
 acceptance_criteria:
   - 完了条件1
   - 完了条件2
