@@ -982,6 +982,19 @@ class TestRolloutFlag:
         w.report_bridge()
         assert len(notifications(w.tmux.sent)) == 1
 
+    def test_cycle_does_not_create_health_json_when_flag_off_and_dir_absent(self, tmp_path: Path) -> None:
+        """SQUAD-230: 既定環境 (flag off かつ queue 未使用) では write_health を呼ばない.
+
+        cross-review (SQUAD-229) blocking 指摘: _process_queue_fallbacks() は無条件のまま
+        毎サイクル回るが、write_health() まで無条件だと未 opt-in 環境でも health.json が
+        新規作成され続けてしまう。
+        """
+        w, _queue = self._legacy_watcher(tmp_path)
+        assert not w.nq.dir.exists()
+        w.cycle()
+        assert not w.nq.health_path.exists()
+        assert not w.nq.events_path.exists()
+
 
 class TestFallbackSurvivesRollback:
     """SQUAD-228: queue 有効時の未 ack event は flag off (rollback) 後も沈黙しない.

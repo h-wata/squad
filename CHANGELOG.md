@@ -35,6 +35,13 @@
 
 ### Fixed
 
+- `squad/watchd.py`: `WATCH_NOTIFY_QUEUE` を off に戻す (rollback) と、flag on 時に
+  enqueue 済みの未 ack event が `_process_queue_fallbacks()` ごと呼ばれなくなり永久に
+  Pane 0 へ届かなくなっていた不具合を修正。age-based fallback は flag の on/off に
+  関わらず毎サイクル回すようにした。ただし `write_health()` の呼び出しは
+  `notify_queue_enabled` が true、または既に notification ディレクトリが存在する場合
+  だけに限定し、queue を一度も opt-in していない既定環境で `health.json` が新規作成
+  され続ける副作用は避けた (SQUAD-228, cross-review SQUAD-229/230)。
 - `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
   届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
   呼び出しを追加した (SQUAD-212)。

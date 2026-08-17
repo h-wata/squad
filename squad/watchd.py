@@ -953,7 +953,11 @@ class Watcher:
         # (SQUAD-228, PR #29 事後 cross-review)。新規通知の enqueue 自体は
         # _enqueue_notification() 側で引き続き flag により直送/queue を切り替える。
         self._process_queue_fallbacks(now)
-        self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        # write_health() は既定環境 (flag off かつ notification dir 未使用) では呼ばない。
+        # ここを無条件にすると、queue を一度も opt-in していない環境でも health.json が
+        # 新規作成され続けてしまう (SQUAD-230, PR #31 cross-review blocking 指摘)。
+        if self.cfg.notify_queue_enabled or self.nq.dir.exists():
+            self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
         self._queue_write_ok = True
 
     def run(self) -> int:
