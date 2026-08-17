@@ -21,6 +21,17 @@
 - `report_id` が無い / UUID でない / YAML を解釈できない report を握り潰さず、
   `[REPORT-INVALID]` として path・SHA-256・エラー内容付きで通知するようにした。UUID を
   後付けで推測することはしない (SQUAD-216)。
+- 通知の永続キュー化 (`squad/notify_queue.py`, `squad notify pull/ack`)。watcher の通知を
+  `queue/notifications/<session>/` へ priority (critical/normal/low) 付きで永続化し、
+  Pane 0 へは未 ack が閾値を超えたときだけ 1 行サマリを出す (SQUAD-220)。段階導入のため
+  既定は**従来どおり Pane 0 直送**で、`WATCH_NOTIFY_QUEUE=1` で opt-in する (flag を外せば
+  従来動作へ即 rollback)。cross-review で出た blocking 3 件も併せて対応した (SQUAD-226):
+  ① `events.json` が破損・読出し不能なときは「空 queue」と同一視せず、既存ファイルを保持
+  したまま enqueue を失敗させて ledger の再試行に戻す。health の `queue_readable` を false
+  にし、`[QUEUE-ERROR]` を Pane 0 へ直送する。`notify pull/ack` も 0 件表示ではなく exit 2
+  で落とす。② critical だけでなく normal (既定 900s) / low (既定 3600s) も未 ack age で
+  昇格させ、Dispatcher が pull を忘れても永久に沈黙しない。③ `instructions/dispatcher.md`
+  に pull/ack 規約・具体コマンド・queue 異常時の報告手順を追記した。
 
 ### Fixed
 

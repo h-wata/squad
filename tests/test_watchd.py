@@ -103,7 +103,15 @@ def queued(w: Watcher, marker: str = '[REPORT ') -> list[str]:
 @pytest.fixture
 def watcher(tmp_path: Path) -> tuple[Watcher, Path]:
     queue = tmp_path / 'queue'
-    cfg = Config(session='testsess', default_owner='not-this-session', queue_dir=queue, interval=1, lease_seconds=60)
+    # SQUAD-226: queue 経路は opt-in。queue の振る舞いを見るテストは明示的に有効化する。
+    cfg = Config(
+        session='testsess',
+        default_owner='not-this-session',
+        queue_dir=queue,
+        interval=1,
+        lease_seconds=60,
+        notify_queue_enabled=True,
+    )
     w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
     w.sleep = lambda _s: None  # テストを待たせない
     return w, queue
@@ -171,7 +179,9 @@ class TestReportBridge:
 
     def test_default_owner_covers_unmarked_project(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
-        cfg = Config(session='ros-agents', default_owner='ros-agents', queue_dir=queue, interval=1)
+        cfg = Config(
+            session='ros-agents', default_owner='ros-agents', queue_dir=queue, interval=1, notify_queue_enabled=True
+        )
         w = Watcher(cfg=cfg, tmux=FakeTmux('ros-agents'))
         w.sleep = lambda _s: None
         d = make_project(queue, 'pj')  # マーカー無し → default owner が担当
@@ -265,7 +275,9 @@ class TestReportBridge:
         d = make_project(queue, 'pj', session='testsess')
         write_report(d)
 
-        cfg_a = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1)
+        cfg_a = Config(
+            session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True
+        )
         w_a = Watcher(cfg=cfg_a, tmux=FakeTmux('testsess'))
         w_a.sleep = lambda _s: None
         w_a.refresh_owned_projects()
@@ -273,7 +285,9 @@ class TestReportBridge:
         assert len(queued(w_a)) == 1
 
         (d / '.squad_session').write_text('othersess\n')
-        cfg_b = Config(session='othersess', default_owner='none', queue_dir=queue, interval=1)
+        cfg_b = Config(
+            session='othersess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True
+        )
         w_b = Watcher(cfg=cfg_b, tmux=FakeTmux('othersess'))
         w_b.sleep = lambda _s: None
         w_b.refresh_owned_projects()
@@ -287,7 +301,7 @@ class TestReportBridge:
         write_report(d)
         ws = []
         for sess in ('a', 'b'):
-            cfg = Config(session=sess, default_owner=sess, queue_dir=queue, interval=1)
+            cfg = Config(session=sess, default_owner=sess, queue_dir=queue, interval=1, notify_queue_enabled=True)
             w = Watcher(cfg=cfg, tmux=FakeTmux(sess))
             w.sleep = lambda _s: None
             w.refresh_owned_projects()
@@ -566,7 +580,7 @@ class TestSessionMarkerFiltering:
         queue = tmp_path / 'queue'
         make_project(queue, 'mine', session='testsess')
         make_project(queue, 'theirs', session='othersess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.refresh_owned_projects()
         assert [p.name for p in w.owned] == ['mine']
@@ -574,7 +588,7 @@ class TestSessionMarkerFiltering:
     def test_unmarked_project_falls_back_to_default_owner(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
         make_project(queue, 'pj')  # マーカー無し
-        cfg = Config(session='ros-agents', default_owner='ros-agents', queue_dir=queue)
+        cfg = Config(session='ros-agents', default_owner='ros-agents', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('ros-agents'))
         w.refresh_owned_projects()
         assert [p.name for p in w.owned] == ['pj']
@@ -586,7 +600,7 @@ class TestZeroOwnedWarning:
     def test_warns_when_no_project_owned(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         queue = tmp_path / 'queue'
         make_project(queue, 'theirs', session='othersess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -597,7 +611,7 @@ class TestZeroOwnedWarning:
     def test_no_warning_when_project_owned(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         queue = tmp_path / 'queue'
         make_project(queue, 'mine', session='testsess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -609,7 +623,7 @@ class TestZeroOwnedWarning:
         """PR #28 cross-review blocking 3: print だけでなく notify_dispatcher() で届く."""
         queue = tmp_path / 'queue'
         make_project(queue, 'theirs', session='othersess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -618,7 +632,7 @@ class TestZeroOwnedWarning:
     def test_no_dispatcher_notify_when_project_owned(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
         make_project(queue, 'mine', session='testsess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -639,7 +653,7 @@ class TestOwnershipChange:
         queue = tmp_path / 'queue'
         d = make_project(queue, 'pj', session='othersess')
         write_report(d)
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()  # 初回計算: pj は othersess 担当なのでまだ owned でない
@@ -663,7 +677,7 @@ class TestOwnershipChange:
         """
         queue = tmp_path / 'queue'
         d = make_project(queue, 'pj', session='othersess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -680,7 +694,7 @@ class TestOwnershipChange:
     def test_report_written_after_ownership_change_is_notified(self, tmp_path: Path) -> None:
         queue = tmp_path / 'queue'
         d = make_project(queue, 'pj', session='othersess')
-        cfg = Config(session='testsess', default_owner='none', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -697,7 +711,7 @@ class TestOwnershipChange:
         queue = tmp_path / 'queue'
         d = make_project(queue, 'pj', session='othersess')
         write_report(d)
-        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         w.warn_missing_markers()
@@ -711,7 +725,7 @@ class TestOwnershipChange:
 
 class TestLedgerPrepare:
     def _watcher(self, queue: Path) -> Watcher:
-        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue)
+        cfg = Config(session='testsess', default_owner='testsess', queue_dir=queue, notify_queue_enabled=True)
         w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
         w.sleep = lambda _s: None
         return w
@@ -827,7 +841,7 @@ class TestCriticalFallbackViaCycle:
 
         monkeypatch.setattr(time, 'time', lambda: base + 301)
         w.cycle()
-        assert any('[QUEUE]' in m and '未確認 critical 通知' in m for _, m in w.tmux.sent)
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)
 
     def test_fallback_does_not_fire_again_before_backoff(
         self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
@@ -857,6 +871,116 @@ class TestCriticalFallbackViaCycle:
         health = w.nq.read_health()
         assert health['unacked_critical'] == 1
         assert health['queue_write_ok'] is True
+
+
+class TestNormalReportNeverSilent:
+    """SQUAD-226 critical 2: Dispatcher が pull しなくても normal report は最終的に届く."""
+
+    def test_normal_report_reaches_pane_without_any_pull(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)  # status: completed = priority normal
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base)
+        w.cycle()
+        assert w.tmux.sent == []  # 直後は queue のみ (従来どおり静か)
+
+        # 誰も pull / ack しないまま normal の閾値を越えると Pane 0 へ 1 行出る
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.normal_fallback_seconds + 1)
+        w.cycle()
+        assert any('[QUEUE]' in m and 'normal' in m for _, m in w.tmux.sent)
+
+    def test_low_priority_stall_also_escalates_eventually(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, _ = watcher
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base)
+        w.nq.enqueue(project='pj', source='stall', priority='low', message='stalled', dedupe_key='k')
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.low_fallback_seconds + 1)
+        w.cycle()
+        assert any('[QUEUE]' in m for _, m in w.tmux.sent)
+
+
+class TestCorruptQueueViaCycle:
+    """SQUAD-226 critical 1: 破損 queue でも未確認通知を消さず、必ず Pane へ鳴らす."""
+
+    def test_corrupt_queue_does_not_swallow_report_and_alerts(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, status='blocked')
+        w.cycle()
+        before = w.nq.events_path.read_text()
+
+        w.nq.events_path.write_text('{corrupt')
+        write_report(d, name='worker2_report.yaml', report_id=ID2)
+        w.cycle()
+
+        assert w.nq.events_path.read_text() == '{corrupt'  # 上書きして既存 event を消していない
+        assert any('[QUEUE-ERROR]' in m for _, m in w.tmux.sent)  # 別経路で必ず可視化
+        assert w.nq.read_health()['queue_readable'] is False
+
+        # 破損ファイルを復旧すれば元の critical はそのまま生きている
+        w.nq.events_path.write_text(before)
+        assert len(w.nq.unacked()) == 1
+
+    def test_report_is_redelivered_after_queue_recovers(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """破損中に取りこぼした report は ledger の再試行で再配達される (永久消失しない)."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.nq.dir.mkdir(parents=True, exist_ok=True)
+        w.nq.events_path.write_text('{corrupt')
+        write_report(d)
+        w.refresh_owned_projects()
+        w.report_bridge()
+
+        w.nq.events_path.unlink()  # queue を復旧 (空から作り直し)
+        later = time.time() + BACKOFF_SECONDS[0] + 1
+        monkeypatch.setattr(time, 'time', lambda: later)
+        w.report_bridge()
+        assert len(queued(w)) == 1
+
+
+class TestRolloutFlag:
+    """SQUAD-226: 既定は従来動作 (Pane 直送)、flag を立てたときだけ queue 経路."""
+
+    def _legacy_watcher(self, tmp_path: Path) -> tuple[Watcher, Path]:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        return w, queue
+
+    def test_default_is_direct_send(self, tmp_path: Path) -> None:
+        assert Config(queue_dir=tmp_path).notify_queue_enabled is False
+
+    def test_report_goes_straight_to_pane_when_flag_off(self, tmp_path: Path) -> None:
+        w, queue = self._legacy_watcher(tmp_path)
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert len(notifications(w.tmux.sent)) == 1
+        assert not w.nq.events_path.exists()  # queue には一切書かない
+
+    def test_send_failure_still_retries_when_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        w, queue = self._legacy_watcher(tmp_path)
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)
+        w.refresh_owned_projects()
+        w.tmux.fail_send = True
+        w.report_bridge()
+        assert notifications(w.tmux.sent) == []
+
+        w.tmux.fail_send = False
+        later = time.time() + BACKOFF_SECONDS[0] + 1
+        monkeypatch.setattr(time, 'time', lambda: later)
+        w.report_bridge()
+        assert len(notifications(w.tmux.sent)) == 1
 
 
 def test_posix_cksum_matches_coreutils() -> None:

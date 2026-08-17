@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ledger import ReportLedger  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
 from notify_queue import NotificationQueue  # noqa: E402
+from notify_queue import QueueUnreadableError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -401,10 +402,20 @@ def _notify_queue(args: argparse.Namespace, cfg: dict) -> NotificationQueue:
     return NotificationQueue(session, notify_dir_for(queue_dir, session))
 
 
+def _unreadable(nq: NotificationQueue, e: QueueUnreadableError) -> int:
+    """Queue 破損を「0 件」と誤読させないため、明示的なエラーで落とす (SQUAD-226)."""
+    payload = {'error': 'queue_unreadable', 'detail': str(e), 'health': nq.read_health()}
+    print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+    return 2
+
+
 def cmd_notify_pull(args: argparse.Namespace, cfg: dict) -> int:
     """未 ack event (+ health) を JSON Lines で表示する。Dispatcher は Read だけで良い."""
     nq = _notify_queue(args, cfg)
-    events = nq.unacked()
+    try:
+        events = nq.unacked()
+    except QueueUnreadableError as e:
+        return _unreadable(nq, e)
     if args.priority:
         events = [e for e in events if e['priority'] == args.priority]
     for e in events:
@@ -417,7 +428,10 @@ def cmd_notify_pull(args: argparse.Namespace, cfg: dict) -> int:
 def cmd_notify_ack(args: argparse.Namespace, cfg: dict) -> int:
     """Event を ack する ('all' で現在の未 ack を一括 ack)."""
     nq = _notify_queue(args, cfg)
-    ids = [e['event_id'] for e in nq.unacked()] if args.event_id == 'all' else [args.event_id]
+    try:
+        ids = [e['event_id'] for e in nq.unacked()] if args.event_id == 'all' else [args.event_id]
+    except QueueUnreadableError as e:
+        return _unreadable(nq, e)
     ok = True
     for eid in ids:
         r = nq.ack(eid, by=args.by or '')

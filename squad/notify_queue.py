@@ -37,6 +37,14 @@ PRIORITIES = ('critical', 'normal', 'low')
 FALLBACK_BACKOFF_SECONDS = (300, 600, 1200, 2400, 3600)
 
 
+class QueueUnreadableError(Exception):
+    """events.json / ack.json が存在するのに読めない (破損・IO エラー).
+
+    「空 queue」と区別するための例外。空と同一視すると、未 ack の通知を保持したまま
+    上書きして永久に消してしまう (SQUAD-226 critical 1)。
+    """
+
+
 def fallback_backoff_seconds(fallback_count: int) -> int:
     """Fallback_count 回目の送信のあと、次に送るまで待つ秒数 (最後の値が cap)."""
     return FALLBACK_BACKOFF_SECONDS[min(max(fallback_count, 1), len(FALLBACK_BACKOFF_SECONDS)) - 1]
@@ -61,10 +69,24 @@ class NotificationQueue:
 
     @staticmethod
     def _load(path: Path) -> dict[str, Any]:
+        """壊れていても空扱いで良いファイル (backoff 状態・health) 用の緩い読出し."""
         try:
             return json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             return {}
+
+    @staticmethod
+    def _load_strict(path: Path) -> dict[str, Any]:
+        """通知本体 (events/ack) 用。未作成なら空、壊れていれば QueueUnreadableError."""
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise QueueUnreadableError(f'{path}: {e}') from e
+        if not isinstance(data, dict):
+            raise QueueUnreadableError(f'{path}: top-level object ではありません')
+        return data
 
     def _atomic_write(self, path: Path, data: dict[str, Any]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -73,10 +95,10 @@ class NotificationQueue:
         os.replace(tmp, path)
 
     def _events(self) -> dict[str, dict[str, Any]]:
-        return self._load(self.events_path).get('events', {})
+        return self._load_strict(self.events_path).get('events', {})
 
     def _acked_ids(self) -> set[str]:
-        return set(self._load(self.ack_path).get('acked', {}).keys())
+        return set(self._load_strict(self.ack_path).get('acked', {}).keys())
 
     # ---- enqueue ----
 
@@ -125,7 +147,7 @@ class NotificationQueue:
 
     def ack(self, event_id: str, by: str = '') -> bool:
         """Event_id を ack 済みにする (追記。既に ack 済みなら何もしない = 冪等)."""
-        acked = self._load(self.ack_path).get('acked', {})
+        acked = self._load_strict(self.ack_path).get('acked', {})
         if event_id in acked:
             return True
         acked[event_id] = {'acked_at': int(time.time()), 'acked_by': by}
@@ -137,27 +159,38 @@ class NotificationQueue:
 
     # ---- critical fallback (age-based, backoff) ----
 
-    def due_critical_fallback(self, now: int, threshold_seconds: int) -> dict[str, Any] | None:
-        """未 ack critical が閾値超過なら {'count', 'oldest_age'} を返す (backoff 未到来なら None).
+    def due_fallback(self, now: int, thresholds: dict[str, int]) -> dict[str, Any] | None:
+        """未 ack event が priority 別閾値を超えたら {'priority','count','oldest_age'} を返す.
 
-        Fallback は event 単位ではなく queue 全体で 1 本のメッセージにまとめる
-        (「未確認 critical 通知 N 件」)。未 ack critical がゼロになれば backoff 状態を
-        リセットする (次に新しい critical が来たとき、また 5 分から数え直すため)。
+        critical だけでなく normal / low も age で昇格させる。Dispatcher が pull を
+        忘れても、閾値を過ぎれば Pane 0 へ「N 件未確認」の 1 行が出て永久沈黙しない
+        (SQUAD-226 critical 2)。閾値超過が複数 priority にまたがるときは、より重い
+        priority を代表として報告する (count は超過分の合計)。
+
+        Fallback は event 単位ではなく queue 全体で 1 本のメッセージにまとめる。
+        未 ack がゼロになれば backoff 状態をリセットする (次の通知でまた閾値から数え直す)。
+        Backoff 未到来なら None。events/ack が読めない場合は QueueUnreadableError を送出する。
         """
-        criticals = [e for e in self.unacked() if e['priority'] == 'critical']
-        if not criticals:
-            if self.fallback_path.exists():
+        due = [e for e in self.unacked() if now - e['created_at'] >= thresholds.get(e['priority'], 0)]
+        if not due:
+            if self._load(self.fallback_path):
                 self._atomic_write(self.fallback_path, {})
-            return None
-        oldest = min(e['created_at'] for e in criticals)
-        age = now - oldest
-        if age < threshold_seconds:
             return None
         state = self._load(self.fallback_path)
         next_at = state.get('next_fallback_at', 0)
         if next_at and now < next_at:
             return None
-        return {'count': len(criticals), 'oldest_age': age}
+        top = min(due, key=lambda e: PRIORITIES.index(e['priority']))
+        return {
+            'priority': top['priority'],
+            'count': len(due),
+            'oldest_age': now - min(e['created_at'] for e in due),
+        }
+
+    def fallback_due(self, now: int) -> bool:
+        """Backoff 的に今 fallback を送って良いか (events を読まずに判定できる)."""
+        next_at = self._load(self.fallback_path).get('next_fallback_at', 0)
+        return not next_at or now >= next_at
 
     def mark_fallback_sent(self, now: int) -> None:
         state = self._load(self.fallback_path)
@@ -171,19 +204,37 @@ class NotificationQueue:
     # ---- health ----
 
     def write_health(self, *, owned_projects: int, write_ok: bool) -> None:
+        """Health を更新する。queue 本体が読めない場合も (むしろその時こそ) 記録する."""
         now = int(time.time())
-        unacked = self.unacked()
-        criticals = [e for e in unacked if e['priority'] == 'critical']
-        oldest = min((e['created_at'] for e in criticals), default=None)
-        data = {
+        data: dict[str, Any] = {
             'session': self.session,
             'updated_at': now,
             'owned_projects': owned_projects,
             'queue_write_ok': write_ok,
-            'unacked_total': len(unacked),
-            'unacked_critical': len(criticals),
-            'oldest_unacked_critical_age_seconds': (now - oldest) if oldest is not None else None,
+            'queue_readable': True,
+            'queue_error': '',
         }
+        try:
+            unacked = self.unacked()
+        except QueueUnreadableError as e:
+            # 未 ack の件数すら分からない = 最も危険な状態。health は必ず残す
+            # (Pane 0 への直送 alert は watchd 側が別経路で出す)。
+            data.update(
+                queue_readable=False,
+                queue_error=str(e),
+                unacked_total=None,
+                unacked_critical=None,
+                oldest_unacked_critical_age_seconds=None,
+            )
+            self._atomic_write(self.health_path, data)
+            return
+        criticals = [e for e in unacked if e['priority'] == 'critical']
+        oldest = min((e['created_at'] for e in criticals), default=None)
+        data.update(
+            unacked_total=len(unacked),
+            unacked_critical=len(criticals),
+            oldest_unacked_critical_age_seconds=(now - oldest) if oldest is not None else None,
+        )
         self._atomic_write(self.health_path, data)
 
     def read_health(self) -> dict[str, Any]:

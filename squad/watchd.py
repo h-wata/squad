@@ -15,6 +15,8 @@
             WATCH_DISCOVERY_INTERVAL / WATCH_DISCOVERY_MAX / WATCH_SWEEP_INTERVAL / WATCH_GC_INTERVAL
             WATCH_QUEUE_DIR / WATCH_LEDGER_FILE / WATCH_LEDGER_LEASE / WATCH_WORKTREE_GLOB
             SQUAD_SESSION / SQUAD_DEFAULT_OWNER
+            WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Pane 0 直送。1 で durable queue 経路)
+            WATCH_CRITICAL_FALLBACK_SECONDS / WATCH_NORMAL_FALLBACK_SECONDS / WATCH_LOW_FALLBACK_SECONDS
 
 複数セッション並行運用 (SQUAD_SESSION を変えて start.sh を複数起動する場合):
   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
@@ -51,6 +53,7 @@ from ledger import report_identity  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
 from notify_queue import NotificationQueue  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
+from notify_queue import QueueUnreadableError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -134,6 +137,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    v = os.environ.get(name, '').strip().lower()
+    if not v:
+        return default
+    return v in ('1', 'true', 'yes', 'on')
+
+
 @dataclass
 class Config:
     """env から解決した watcher 設定."""
@@ -155,6 +165,11 @@ class Config:
         default_factory=lambda: os.environ.get('WATCH_WORKTREE_GLOB') or str(REPO_ROOT.parent / '*-wt-*')
     )
     critical_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_CRITICAL_FALLBACK_SECONDS', 300))
+    normal_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_NORMAL_FALLBACK_SECONDS', 900))
+    low_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_LOW_FALLBACK_SECONDS', 3600))
+    # 段階導入 flag (SQUAD-226)。既定は従来動作 = Pane 0 へ直送。WATCH_NOTIFY_QUEUE=1 で
+    # durable queue 経路を opt-in する。flag を外せば (既定に戻せば) 即座に従来動作へ rollback。
+    notify_queue_enabled: bool = field(default_factory=lambda: _bool_env('WATCH_NOTIFY_QUEUE', False))
 
     @property
     def dispatcher(self) -> str:
@@ -264,38 +279,74 @@ class Watcher:
     def _enqueue_notification(
         self, *, project: str, source: str, priority: str, message: str, dedupe_key: str
     ) -> bool:
-        """通知を Pane 0 へ直接送らず、まず session-local durable queue へ積む.
+        """通知を session-local durable queue へ積む (flag off なら従来どおり Pane 0 へ直送).
 
-        書込みに失敗したら (disk full 等) fail-open で WARN ログを残し、health.json の
-        queue_write_ok を False にする (次サイクルで再試行。呼び出し元は成否で
-        再通報要否を判断する)。
+        書込みに失敗 (disk full 等)、または既存 queue が破損して読めない場合は False を
+        返す。呼び出し元は「未配達」として扱い、ledger の backoff / 次サイクルで再試行する。
+        破損 queue を空と見なして上書きすると未 ack 通知が永久に消えるため、この経路では
+        events.json に一切書かない (SQUAD-226 critical 1)。
         """
+        if not self.cfg.notify_queue_enabled:
+            return self.notify_dispatcher(message)
         try:
             self.nq.enqueue(project=project, source=source, priority=priority, message=message, dedupe_key=dedupe_key)
             return True
+        except QueueUnreadableError as e:
+            self.log(f'[WARN] 通知 queue が破損して読めないため enqueue を中止 (既存ファイルは保持): {e}')
+            self._queue_write_ok = False
+            return False
         except OSError as e:
             self.log(f'[WARN] 通知 queue への書込みに失敗: {e}')
             self._queue_write_ok = False
             return False
 
-    def _process_critical_fallbacks(self, now: float) -> None:
-        """未 ack critical が閾値を超えたときだけ、Pane 0 へ 1 行だけ fallback する.
+    def _process_queue_fallbacks(self, now: float) -> None:
+        """未 ack event が priority 別閾値を超えたら、Pane 0 へ 1 行だけ fallback する.
 
         本文そのものではなく件数だけを送る (queue を読みに行かせるための安全弁)。
         以後は指数 backoff で再送する。これ以外の経路では Pane 0 へ何も直接書かない。
+        critical だけでなく normal / low も age で昇格するため、Dispatcher が pull を
+        忘れても永久に沈黙しない (SQUAD-226 critical 2)。
+        queue 自体が読めないときは、件数の代わりに「queue 異常」を直送する
+        (未 ack が見えない = 最も危険なので必ず鳴らす、SQUAD-226 critical 1)。
         """
-        due = self.nq.due_critical_fallback(int(now), self.cfg.critical_fallback_seconds)
+        thresholds = {
+            'critical': self.cfg.critical_fallback_seconds,
+            'normal': self.cfg.normal_fallback_seconds,
+            'low': self.cfg.low_fallback_seconds,
+        }
+        try:
+            due = self.nq.due_fallback(int(now), thresholds)
+        except QueueUnreadableError as e:
+            self._queue_write_ok = False
+            self._send_queue_alert(
+                now,
+                f'[QUEUE-ERROR] 通知 queue を読めません ({e})。未 ack 通知が見えない状態です。'
+                f'queue/notifications/{self.cfg.session}/events.json を退避・復旧し、'
+                f'各 project の reports/ を直接確認してください。',
+            )
+            return
         if not due:
             return
-        msg = (
-            f'[QUEUE] 未確認 critical 通知 {due["count"]}件 (最古 約{int(due["oldest_age"])}s 未 ack)。'
-            f'queue/notifications/{self.cfg.session}/ を確認してください '
-            f'(squad notify pull --priority critical)。'
+        self._send_queue_alert(
+            now,
+            f'[QUEUE] 未確認通知 {due["count"]}件 (最上位 {due["priority"]}, '
+            f'最古 約{int(due["oldest_age"])}s 未 ack)。'
+            f'queue/notifications/{self.cfg.session}/ を確認してください (squad notify pull)。',
         )
+
+    def _send_queue_alert(self, now: float, msg: str) -> None:
+        """Fallback / queue 異常の 1 行を Pane 0 へ送り、backoff を進める.
+
+        Backoff は fallback.json (events とは別ファイル) だけで判定するので、queue 本体が
+        破損していても指数 backoff は効く (毎サイクル鳴り続けない)。
+        """
+        if not self.nq.fallback_due(int(now)):
+            return
         if self.notify_dispatcher(msg):
             self.nq.mark_fallback_sent(int(now))
         else:
-            self.log('[WARN] critical fallback の送信に失敗 (次サイクルで再試行)')
+            self.log('[WARN] queue fallback の送信に失敗 (次サイクルで再試行)')
 
     # ---- project 担当 ----
 
@@ -896,9 +947,11 @@ class Watcher:
             self.gc_worktrees()
             self.last_gc = now
 
-        # queue 全体で唯一 Pane 0 へ直送されうる経路 (未 ack critical の age-based fallback)。
-        self._process_critical_fallbacks(now)
-        self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        # queue 経路が有効なときだけ、age-based fallback と health を回す
+        # (flag off = 従来動作では通知は既に Pane 0 へ直送済みなので queue は使わない)。
+        if self.cfg.notify_queue_enabled:
+            self._process_queue_fallbacks(now)
+            self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
         self._queue_write_ok = True
 
     def run(self) -> int:
