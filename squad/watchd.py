@@ -956,8 +956,17 @@ class Watcher:
         # write_health() は既定環境 (flag off かつ notification dir 未使用) では呼ばない。
         # ここを無条件にすると、queue を一度も opt-in していない環境でも health.json が
         # 新規作成され続けてしまう (SQUAD-230, PR #31 cross-review blocking 指摘)。
-        if self.cfg.notify_queue_enabled or self.nq.dir.exists():
-            self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        # dir.exists()/write_health() の I/O 失敗 (PermissionError 等) は cycle() 全体を
+        # 落とさない。run() は cycle() の例外を捕捉しないため、ここで拾わないと watcher
+        # プロセスごと停止し、以後の fallback 通知も含め恒久的に沈黙する
+        # (SQUAD-231, PR #31 re-review blocking 指摘)。_process_queue_fallbacks() は
+        # 既にこの手前で実行済みなので、ここで例外を吸収しても当該サイクルの fallback
+        # 通知は失われない。
+        try:
+            if self.cfg.notify_queue_enabled or self.nq.dir.exists():
+                self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        except OSError as e:
+            self.log(f'[WARN] health.json 更新に失敗 (次サイクルで再試行): {e}')
         self._queue_write_ok = True
 
     def run(self) -> int:

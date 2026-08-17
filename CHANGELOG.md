@@ -41,7 +41,12 @@
   関わらず毎サイクル回すようにした。ただし `write_health()` の呼び出しは
   `notify_queue_enabled` が true、または既に notification ディレクトリが存在する場合
   だけに限定し、queue を一度も opt-in していない既定環境で `health.json` が新規作成
-  され続ける副作用は避けた (SQUAD-228, cross-review SQUAD-229/230)。
+  され続ける副作用は避けた (SQUAD-228, cross-review SQUAD-229/230)。この判定・更新
+  (`self.nq.dir.exists()` / `write_health()`) で `PermissionError` 等の I/O 例外が
+  発生しても `cycle()` 全体を落とさないようにした。`run()` の主ループは `cycle()` の
+  例外を捕捉しないため、ここで拾わないと watcher プロセスごと停止し、直前に実行済みの
+  `_process_queue_fallbacks()` を含め以後の通知が恒久的に沈黙し得た
+  (SQUAD-231/232, PR #31 re-review blocking)。
 - `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
   届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
   呼び出しを追加した (SQUAD-212)。

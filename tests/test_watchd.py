@@ -1051,6 +1051,64 @@ class TestFallbackSurvivesRollback:
         assert not w.nq.events_path.exists()  # 新規 report は queue に書かれない
 
 
+class TestHealthIOFailureDoesNotSilenceCycle:
+    """SQUAD-231/232: dir.exists()/write_health() の I/O 失敗で watcher を沈黙させない.
+
+    PR #31 re-review blocking 指摘: PermissionError で cycle() 全体が例外終了すると、
+    run() はそれを捕捉しないため watcher プロセスごと止まり、以後の fallback 通知も
+    含めて恒久的に沈黙する。ここでは I/O 例外を注入しても cycle() が例外を伝播せず、
+    直前の _process_queue_fallbacks() による fallback 通知が届くことを確認する。
+    """
+
+    def test_dir_exists_permission_error_does_not_abort_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+        w.cfg.notify_queue_enabled = False  # rollback: dir.exists() 経路を通す
+
+        target_dir = w.nq.dir
+        orig_exists = Path.exists
+
+        def fake_exists(self: Path) -> bool:
+            if self == target_dir:
+                raise PermissionError(13, 'Permission denied')
+            return orig_exists(self)
+
+        monkeypatch.setattr(Path, 'exists', fake_exists)
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        w.cycle()  # 例外を投げずに戻ること
+
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)  # fallback は継続する
+
+    def test_write_health_permission_error_does_not_abort_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+
+        def raise_permission_error(**_kwargs: object) -> None:
+            raise PermissionError(13, 'Permission denied')
+
+        monkeypatch.setattr(w.nq, 'write_health', raise_permission_error)
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        w.cycle()  # 例外を投げずに戻ること
+
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)  # fallback は継続する
+        out = capsys.readouterr().out
+        assert '[WARN]' in out and 'health.json' in out  # 握り潰さずログに残す
+
+
 def test_posix_cksum_matches_coreutils() -> None:
     """POSIX cksum(1) の既知ベクタ (旧 .discovery_seen の key と一致すること)."""
     assert posix_cksum(b'') == 4294967295
