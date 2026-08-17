@@ -77,10 +77,15 @@ class NotificationQueue:
 
     @staticmethod
     def _load_strict(path: Path) -> dict[str, Any]:
-        """通知本体 (events/ack) 用。未作成なら空、壊れていれば QueueUnreadableError."""
-        if not path.exists():
-            return {}
+        """通知本体 (events/ack) 用。未作成なら空、壊れていれば QueueUnreadableError.
+
+        `path.exists()` 自体も親ディレクトリの権限次第で PermissionError を送出しうる
+        (mode 000 等)。read と同じ try に入れて OSError 全般を QueueUnreadableError に
+        正規化する (SQUAD-234: これが外にあったため cycle() が恒久停止していた)。
+        """
         try:
+            if not path.exists():
+                return {}
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as e:
             raise QueueUnreadableError(f'{path}: {e}') from e

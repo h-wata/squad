@@ -344,7 +344,13 @@ class Watcher:
         if not self.nq.fallback_due(int(now)):
             return
         if self.notify_dispatcher(msg):
-            self.nq.mark_fallback_sent(int(now))
+            try:
+                self.nq.mark_fallback_sent(int(now))
+            except OSError as e:
+                # fallback.json への backoff 状態書込みが失敗しても、通知そのものは
+                # 既に届いている。書けないと fallback_due() は毎回 True を返すため、
+                # 次サイクルも再送されるだけで沈黙はしない (SQUAD-234)。
+                self.log(f'[WARN] fallback backoff 状態の書込みに失敗 (次サイクルも送信される): {e}')
         else:
             self.log('[WARN] queue fallback の送信に失敗 (次サイクルで再試行)')
 
@@ -947,11 +953,26 @@ class Watcher:
             self.gc_worktrees()
             self.last_gc = now
 
-        # queue 経路が有効なときだけ、age-based fallback と health を回す
-        # (flag off = 従来動作では通知は既に Pane 0 へ直送済みなので queue は使わない)。
-        if self.cfg.notify_queue_enabled:
-            self._process_queue_fallbacks(now)
-            self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        # age-based fallback は flag の on/off に関わらず毎サイクル回す。flag on 時に
+        # enqueue 済みの未 ack event は、flag off (rollback) 後もこの経路でしか Pane 0 へ
+        # 届かないため、ここを flag でガードすると rollback 後に永久に沈黙する
+        # (SQUAD-228, PR #29 事後 cross-review)。新規通知の enqueue 自体は
+        # _enqueue_notification() 側で引き続き flag により直送/queue を切り替える。
+        self._process_queue_fallbacks(now)
+        # write_health() は既定環境 (flag off かつ notification dir 未使用) では呼ばない。
+        # ここを無条件にすると、queue を一度も opt-in していない環境でも health.json が
+        # 新規作成され続けてしまう (SQUAD-230, PR #31 cross-review blocking 指摘)。
+        # dir.exists()/write_health() の I/O 失敗 (PermissionError 等) は cycle() 全体を
+        # 落とさない。run() は cycle() の例外を捕捉しないため、ここで拾わないと watcher
+        # プロセスごと停止し、以後の fallback 通知も含め恒久的に沈黙する
+        # (SQUAD-231, PR #31 re-review blocking 指摘)。_process_queue_fallbacks() は
+        # 既にこの手前で実行済みなので、ここで例外を吸収しても当該サイクルの fallback
+        # 通知は失われない。
+        try:
+            if self.cfg.notify_queue_enabled or self.nq.dir.exists():
+                self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        except OSError as e:
+            self.log(f'[WARN] health.json 更新に失敗 (次サイクルで再試行): {e}')
         self._queue_write_ok = True
 
     def run(self) -> int:

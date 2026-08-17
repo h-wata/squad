@@ -35,6 +35,35 @@
 
 ### Fixed
 
+- `squad/watchd.py`: `WATCH_NOTIFY_QUEUE` を off に戻す (rollback) と、flag on 時に
+  enqueue 済みの未 ack event が `_process_queue_fallbacks()` ごと呼ばれなくなり永久に
+  Pane 0 へ届かなくなっていた不具合を修正。age-based fallback は flag の on/off に
+  関わらず毎サイクル回すようにした。ただし `write_health()` の呼び出しは
+  `notify_queue_enabled` が true、または既に notification ディレクトリが存在する場合
+  だけに限定し、queue を一度も opt-in していない既定環境で `health.json` が新規作成
+  され続ける副作用は避けた (SQUAD-228, cross-review SQUAD-229/230)。この判定・更新
+  (`self.nq.dir.exists()` / `write_health()`) で `PermissionError` 等の I/O 例外が
+  発生しても `cycle()` 全体を落とさないようにした。`run()` の主ループは `cycle()` の
+  例外を捕捉しないため、ここで拾わないと watcher プロセスごと停止し、直前に実行済みの
+  `_process_queue_fallbacks()` を含め以後の通知が恒久的に沈黙し得た
+  (SQUAD-231/232, PR #31 re-review blocking)。ただしこの対応は `dir.exists()` /
+  `write_health()` の経路だけを保護しており、それより手前で毎サイクル呼ばれる
+  `_process_queue_fallbacks()` → `due_fallback()` は未保護のままだった。
+- `squad/notify_queue.py`: `NotificationQueue._load_strict()` の `path.exists()` が
+  try の外にあり、`queue/notifications/<session>/` 配下が権限で読めない
+  (`os.chmod` mode 000 等) と `PermissionError` がそのまま `_process_queue_fallbacks()`
+  経由で `cycle()` から伝播し、`run()` が捕捉しないため watcher プロセスごと恒久停止
+  していた不具合を修正。`path.exists()` も read と同じ try に入れ、`OSError` 全般を
+  `QueueUnreadableError` に正規化した。これにより既存の
+  `except QueueUnreadableError` 経路 (`[QUEUE-ERROR]` を Pane 0 へ直送) が正しく効く
+  ようになった。あわせて `_send_queue_alert()` の `mark_fallback_sent()` (backoff 状態の
+  書込み) も同じ権限障害で失敗しうるため `OSError` を捕捉し、通知そのものは届いた上で
+  次サイクルに再送する形にフォールバックするようにした
+  (SQUAD-234, W4 re-review 実 filesystem 再現)。SQUAD-232 時点の回帰テストは mock 注入
+  のみで実 filesystem の権限遮断を再現できておらず検出できていなかったため、
+  `os.chmod` で実際に権限を落とす回帰テストを追加した。health.json 更新失敗の
+  `[WARN]` ログは Dispatcher pane へは届かず、通常起動 (`start.sh`) では
+  `/tmp/<session>-watch.log` に記録されるのみである点も実態に合わせて明記する。
 - `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
   届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
   呼び出しを追加した (SQUAD-212)。
@@ -48,6 +77,12 @@
   `path` を追加した。同一 project 内で report_id 欠落の別 worker が偶然同一内容の
   report を書くと、内容ハッシュだけをキーにしていたため一方だけが delivered となり、
   もう一方が永久に沈黙していた (SQUAD-218)。
+- `squad/watchd.py`: `WATCH_NOTIFY_QUEUE` を on → off に戻す rollback で、既に enqueue
+  済みの未 ack event の age-based fallback が `cycle()` の flag ガードで止まり、永久に
+  Pane 0 へ届かなくなっていた不具合を修正 (PR #29 事後 cross-review, SQUAD-227/228)。
+  `_process_queue_fallbacks()` を flag の on/off に関わらず毎サイクル実行するようにし、
+  flag off 中も既存 queue の未 ack event が age 閾値超過で従来どおり Pane 0 へ届くように
+  した。新規通知が flag off で queue を経由せず直送される既定挙動は変更していない。
 
 ### Changed
 

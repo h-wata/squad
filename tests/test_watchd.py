@@ -10,6 +10,7 @@ FakeTmux (subprocess を使わない) に差し替えて検証する。旧 test_
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -981,6 +982,192 @@ class TestRolloutFlag:
         monkeypatch.setattr(time, 'time', lambda: later)
         w.report_bridge()
         assert len(notifications(w.tmux.sent)) == 1
+
+    def test_cycle_does_not_create_health_json_when_flag_off_and_dir_absent(self, tmp_path: Path) -> None:
+        """SQUAD-230: 既定環境 (flag off かつ queue 未使用) では write_health を呼ばない.
+
+        cross-review (SQUAD-229) blocking 指摘: _process_queue_fallbacks() は無条件のまま
+        毎サイクル回るが、write_health() まで無条件だと未 opt-in 環境でも health.json が
+        新規作成され続けてしまう。
+        """
+        w, _queue = self._legacy_watcher(tmp_path)
+        assert not w.nq.dir.exists()
+        w.cycle()
+        assert not w.nq.health_path.exists()
+        assert not w.nq.events_path.exists()
+
+
+class TestFallbackSurvivesRollback:
+    """SQUAD-228: queue 有効時の未 ack event は flag off (rollback) 後も沈黙しない.
+
+    PR #29 事後 cross-review (SQUAD-227) の critical: flag off に戻すと
+    _process_queue_fallbacks() が cycle() から呼ばれなくなり、flag on 時に
+    enqueue 済みの未 ack event が永久に届かなくなっていた。
+    """
+
+    def _watcher(self, tmp_path: Path, *, enabled: bool) -> tuple[Watcher, Path]:
+        queue = tmp_path / 'queue'
+        cfg = Config(
+            session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=enabled
+        )
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        return w, queue
+
+    def _rollback(self, w: Watcher, priority: str, monkeypatch: pytest.MonkeyPatch, threshold: int) -> None:
+        w.nq.enqueue(
+            project='pj', source='report', priority=priority, message=f'{priority} event', dedupe_key=priority
+        )
+        w.cfg.notify_queue_enabled = False  # rollback: flag off に戻す
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + threshold + 1)
+        w.cycle()
+
+    def test_unacked_normal_reaches_pane_after_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        w, _ = self._watcher(tmp_path, enabled=True)
+        self._rollback(w, 'normal', monkeypatch, w.cfg.normal_fallback_seconds)
+        assert any('[QUEUE]' in m and 'normal' in m for _, m in w.tmux.sent)
+
+    def test_unacked_low_reaches_pane_after_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        w, _ = self._watcher(tmp_path, enabled=True)
+        self._rollback(w, 'low', monkeypatch, w.cfg.low_fallback_seconds)
+        assert any('[QUEUE]' in m and 'low' in m for _, m in w.tmux.sent)
+
+    def test_unacked_critical_reaches_pane_after_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, _ = self._watcher(tmp_path, enabled=True)
+        self._rollback(w, 'critical', monkeypatch, w.cfg.critical_fallback_seconds)
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)
+
+    def test_new_reports_still_go_direct_when_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Rollback 後の新規 report は従来どおり queue を経由せず直送される (既定挙動は不変)."""
+        w, queue = self._watcher(tmp_path, enabled=True)
+        w.cfg.notify_queue_enabled = False
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert len(notifications(w.tmux.sent)) == 1
+        assert not w.nq.events_path.exists()  # 新規 report は queue に書かれない
+
+
+class TestHealthIOFailureDoesNotSilenceCycle:
+    """SQUAD-231/232: dir.exists()/write_health() の I/O 失敗で watcher を沈黙させない.
+
+    PR #31 re-review blocking 指摘: PermissionError で cycle() 全体が例外終了すると、
+    run() はそれを捕捉しないため watcher プロセスごと止まり、以後の fallback 通知も
+    含めて恒久的に沈黙する。ここでは I/O 例外を注入しても cycle() が例外を伝播せず、
+    直前の _process_queue_fallbacks() による fallback 通知が届くことを確認する。
+    """
+
+    def test_dir_exists_permission_error_does_not_abort_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+        w.cfg.notify_queue_enabled = False  # rollback: dir.exists() 経路を通す
+
+        target_dir = w.nq.dir
+        orig_exists = Path.exists
+
+        def fake_exists(self: Path) -> bool:
+            if self == target_dir:
+                raise PermissionError(13, 'Permission denied')
+            return orig_exists(self)
+
+        monkeypatch.setattr(Path, 'exists', fake_exists)
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        w.cycle()  # 例外を投げずに戻ること
+
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)  # fallback は継続する
+
+    def test_write_health_permission_error_does_not_abort_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+
+        def raise_permission_error(**_kwargs: object) -> None:
+            raise PermissionError(13, 'Permission denied')
+
+        monkeypatch.setattr(w.nq, 'write_health', raise_permission_error)
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        w.cycle()  # 例外を投げずに戻ること
+
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)  # fallback は継続する
+        out = capsys.readouterr().out
+        assert '[WARN]' in out and 'health.json' in out  # 握り潰さずログに残す
+
+
+class TestQueueStatPermissionErrorRealFilesystem:
+    """SQUAD-234: 実 filesystem の mode 000 でも cycle() が継続し fallback が届くこと.
+
+    SQUAD-232 の回帰テスト (TestHealthIOFailureDoesNotSilenceCycle) は
+    Path.exists/write_health に mock で PermissionError を注入しており、実際の
+    権限遮断 (queue/notifications 配下の stat) を再現できていなかった (W4 のレビューで
+    実 filesystem 再現により反証済み)。ここでは os.chmod で実際に権限を落として確認する。
+    """
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root では権限チェックが効かないため skip')
+    def test_notifications_dir_mode_000_does_not_abort_cycle_and_fallback_reaches_pane(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+
+        notifications_dir = queue / 'notifications'
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        os.chmod(notifications_dir, 0o000)
+        try:
+            w.cycle()  # 例外を投げずに戻ること (PermissionError で watcher が恒久停止しない)
+        finally:
+            os.chmod(notifications_dir, 0o755)
+
+        # events/ack が stat すら出来ないため「未 ack 不明 = 安全側」として QUEUE-ERROR が
+        # Pane 0 へ実際に届くこと (fallback が silently スキップされていないこと)
+        assert any('[QUEUE-ERROR]' in m for _, m in w.tmux.sent)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root では権限チェックが効かないため skip')
+    def test_notifications_dir_mode_000_recovers_next_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """権限を戻した次サイクルでは通常どおり critical fallback が届くこと (握り潰していない)."""
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+
+        notifications_dir = queue / 'notifications'
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        os.chmod(notifications_dir, 0o000)
+        try:
+            w.cycle()
+        finally:
+            os.chmod(notifications_dir, 0o755)
+
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1 + 3600)
+        w.cycle()
+
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)
 
 
 def test_posix_cksum_matches_coreutils() -> None:
