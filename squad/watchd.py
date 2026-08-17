@@ -15,6 +15,8 @@
             WATCH_DISCOVERY_INTERVAL / WATCH_DISCOVERY_MAX / WATCH_SWEEP_INTERVAL / WATCH_GC_INTERVAL
             WATCH_QUEUE_DIR / WATCH_LEDGER_FILE / WATCH_LEDGER_LEASE / WATCH_WORKTREE_GLOB
             SQUAD_SESSION / SQUAD_DEFAULT_OWNER
+            WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Pane 0 直送。1 で durable queue 経路)
+            WATCH_CRITICAL_FALLBACK_SECONDS / WATCH_NORMAL_FALLBACK_SECONDS / WATCH_LOW_FALLBACK_SECONDS
 
 複数セッション並行運用 (SQUAD_SESSION を変えて start.sh を複数起動する場合):
   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
@@ -46,8 +48,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ledger import Claim  # noqa: E402
 from ledger import delivery_key  # noqa: E402
 from ledger import find_reports  # noqa: E402
+from ledger import parse_scalars  # noqa: E402
 from ledger import report_identity  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
+from notify_queue import NotificationQueue  # noqa: E402
+from notify_queue import notify_dir_for  # noqa: E402
+from notify_queue import QueueUnreadableError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -131,6 +137,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    v = os.environ.get(name, '').strip().lower()
+    if not v:
+        return default
+    return v in ('1', 'true', 'yes', 'on')
+
+
 @dataclass
 class Config:
     """env から解決した watcher 設定."""
@@ -151,10 +164,21 @@ class Config:
     worktree_glob: str = field(
         default_factory=lambda: os.environ.get('WATCH_WORKTREE_GLOB') or str(REPO_ROOT.parent / '*-wt-*')
     )
+    critical_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_CRITICAL_FALLBACK_SECONDS', 300))
+    normal_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_NORMAL_FALLBACK_SECONDS', 900))
+    low_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_LOW_FALLBACK_SECONDS', 3600))
+    # 段階導入 flag (SQUAD-226)。既定は従来動作 = Pane 0 へ直送。WATCH_NOTIFY_QUEUE=1 で
+    # durable queue 経路を opt-in する。flag を外せば (既定に戻せば) 即座に従来動作へ rollback。
+    notify_queue_enabled: bool = field(default_factory=lambda: _bool_env('WATCH_NOTIFY_QUEUE', False))
 
     @property
     def dispatcher(self) -> str:
         return f'{self.session}:0.0'
+
+    @property
+    def notify_dir(self) -> Path:
+        """通知 queue/ack/health の置き場所 (session で namespace する)."""
+        return notify_dir_for(self.queue_dir, self.session)
 
     @property
     def projects_dir(self) -> Path:
@@ -218,15 +242,16 @@ class Watcher:
         self.cfg = cfg or Config()
         self.tmux = tmux or Tmux(self.cfg.session)
         self.ledger = ReportLedger(self.cfg.ledger_path, lease_seconds=self.cfg.lease_seconds)
+        self.nq = NotificationQueue(self.cfg.session, self.cfg.notify_dir)
         self.owned: list[Path] = []
         self.pane_hash: dict[int, str] = {}
         self.pane_stall: dict[int, int] = {}
         self.stall_notified: dict[int, str] = {}
         self.resume_count: dict[int, int] = {}
-        self.pending_nudge = ''
         self.last_discovery = 0.0
         self.last_sweep = 0.0
         self.last_gc = 0.0
+        self._queue_write_ok = True
 
     # ---- ログ / 通知 ----
 
@@ -250,6 +275,78 @@ class Watcher:
             return False
         self.sleep(0.3)
         return True
+
+    def _enqueue_notification(
+        self, *, project: str, source: str, priority: str, message: str, dedupe_key: str
+    ) -> bool:
+        """通知を session-local durable queue へ積む (flag off なら従来どおり Pane 0 へ直送).
+
+        書込みに失敗 (disk full 等)、または既存 queue が破損して読めない場合は False を
+        返す。呼び出し元は「未配達」として扱い、ledger の backoff / 次サイクルで再試行する。
+        破損 queue を空と見なして上書きすると未 ack 通知が永久に消えるため、この経路では
+        events.json に一切書かない (SQUAD-226 critical 1)。
+        """
+        if not self.cfg.notify_queue_enabled:
+            return self.notify_dispatcher(message)
+        try:
+            self.nq.enqueue(project=project, source=source, priority=priority, message=message, dedupe_key=dedupe_key)
+            return True
+        except QueueUnreadableError as e:
+            self.log(f'[WARN] 通知 queue が破損して読めないため enqueue を中止 (既存ファイルは保持): {e}')
+            self._queue_write_ok = False
+            return False
+        except OSError as e:
+            self.log(f'[WARN] 通知 queue への書込みに失敗: {e}')
+            self._queue_write_ok = False
+            return False
+
+    def _process_queue_fallbacks(self, now: float) -> None:
+        """未 ack event が priority 別閾値を超えたら、Pane 0 へ 1 行だけ fallback する.
+
+        本文そのものではなく件数だけを送る (queue を読みに行かせるための安全弁)。
+        以後は指数 backoff で再送する。これ以外の経路では Pane 0 へ何も直接書かない。
+        critical だけでなく normal / low も age で昇格するため、Dispatcher が pull を
+        忘れても永久に沈黙しない (SQUAD-226 critical 2)。
+        queue 自体が読めないときは、件数の代わりに「queue 異常」を直送する
+        (未 ack が見えない = 最も危険なので必ず鳴らす、SQUAD-226 critical 1)。
+        """
+        thresholds = {
+            'critical': self.cfg.critical_fallback_seconds,
+            'normal': self.cfg.normal_fallback_seconds,
+            'low': self.cfg.low_fallback_seconds,
+        }
+        try:
+            due = self.nq.due_fallback(int(now), thresholds)
+        except QueueUnreadableError as e:
+            self._queue_write_ok = False
+            self._send_queue_alert(
+                now,
+                f'[QUEUE-ERROR] 通知 queue を読めません ({e})。未 ack 通知が見えない状態です。'
+                f'queue/notifications/{self.cfg.session}/events.json を退避・復旧し、'
+                f'各 project の reports/ を直接確認してください。',
+            )
+            return
+        if not due:
+            return
+        self._send_queue_alert(
+            now,
+            f'[QUEUE] 未確認通知 {due["count"]}件 (最上位 {due["priority"]}, '
+            f'最古 約{int(due["oldest_age"])}s 未 ack)。'
+            f'queue/notifications/{self.cfg.session}/ を確認してください (squad notify pull)。',
+        )
+
+    def _send_queue_alert(self, now: float, msg: str) -> None:
+        """Fallback / queue 異常の 1 行を Pane 0 へ送り、backoff を進める.
+
+        Backoff は fallback.json (events とは別ファイル) だけで判定するので、queue 本体が
+        破損していても指数 backoff は効く (毎サイクル鳴り続けない)。
+        """
+        if not self.nq.fallback_due(int(now)):
+            return
+        if self.notify_dispatcher(msg):
+            self.nq.mark_fallback_sent(int(now))
+        else:
+            self.log('[WARN] queue fallback の送信に失敗 (次サイクルで再試行)')
 
     # ---- project 担当 ----
 
@@ -307,6 +404,24 @@ class Watcher:
                     newest = m
         return newest
 
+    def newest_file(self, pattern: str) -> Path | None:
+        """担当 project 内で pattern にマッチする最新 mtime のファイル (無ければ None).
+
+        newest_mtime() と違い、Step 6 の task/report 突き合わせで実ファイル
+        (task_id 読み取り・project 特定) が要るときに使う。
+        """
+        newest_p: Path | None = None
+        newest_m = ''
+        for d in self.owned:
+            for p in d.glob(pattern):
+                try:
+                    m = mtime_str(p)
+                except OSError:
+                    continue
+                if mtime_gt(m, newest_m):
+                    newest_m, newest_p = m, p
+        return newest_p
+
     # ---- 1. report-bridge ----
 
     def report_bridge(self) -> None:
@@ -342,14 +457,17 @@ class Watcher:
         invalid: str,
         claim: Claim,
     ) -> None:
+        dedupe_key = f'report:{project}:{report_id}'
         if invalid:
-            self.log(f'report 検知(invalid): {path} -> Dispatcher [REPORT-INVALID] 通知 ({invalid})')
+            self.log(f'report 検知(invalid): {path} -> queue [REPORT-INVALID] 通知 ({invalid})')
             msg = (
                 f'[REPORT-INVALID project={project} path={path} content_sha256={sha} error={invalid}] '
                 'report_id が無いか YAML を解釈できません。担当 worker に schema 準拠 '
                 '(report_id: UUIDv4) での再出力を指示してください。'
             )
-            sent = self.notify_dispatcher(msg)
+            enqueued = self._enqueue_notification(
+                project=project, source='invalid', priority='critical', message=msg, dedupe_key=dedupe_key
+            )
         else:
             name = Path(path).name
             wm = WORKER_NUM_RE.search(name)
@@ -361,27 +479,32 @@ class Watcher:
                 f'attempt={claim.attempt}]'
             )
             if meta.get('status') == 'blocked':
-                self.log(f'report 検知(blocked): {path} -> Dispatcher [INBOX] 通知')
+                self.log(f'report 検知(blocked): {path} -> queue [INBOX] 通知')
                 body = (
                     f'[INBOX] Worker{wnum} が blocked: 検証ゲート未通過。'
                     f'{path} の notes/verdict を確認し、ユーザーに優先報告してください。'
                 )
+                priority, source = 'critical', 'blocked'
             else:
-                self.log(f'report 検知: {path} -> Dispatcher 通知 (attempt={claim.attempt})')
+                self.log(f'report 検知: {path} -> queue 通知 (attempt={claim.attempt})')
                 body = f'Worker{wnum} {kind}: {path} を確認してください。(watcher 自動橋渡し)'
-            # 1 行に収める: 本文を改行で分けると tmux send-keys が途中で確定してしまう。
-            sent = self.notify_dispatcher(f'{body} {tag}')
+                priority, source = 'normal', 'report'
+            # 1 行に収める: 本文を改行で分けると tmux send-keys が途中で確定してしまう
+            # (直送は fallback だけだが、queue 本文としても同じ形式を踏襲する)。
+            enqueued = self._enqueue_notification(
+                project=project, source=source, priority=priority, message=f'{body} {tag}', dedupe_key=dedupe_key
+            )
 
-        # 送信できて初めて delivered に確定する。失敗したら pending のまま backoff を進め、
+        # queue へ積めて初めて delivered に確定する。失敗したら pending のまま backoff を進め、
         # next_attempt_at に達したサイクルで再送する。token が空 = claim は fail-open した
         # (ledger に記録が無い) ので、実態と逆のログを出さない。
         token = claim.token
-        if sent and self.ledger.commit(project, report_id, token):
+        if enqueued and self.ledger.commit(project, report_id, token):
             return
-        if sent:
-            self.log(f'[WARN] 通知したが ledger を更新できず: {path} (再通知の可能性あり)')
+        if enqueued:
+            self.log(f'[WARN] queue へ積んだが ledger を更新できず: {path} (再通知の可能性あり)')
         else:
-            self.log(f'[WARN] Dispatcher への送信に失敗: {path} (attempt={claim.attempt}, backoff 後に再送)')
+            self.log(f'[WARN] 通知 queue への書込みに失敗: {path} (attempt={claim.attempt}, backoff 後に再送)')
         wait = self.ledger.fail(project, report_id, token)
         if not wait:
             self.log(f'[WARN] ledger に再送予定を記録できませんでした: {path} (lease 期限切れ後に再 claim)')
@@ -391,13 +514,25 @@ class Watcher:
     def check_workers(self) -> None:
         for n in (1, 2, 3, 4):
             pane = f'{self.cfg.session}:{PANE_SUFFIX[n]}'
-            task_m = self.newest_mtime(f'tasks/worker{n}.yaml')
+            task_path = self.newest_file(f'tasks/worker{n}.yaml')
+            task_m = mtime_str(task_path) if task_path else ''
             rep_m = self.newest_mtime(f'reports/worker{n}_report.yaml')
             review_m = self.newest_mtime(f'reports/worker{n}_review.yaml')
             if mtime_gt(review_m, rep_m):
                 rep_m = review_m
 
             pending = bool(task_m) and (not rep_m or mtime_gt(task_m, rep_m))
+            project, task_id = '', ''
+            if task_path is not None:
+                project = task_path.parent.parent.name
+                try:
+                    task_id = parse_scalars(task_path.read_text(errors='replace')).get('task_id', '')
+                except OSError:
+                    task_id = ''
+            if pending and task_id and self._archived_report_delivered(task_path, n, project, task_id):
+                self.log(f'Worker{n}: task {task_id} は archive 済み report で配達済み -> stall 対象外')
+                pending = False
+
             if not pending:
                 self.pane_stall[n] = 0
                 self.resume_count[n] = 0
@@ -432,7 +567,7 @@ class Watcher:
                         self.log(f'Worker{n}: 活動再開を検知 → 再停止時の再通報を有効化')
 
             if self.pane_stall.get(n, 0) >= self.cfg.stall_cycles and self.stall_notified.get(n) != task_m:
-                self._notify_stall(n, pane, task_m)
+                self._notify_stall(n, pane, task_m, project or 'unknown', task_id)
 
     def auto_answer(self, pane: str, cap: str) -> None:
         """承認プロンプトに既定(Yes)で応答する。"(y/n)" 形式は y、それ以外は Enter."""
@@ -442,7 +577,34 @@ class Watcher:
         self.tmux.send_keys(pane, 'Enter')
         self.sleep(0.3)
 
-    def _notify_stall(self, n: int, pane: str, task_m: str) -> None:
+    def _archived_report_delivered(self, task_path: Path, n: int, project: str, task_id: str) -> bool:
+        """Task と同じ task_id の archive 済み report が既に配達済みか (Step 6, 誤警報抑止).
+
+        reports/ にはもう無い (archive 済み) が tasks/ に task YAML が残っているケースを
+        対象にする。ledger で delivered と確認できたときだけ pending を打ち消す。本当に
+        未処理/未検知の report は従来どおり pane hash による停止判定を行う。
+        """
+        project_dir = task_path.parent.parent
+        archive_dir = project_dir / 'reports' / 'archive'
+        if not archive_dir.is_dir():
+            return False
+        for pattern in (f'worker{n}_report*.yaml', f'worker{n}_review*.yaml'):
+            for p in sorted(archive_dir.glob(pattern)):
+                try:
+                    data = p.read_bytes()
+                except OSError:
+                    continue
+                sha, meta, parse_error = report_identity(data)
+                if parse_error or meta.get('task_id') != task_id:
+                    continue
+                report_id, invalid = delivery_key(meta, sha, parse_error, str(p))
+                if invalid:
+                    continue
+                if self.ledger.is_delivered(project, report_id):
+                    return True
+        return False
+
+    def _notify_stall(self, n: int, pane: str, task_m: str, project: str, task_id: str) -> None:
         secs = self.cfg.interval * self.cfg.stall_cycles
         hook_event = self._recent_hook_event(n)
         pane_short = pane.split(':', 1)[1]
@@ -452,17 +614,22 @@ class Watcher:
                 f'Worker{n} は完了 (hook={hook_event}) していますが task が pending のままです '
                 f'(約{secs}s 経過)。pane {pane_short} を確認し、report を書くよう促してください。'
             )
+            source = 'stall-hook'
         else:
-            self.log(f'Worker{n}: 約{secs}s 停止 (タスク未報告) -> Dispatcher 通報')
+            self.log(f'Worker{n}: 約{secs}s 停止 (タスク未報告) -> queue 通報')
             msg = (
                 f'Worker{n} が約{secs}s 停止しています (タスク割当済・report 未出力)。'
                 f'pane {pane_short} を確認し、必要なら再送/clear してください。'
             )
-        # 送信できたときだけ通報済みにする (失敗時は次サイクルで再試行)
-        if self.notify_dispatcher(msg):
+            source = 'stall'
+        dedupe_key = f'stall:{project}:{n}:{task_id or task_m}'
+        # queue に積めたときだけ通報済みにする (失敗時は次サイクルで再試行)
+        if self._enqueue_notification(
+            project=project, source=source, priority='low', message=msg, dedupe_key=dedupe_key
+        ):
             self.stall_notified[n] = task_m
         else:
-            self.log(f'[WARN] Worker{n} の停止通報を送信できず (次サイクルで再試行)')
+            self.log(f'[WARN] Worker{n} の停止通報を queue へ書き込めず (次サイクルで再試行)')
 
     @staticmethod
     def _recent_hook_event(n: int) -> str:
@@ -661,16 +828,17 @@ class Watcher:
             self.log('discovery: baseline 完了 (既存 backlog を既知化、通知なし)')
             return
         if state['added'] > 0:
-            self.log(f'discovery: 新規候補 {state["added"]} 件 -> inbox + Dispatcher 通知')
-            # 送信に失敗したら pending_nudge に積み、メインループが毎サイクル再送を試みる。
-            # seen の既知化は取り消さない (候補は inbox に記録済みで、失われるのは nudge だけ)。
+            self.log(f'discovery: 新規候補 {state["added"]} 件 -> inbox + queue 通知')
+            # 同じ dedupe_key ('discovery') が未 ack のままなら、直近件数へ debounce merge
+            # される (Pane 直送は廃止)。seen の既知化は queue 書込みの成否に関わらず取り消さない
+            # (候補は inbox に記録済みで、queue 書込み失敗時に失われるのは nudge だけ)。
             nudge = f'[DISCOVERY] 新規候補 {state["added"]} 件を {inbox_file} に追加。'
             nudge += '空き worker に自動起票してください (task-yaml-author → 通知)。'
             nudge += 'merge gate は人間が維持。'
-            if not self.notify_dispatcher(nudge):
-                self.pending_nudge = f'[DISCOVERY] 新規候補を {inbox_file} に追加済み。'
-                self.pending_nudge += '確認して空き worker に起票してください。'
-                self.log('[WARN] Dispatcher への discovery 通知に失敗 (次サイクルで再送)')
+            if not self._enqueue_notification(
+                project='*', source='discovery', priority='low', message=nudge, dedupe_key='discovery'
+            ):
+                self.log('[WARN] discovery 通知の queue 書込みに失敗 (次サイクルで再試行)')
             return
 
         # 新規ゼロ: idle を遊ばせず、throttle 付きで「一通りレビュー(sweep)」を投げる
@@ -687,10 +855,10 @@ class Watcher:
         self.log('discovery: 新規なし -> [SWEEP] 周回レビューを inbox 投入')
         sweep_msg = '[SWEEP] 新規タスクなし。空き worker がいれば既存コード/open PR/backlog の'
         sweep_msg += '一通りレビュー・監査を1件だけ割り当ててください (全員稼働中なら何もしない)。'
-        if not self.notify_dispatcher(sweep_msg):
-            self.pending_nudge = f'[SWEEP] 周回レビュー候補を {inbox_file} に投入済み。'
-            self.pending_nudge += '空き worker がいれば割り当ててください。'
-            self.log('[WARN] Dispatcher への sweep 通知に失敗 (次サイクルで再送)')
+        if not self._enqueue_notification(
+            project='*', source='sweep', priority='low', message=sweep_msg, dedupe_key='sweep'
+        ):
+            self.log('[WARN] sweep 通知の queue 書込みに失敗 (次サイクルで再試行)')
         self.last_sweep = now
 
     # ---- 5. worktree GC ----
@@ -769,14 +937,8 @@ class Watcher:
         self.report_bridge()
         self.check_workers()
 
-        # 前回送信に失敗した nudge があれば先に再送を試みる (成功するまで毎サイクル)
-        if self.pending_nudge and self.notify_dispatcher(self.pending_nudge):
-            self.log('保留していた Dispatcher 通知を再送しました')
-            self.pending_nudge = ''
         now = time.time()
-        # 保留 nudge が残っている間は discovery を延期する (実行すると新しい nudge が
-        # 1 スロットしかない pending_nudge を上書きして古い通知が失われる)。
-        if not self.pending_nudge and now - self.last_discovery >= self.cfg.discovery_interval:
+        if now - self.last_discovery >= self.cfg.discovery_interval:
             self.run_discovery()
             self.last_discovery = now
         # worktree GC は glob ベースで project 単位に絞れないため、複数セッション並行時の
@@ -784,6 +946,13 @@ class Watcher:
         if self.cfg.session == self.cfg.default_owner and now - self.last_gc >= self.cfg.gc_interval:
             self.gc_worktrees()
             self.last_gc = now
+
+        # queue 経路が有効なときだけ、age-based fallback と health を回す
+        # (flag off = 従来動作では通知は既に Pane 0 へ直送済みなので queue は使わない)。
+        if self.cfg.notify_queue_enabled:
+            self._process_queue_fallbacks(now)
+            self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+        self._queue_write_ok = True
 
     def run(self) -> int:
         c = self.cfg

@@ -32,6 +32,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ledger import ReportLedger  # noqa: E402
+from notify_queue import notify_dir_for  # noqa: E402
+from notify_queue import NotificationQueue  # noqa: E402
+from notify_queue import QueueUnreadableError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -390,6 +393,53 @@ def cmd_ledger_fail(args: argparse.Namespace, _cfg: dict) -> int:
     return 0 if ok else 1
 
 
+# ---------- notify queue (SQUAD-220 の pull/ack helper) ----------
+
+
+def _notify_queue(args: argparse.Namespace, cfg: dict) -> NotificationQueue:
+    session = resolve_session(cfg)
+    queue_dir = Path(args.queue_dir) if getattr(args, 'queue_dir', None) else REPO_ROOT / 'queue'
+    return NotificationQueue(session, notify_dir_for(queue_dir, session))
+
+
+def _unreadable(nq: NotificationQueue, e: QueueUnreadableError) -> int:
+    """Queue 破損を「0 件」と誤読させないため、明示的なエラーで落とす (SQUAD-226)."""
+    payload = {'error': 'queue_unreadable', 'detail': str(e), 'health': nq.read_health()}
+    print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+    return 2
+
+
+def cmd_notify_pull(args: argparse.Namespace, cfg: dict) -> int:
+    """未 ack event (+ health) を JSON Lines で表示する。Dispatcher は Read だけで良い."""
+    nq = _notify_queue(args, cfg)
+    try:
+        events = nq.unacked()
+    except QueueUnreadableError as e:
+        return _unreadable(nq, e)
+    if args.priority:
+        events = [e for e in events if e['priority'] == args.priority]
+    for e in events:
+        print(json.dumps(e, ensure_ascii=False))
+    if args.health:
+        print(json.dumps(nq.read_health(), ensure_ascii=False))
+    return 0
+
+
+def cmd_notify_ack(args: argparse.Namespace, cfg: dict) -> int:
+    """Event を ack する ('all' で現在の未 ack を一括 ack)."""
+    nq = _notify_queue(args, cfg)
+    try:
+        ids = [e['event_id'] for e in nq.unacked()] if args.event_id == 'all' else [args.event_id]
+    except QueueUnreadableError as e:
+        return _unreadable(nq, e)
+    ok = True
+    for eid in ids:
+        r = nq.ack(eid, by=args.by or '')
+        ok = ok and r
+        print(json.dumps({'event_id': eid, 'ok': r}))
+    return 0 if ok else 1
+
+
 # ---------- entry ----------
 
 
@@ -424,6 +474,19 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument(arg_name, **kwargs)
         p.add_argument('--ledger-file', help=f'ledger DB path (既定: {DEFAULT_LEDGER_PATH})')
         p.set_defaults(func=func)
+
+    p_notify = sub.add_parser('notify', help='session-local durable notification queue の pull/ack (SQUAD-220)')
+    notify_sub = p_notify.add_subparsers(dest='notify_cmd', required=True)
+    p_pull = notify_sub.add_parser('pull', help='未 ack event (+ health) を表示')
+    p_pull.add_argument('--priority', choices=['critical', 'normal', 'low'])
+    p_pull.add_argument('--health', action='store_true', help='health.json も表示')
+    p_pull.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
+    p_pull.set_defaults(func=cmd_notify_pull)
+    p_ack = notify_sub.add_parser('ack', help='event を ack する (event_id か all)')
+    p_ack.add_argument('event_id')
+    p_ack.add_argument('--by', help='ack した主体 (省略可)')
+    p_ack.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
+    p_ack.set_defaults(func=cmd_notify_ack)
 
     args = ap.parse_args(argv)
     cfg = load_config()

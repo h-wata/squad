@@ -30,6 +30,8 @@
 4. kioku-mesh 等のメモリ MCP が設定されていれば、`search_memory(project="<pj>", limit=10)` で
    直近の方針・決定・PJ 知識を復元（worker に渡すべき制約があれば task 化時に反映）。
    設定が無ければこの項目はスキップしてよい
+5. 通知 queue を opt-in (`WATCH_NOTIFY_QUEUE=1`) している場合のみ: `squad notify pull --health`
+   で未 ack 通知を読む（→「通知 queue の pull / ack 規約」）。既定運用ではこの項目は不要
 
 これらから「**仕掛かり中のタスク / 未処理 inbox / blocked(要人間判断) の有無**」を
 3-5 行でユーザーに提示し、指示を仰ぐ。**勝手に再開・再起票はしない**
@@ -293,6 +295,55 @@ report YAML に含まれる必須フィールド (worker 側責務):
 - `verify_status: pass | fail | skipped` (検証ゲートの結果)
 - `pr_url:` (PR を投げた場合は必須)
 - `git_head:` (任意。作業対象 worktree の HEAD SHA)
+
+### 通知 queue の pull / ack 規約 (SQUAD-220 / SQUAD-226)
+
+**既定 (`WATCH_NOTIFY_QUEUE` 未設定) では watcher は従来どおり Pane 0 へ直送する。**
+この節は queue 経路を opt-in (`WATCH_NOTIFY_QUEUE=1` を付けて `start.sh` / `watch.sh` を
+起動) したときの規約。既定運用のままなら pull は不要（何もしなくても通知は届く）。
+
+queue が有効なとき、watcher は通知を `queue/notifications/<session>/` へ永続化する。
+Pane 0 へ直送されるのは「未 ack 通知が閾値を超えた」ときの 1 行サマリだけなので、
+**以下の 4 タイミングで必ず pull する**:
+
+1. セッション開始時（状態復元の一部として）
+2. ユーザーへ応答する前
+3. report を処理した直後
+4. idle から復帰したとき
+
+```bash
+# 未 ack 通知を読む (critical だけ先に読む: --priority critical)
+python3 squad/squad.py notify pull --health
+python3 squad/squad.py notify pull --priority critical
+
+# 処理し終えた event を ack する (event_id 指定、または全件 ack)
+python3 squad/squad.py notify ack <event_id> --by dispatcher
+python3 squad/squad.py notify ack all --by dispatcher
+```
+
+規約:
+
+- **critical (blocked report / REPORT-INVALID) を先に処理してユーザーへ報告する。**
+  normal (通常 report) → low (stall / discovery / sweep) の順。
+- ack は「読んで対応を決めた」もののみ。**未対応のまま ack しない**（ack した通知は
+  二度と Pane に出ない）。判断保留なら ack せず残す。
+- ack し忘れても消えない: 未 ack のまま critical 300s / normal 900s / low 3600s を超えると
+  watcher が Pane 0 へ「未確認通知 N 件」を再送する（以後は指数 backoff）。
+  **つまり pull を忘れても永久に沈黙することはない。**
+
+**queue が読めないときの報告手順**:
+
+- `[QUEUE-ERROR] 通知 queue を読めません` が Pane 0 に出た、または `notify pull` が
+  `QueueUnreadable` で落ちた場合、**未 ack 通知が見えない = 最も危険な状態**。
+- この場合は queue の自動復旧を待たず、**ユーザーへ明示的に報告する**（VOICEVOX 通知も）。
+- 応急処置: 破損ファイル (`queue/notifications/<session>/events.json`) を
+  `events.json.corrupt.<日時>` へ退避する（削除しない）。watcher が次サイクルで
+  新しい queue を作り直す。
+- 退避した通知は失われているので、**各 project の `reports/` を直接 ls して
+  未処理 report が無いか目視で確認する**。watcher は queue へ積めなかった report を
+  ledger の backoff で再配達するため、多くはそのまま再通知される。
+- 復旧が確認できるまで、`notify pull --health` の `queue_readable` が true に戻ったことを
+  毎回確認する。
 
 ### 通知に付く識別子の読み方 (SQUAD-216)
 
