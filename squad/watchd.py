@@ -344,7 +344,13 @@ class Watcher:
         if not self.nq.fallback_due(int(now)):
             return
         if self.notify_dispatcher(msg):
-            self.nq.mark_fallback_sent(int(now))
+            try:
+                self.nq.mark_fallback_sent(int(now))
+            except OSError as e:
+                # fallback.json への backoff 状態書込みが失敗しても、通知そのものは
+                # 既に届いている。書けないと fallback_due() は毎回 True を返すため、
+                # 次サイクルも再送されるだけで沈黙はしない (SQUAD-234)。
+                self.log(f'[WARN] fallback backoff 状態の書込みに失敗 (次サイクルも送信される): {e}')
         else:
             self.log('[WARN] queue fallback の送信に失敗 (次サイクルで再試行)')
 

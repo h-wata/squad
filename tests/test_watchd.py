@@ -10,6 +10,7 @@ FakeTmux (subprocess を使わない) に差し替えて検証する。旧 test_
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -1107,6 +1108,66 @@ class TestHealthIOFailureDoesNotSilenceCycle:
         assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)  # fallback は継続する
         out = capsys.readouterr().out
         assert '[WARN]' in out and 'health.json' in out  # 握り潰さずログに残す
+
+
+class TestQueueStatPermissionErrorRealFilesystem:
+    """SQUAD-234: 実 filesystem の mode 000 でも cycle() が継続し fallback が届くこと.
+
+    SQUAD-232 の回帰テスト (TestHealthIOFailureDoesNotSilenceCycle) は
+    Path.exists/write_health に mock で PermissionError を注入しており、実際の
+    権限遮断 (queue/notifications 配下の stat) を再現できていなかった (W4 のレビューで
+    実 filesystem 再現により反証済み)。ここでは os.chmod で実際に権限を落として確認する。
+    """
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root では権限チェックが効かないため skip')
+    def test_notifications_dir_mode_000_does_not_abort_cycle_and_fallback_reaches_pane(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+
+        notifications_dir = queue / 'notifications'
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        os.chmod(notifications_dir, 0o000)
+        try:
+            w.cycle()  # 例外を投げずに戻ること (PermissionError で watcher が恒久停止しない)
+        finally:
+            os.chmod(notifications_dir, 0o755)
+
+        # events/ack が stat すら出来ないため「未 ack 不明 = 安全側」として QUEUE-ERROR が
+        # Pane 0 へ実際に届くこと (fallback が silently スキップされていないこと)
+        assert any('[QUEUE-ERROR]' in m for _, m in w.tmux.sent)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root では権限チェックが効かないため skip')
+    def test_notifications_dir_mode_000_recovers_next_cycle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """権限を戻した次サイクルでは通常どおり critical fallback が届くこと (握り潰していない)."""
+        queue = tmp_path / 'queue'
+        cfg = Config(session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=True)
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        w.nq.enqueue(project='pj', source='report', priority='critical', message='critical event', dedupe_key='k')
+
+        notifications_dir = queue / 'notifications'
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1)
+
+        os.chmod(notifications_dir, 0o000)
+        try:
+            w.cycle()
+        finally:
+            os.chmod(notifications_dir, 0o755)
+
+        monkeypatch.setattr(time, 'time', lambda: base + w.cfg.critical_fallback_seconds + 1 + 3600)
+        w.cycle()
+
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)
 
 
 def test_posix_cksum_matches_coreutils() -> None:

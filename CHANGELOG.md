@@ -46,7 +46,24 @@
   発生しても `cycle()` 全体を落とさないようにした。`run()` の主ループは `cycle()` の
   例外を捕捉しないため、ここで拾わないと watcher プロセスごと停止し、直前に実行済みの
   `_process_queue_fallbacks()` を含め以後の通知が恒久的に沈黙し得た
-  (SQUAD-231/232, PR #31 re-review blocking)。
+  (SQUAD-231/232, PR #31 re-review blocking)。ただしこの対応は `dir.exists()` /
+  `write_health()` の経路だけを保護しており、それより手前で毎サイクル呼ばれる
+  `_process_queue_fallbacks()` → `due_fallback()` は未保護のままだった。
+- `squad/notify_queue.py`: `NotificationQueue._load_strict()` の `path.exists()` が
+  try の外にあり、`queue/notifications/<session>/` 配下が権限で読めない
+  (`os.chmod` mode 000 等) と `PermissionError` がそのまま `_process_queue_fallbacks()`
+  経由で `cycle()` から伝播し、`run()` が捕捉しないため watcher プロセスごと恒久停止
+  していた不具合を修正。`path.exists()` も read と同じ try に入れ、`OSError` 全般を
+  `QueueUnreadableError` に正規化した。これにより既存の
+  `except QueueUnreadableError` 経路 (`[QUEUE-ERROR]` を Pane 0 へ直送) が正しく効く
+  ようになった。あわせて `_send_queue_alert()` の `mark_fallback_sent()` (backoff 状態の
+  書込み) も同じ権限障害で失敗しうるため `OSError` を捕捉し、通知そのものは届いた上で
+  次サイクルに再送する形にフォールバックするようにした
+  (SQUAD-234, W4 re-review 実 filesystem 再現)。SQUAD-232 時点の回帰テストは mock 注入
+  のみで実 filesystem の権限遮断を再現できておらず検出できていなかったため、
+  `os.chmod` で実際に権限を落とす回帰テストを追加した。health.json 更新失敗の
+  `[WARN]` ログは Dispatcher pane へは届かず、通常起動 (`start.sh`) では
+  `/tmp/<session>-watch.log` に記録されるのみである点も実態に合わせて明記する。
 - `squad/watchd.py`: 担当 project 0 件の警告が `print` のみで Dispatcher pane に
   届いていなかった不具合を修正。`warn_missing_markers()` に `notify_dispatcher()`
   呼び出しを追加した (SQUAD-212)。
