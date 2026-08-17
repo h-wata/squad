@@ -952,11 +952,6 @@ class Watcher:
         # 届かないため、ここを flag でガードすると rollback 後に永久に沈黙する
         # (SQUAD-228, PR #29 事後 cross-review)。新規通知の enqueue 自体は
         # _enqueue_notification() 側で引き続き flag により直送/queue を切り替える。
-        # age-based fallback は flag の on/off に関わらず毎サイクル回す。flag on 時に
-        # enqueue 済みの未 ack event は、flag off (rollback) 後もこの経路でしか Pane 0 へ
-        # 届かないため、ここを flag でガードすると rollback 後に永久に沈黙する
-        # (SQUAD-228, PR #29 事後 cross-review)。新規通知の enqueue 自体は
-        # _enqueue_notification() 側で引き続き flag により直送/queue を切り替える。
         self._process_queue_fallbacks(now)
         self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
         self._queue_write_ok = True
