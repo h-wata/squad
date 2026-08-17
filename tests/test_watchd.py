@@ -983,6 +983,61 @@ class TestRolloutFlag:
         assert len(notifications(w.tmux.sent)) == 1
 
 
+class TestFallbackSurvivesRollback:
+    """SQUAD-228: queue 有効時の未 ack event は flag off (rollback) 後も沈黙しない.
+
+    PR #29 事後 cross-review (SQUAD-227) の critical: flag off に戻すと
+    _process_queue_fallbacks() が cycle() から呼ばれなくなり、flag on 時に
+    enqueue 済みの未 ack event が永久に届かなくなっていた。
+    """
+
+    def _watcher(self, tmp_path: Path, *, enabled: bool) -> tuple[Watcher, Path]:
+        queue = tmp_path / 'queue'
+        cfg = Config(
+            session='testsess', default_owner='none', queue_dir=queue, interval=1, notify_queue_enabled=enabled
+        )
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        return w, queue
+
+    def _rollback(self, w: Watcher, priority: str, monkeypatch: pytest.MonkeyPatch, threshold: int) -> None:
+        w.nq.enqueue(
+            project='pj', source='report', priority=priority, message=f'{priority} event', dedupe_key=priority
+        )
+        w.cfg.notify_queue_enabled = False  # rollback: flag off に戻す
+        base = time.time()
+        monkeypatch.setattr(time, 'time', lambda: base + threshold + 1)
+        w.cycle()
+
+    def test_unacked_normal_reaches_pane_after_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        w, _ = self._watcher(tmp_path, enabled=True)
+        self._rollback(w, 'normal', monkeypatch, w.cfg.normal_fallback_seconds)
+        assert any('[QUEUE]' in m and 'normal' in m for _, m in w.tmux.sent)
+
+    def test_unacked_low_reaches_pane_after_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        w, _ = self._watcher(tmp_path, enabled=True)
+        self._rollback(w, 'low', monkeypatch, w.cfg.low_fallback_seconds)
+        assert any('[QUEUE]' in m and 'low' in m for _, m in w.tmux.sent)
+
+    def test_unacked_critical_reaches_pane_after_flag_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, _ = self._watcher(tmp_path, enabled=True)
+        self._rollback(w, 'critical', monkeypatch, w.cfg.critical_fallback_seconds)
+        assert any('[QUEUE]' in m and 'critical' in m for _, m in w.tmux.sent)
+
+    def test_new_reports_still_go_direct_when_flag_off(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Rollback 後の新規 report は従来どおり queue を経由せず直送される (既定挙動は不変)."""
+        w, queue = self._watcher(tmp_path, enabled=True)
+        w.cfg.notify_queue_enabled = False
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert len(notifications(w.tmux.sent)) == 1
+        assert not w.nq.events_path.exists()  # 新規 report は queue に書かれない
+
+
 def test_posix_cksum_matches_coreutils() -> None:
     """POSIX cksum(1) の既知ベクタ (旧 .discovery_seen の key と一致すること)."""
     assert posix_cksum(b'') == 4294967295

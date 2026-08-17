@@ -48,6 +48,12 @@
   `path` を追加した。同一 project 内で report_id 欠落の別 worker が偶然同一内容の
   report を書くと、内容ハッシュだけをキーにしていたため一方だけが delivered となり、
   もう一方が永久に沈黙していた (SQUAD-218)。
+- `squad/watchd.py`: `WATCH_NOTIFY_QUEUE` を on → off に戻す rollback で、既に enqueue
+  済みの未 ack event の age-based fallback が `cycle()` の flag ガードで止まり、永久に
+  Pane 0 へ届かなくなっていた不具合を修正 (PR #29 事後 cross-review, SQUAD-227/228)。
+  `_process_queue_fallbacks()` を flag の on/off に関わらず毎サイクル実行するようにし、
+  flag off 中も既存 queue の未 ack event が age 閾値超過で従来どおり Pane 0 へ届くように
+  した。新規通知が flag off で queue を経由せず直送される既定挙動は変更していない。
 
 ### Changed
 

@@ -30,8 +30,12 @@
 4. kioku-mesh 等のメモリ MCP が設定されていれば、`search_memory(project="<pj>", limit=10)` で
    直近の方針・決定・PJ 知識を復元（worker に渡すべき制約があれば task 化時に反映）。
    設定が無ければこの項目はスキップしてよい
-5. 通知 queue を opt-in (`WATCH_NOTIFY_QUEUE=1`) している場合のみ: `squad notify pull --health`
-   で未 ack 通知を読む（→「通知 queue の pull / ack 規約」）。既定運用ではこの項目は不要
+5. 通知 queue を opt-in (`WATCH_NOTIFY_QUEUE=1`) している場合、または**過去に一度でも
+   opt-in してから off に戻した (rollback) 場合**: `squad notify pull --health` で未 ack
+   通知を読む（→「通知 queue の pull / ack 規約」）。rollback 後も
+   `queue/notifications/<session>/events.json` に未 ack event が残っていれば watcher が
+   age-based fallback で最終的に Pane 0 へ 1 行アラートを出すが、内容そのものは pull
+   しないと読めない (SQUAD-228)。一度も opt-in したことが無ければこの項目は不要
 
 これらから「**仕掛かり中のタスク / 未処理 inbox / blocked(要人間判断) の有無**」を
 3-5 行でユーザーに提示し、指示を仰ぐ。**勝手に再開・再起票はしない**
@@ -300,7 +304,15 @@ report YAML に含まれる必須フィールド (worker 側責務):
 
 **既定 (`WATCH_NOTIFY_QUEUE` 未設定) では watcher は従来どおり Pane 0 へ直送する。**
 この節は queue 経路を opt-in (`WATCH_NOTIFY_QUEUE=1` を付けて `start.sh` / `watch.sh` を
-起動) したときの規約。既定運用のままなら pull は不要（何もしなくても通知は届く）。
+起動) したときの規約。一度も opt-in したことが無ければ pull は不要（何もしなくても通知は
+届く）。
+
+**rollback (opt-in 後に `WATCH_NOTIFY_QUEUE` を外して off に戻す) した場合の注意**:
+flag off に戻した時点で queue に残っていた未 ack event は、watcher が age-based fallback
+で従来どおり Pane 0 へ「未確認通知 N 件」を送り続ける（flag off でもこの経路は止まらない、
+SQUAD-228）。ただしこれは件数だけの 1 行サマリで、本文は `notify pull` しないと読めない。
+rollback した直後は `notify pull --health` で `unacked_*` が全て 0 になるまで pull/ack を
+続けること。0 になれば以後は pull しなくてよい（新規通知は flag off なので直送に戻る）。
 
 queue が有効なとき、watcher は通知を `queue/notifications/<session>/` へ永続化する。
 Pane 0 へ直送されるのは「未 ack 通知が閾値を超えた」ときの 1 行サマリだけなので、
