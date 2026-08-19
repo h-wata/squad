@@ -4,11 +4,26 @@
 
 set -e
 
+usage() {
+    echo "使用方法: $0 [-s session_name] [-p project1,project2] <workspace_path>"
+    echo "例: $0 -s rmf -p rmf_ws ~/rmf_ws/src"
+    echo "  -s: tmux セッション名 (優先順: -s > SQUAD_SESSION env > 対話入力 > ros-agents)"
+    echo "  -p: このセッションが担当する project (SQUAD_OWNED_PROJECTS env と同義)"
+    exit 1
+}
+
+while getopts "s:p:h" _opt; do
+    case "$_opt" in
+        s) SQUAD_SESSION="$OPTARG" ;;
+        p) SQUAD_OWNED_PROJECTS="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
 # 引数チェック
 if [ $# -lt 1 ]; then
-    echo "使用方法: $0 <workspace_path>"
-    echo "例: $0 ~/work"
-    exit 1
+    usage
 fi
 
 WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
@@ -16,6 +31,11 @@ WORKSPACE="$(cd "$1" 2>/dev/null && pwd)" || {
     exit 1
 }
 
+# セッション名が -s でも env でも指定されていなければ、対話端末なら聞く
+# (非対話 [CI 等] は従来通り既定値 ros-agents に落とす)
+if [ -z "${SQUAD_SESSION:-}" ] && [ -t 0 ]; then
+    read -rp "tmux セッション名 [ros-agents]: " SQUAD_SESSION
+fi
 SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SQUAD_ENABLE_CODEX=0 で Pane 6 (Worker 4 / Codex) の起動を丸ごとスキップできる
@@ -105,16 +125,23 @@ fi
 # 使い方: カンマ区切りで複数 project を指定できる。
 #   例: SQUAD_OWNED_PROJECTS=squad,note ./start.sh ~/work
 # 既に別 session を指すマーカーがある project は無警告で奪わない (スキップ + 警告表示)。
+#
+# -p / env とも未指定で、この session を指すマーカーが 1 つも無い場合は対話端末なら聞く。
+# 担当 0 件のまま起動すると watcher が idle になり、Dispatcher が全 project を
+# claim しにいく事故につながるため (空 Enter で従来通りスキップできる)。
+if [ -z "${SQUAD_OWNED_PROJECTS:-}" ] && [ -t 0 ] \
+    && ! grep -qsx "$SESSION_NAME" "$SCRIPT_DIR"/queue/projects/*/.squad_session 2>/dev/null; then
+    read -rp "session '$SESSION_NAME' の担当 project (カンマ区切り、空で skip): " SQUAD_OWNED_PROJECTS
+fi
 if [ -n "${SQUAD_OWNED_PROJECTS:-}" ]; then
     IFS=',' read -ra _OWNED_PJS <<< "$SQUAD_OWNED_PROJECTS"
     for _pj in "${_OWNED_PJS[@]}"; do
         _pj="$(echo "$_pj" | xargs)"
         [ -z "$_pj" ] && continue
         _pj_dir="$SCRIPT_DIR/queue/projects/$_pj"
-        if [ ! -d "$_pj_dir" ]; then
-            echo "[WARN] SQUAD_OWNED_PROJECTS: project '$_pj' ($_pj_dir) が存在しないためマーカーをスキップします"
-            continue
-        fi
+        # 新規 project はここで scaffold する (存在しないからとスキップすると、
+        # 初回 workspace の立ち上げで担当 0 件 idle になる)
+        mkdir -p "$_pj_dir/tasks" "$_pj_dir/reports"
         _marker="$_pj_dir/.squad_session"
         if [ -f "$_marker" ]; then
             _existing="$(head -n1 "$_marker" | tr -d '[:space:]')"
