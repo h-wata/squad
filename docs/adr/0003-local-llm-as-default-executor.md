@@ -85,10 +85,10 @@
   - 禁止の根拠が「未測定」として明示されるので、後から実測で広げられる。
     「悪いと分かっている」という誤読で固定化しない
 - **悪い点**:
-  - **`local-coder` の agent 定義がまだ存在しない**。`.claude/agents/` にあるのは
-    `task-yaml-author` / `dashboard-updater` / `verifier` の 3 つで、
-    旧 `vllm-consultant` も定義が無く実体の無い参照だった。この ADR と指示書は
-    契約の記述であり、定義が入るまで委譲は発生しない
+  - **接続設定 (`~/.pi/agent/models.json`) がリポジトリ管理外**である。agent 定義
+    (`.claude/agents/local-coder.md`) は追跡されるが、pi の provider 設定は個人の
+    ホーム配下にあり、新しい環境では手で書く必要がある。旧 `vllm-consultant` は
+    agent 定義そのものが存在せず、実体の無い参照になっていた。同じ壊れ方をしうる
   - worker の手順が 1 段増える。委譲するかの判断と、返ってきた差分の目視が要る。
     自分で書いたほうが速い規模のタスクでは割に合わない
   - **squad が LAN の vLLM に依存する**。停止時は worker が自分で実装する形に
