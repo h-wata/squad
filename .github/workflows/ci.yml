@@ -26,7 +26,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        # apt 経由 (apt-get install shellcheck) が 10分以上ハングする事象が run 32272446476 /
+        # 32275117537 で発生したため、公式 static バイナリ取得に置き換え。
+        # sha256 は https://github.com/koalaman/shellcheck/releases/tag/v0.11.0 の
+        # shellcheck-v0.11.0.linux.x86_64.tar.xz をダウンロードして
+        # `sha256sum shellcheck.tar.xz` で算出（release に checksum ファイルの配布なし）。
+        run: |
+          set -euo pipefail
+          curl -sSL -o shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          install -m 755 shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
       - name: run shellcheck
         run: git ls-files -z '*.sh' | xargs -0 shellcheck --severity=warning
 
