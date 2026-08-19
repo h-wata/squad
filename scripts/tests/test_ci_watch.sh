@@ -17,7 +17,17 @@ FAKE_BIN="$WORKDIR/bin"
 mkdir -p "$FAKE_BIN"
 
 # --- フェイク gh ------------------------------------------------------------
-# シナリオは FAKE_GH_SCENARIO で切り替える (normal / failure / hang / hang_no_log / all_open)。
+# シナリオは FAKE_GH_SCENARIO で切り替える。
+#   normal              : run 1件、成功
+#   failure / triage_fail: run 1件、失敗 (conclusion=failure)
+#   hang                : run が in_progress、job が経過1000秒 (既定900秒超) でハング、
+#                         --log は成功する
+#   hang_no_log         : hang と同じだが --log が失敗する (ログ取得不能ケース)
+#   hang_null_started   : run は in_progress だが job の startedAt が null (NB2)
+#   no_runs             : gh run list が空配列を返す (CI run がまだ無いケース)
+#   all_open            : gh pr list が複数 PR を返す。各 PR の run list は normal 相当
+#   gh_fail_pr_view     : gh pr view 自体が失敗する (B2, 単一PRパス)
+#   gh_fail_pr_list     : gh pr list 自体が失敗する (B2, --all-open パス)
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -26,9 +36,17 @@ sub="$1 $2"
 
 case "$sub" in
   "pr view")
+    if [ "$scenario" = "gh_fail_pr_view" ]; then
+      echo "simulated: gh: authentication failed (HTTP 401)" >&2
+      exit 1
+    fi
     echo '{"headRefName":"test-branch"}'
     ;;
   "pr list")
+    if [ "$scenario" = "gh_fail_pr_list" ]; then
+      echo "simulated: gh: API rate limit exceeded" >&2
+      exit 1
+    fi
     if [ "$scenario" = "all_open" ]; then
       echo '[{"number":101},{"number":102}]'
     else
@@ -43,15 +61,14 @@ case "$sub" in
       failure|triage_fail)
         echo '[{"databaseId":2002,"status":"completed","conclusion":"failure","headSha":"bbb","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/2002"}]'
         ;;
-      hang|hang_no_log)
+      hang|hang_no_log|hang_null_started)
         echo '[{"databaseId":32269209831,"status":"in_progress","conclusion":null,"headSha":"decfdc6","event":"pull_request","workflowName":"CI","url":"https://github.com/h-wata/kioku-mesh/actions/runs/32269209831"}]'
         ;;
+      no_runs)
+        echo '[]'
+        ;;
       all_open)
-        if [ "$3" = "--branch" ] && [ "${4:-}" = "test-branch" ]; then
-          echo '[{"databaseId":1001,"status":"completed","conclusion":"success","headSha":"aaa","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/1001"}]'
-        else
-          echo '[]'
-        fi
+        echo '[{"databaseId":1001,"status":"completed","conclusion":"success","headSha":"aaa","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/1001"}]'
         ;;
       *)
         echo '[]'
@@ -74,8 +91,11 @@ case "$sub" in
           echo '{"jobs":[{"status":"completed","startedAt":"2026-01-01T00:00:00Z","name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"completed","conclusion":"failure","name":"Run pytest"}]}]}'
           ;;
         hang|hang_no_log)
-          started="$(date -u -d "-700 seconds" +"%Y-%m-%dT%H:%M:%SZ")"
+          started="$(date -u -d "-1000 seconds" +"%Y-%m-%dT%H:%M:%SZ")"
           printf '{"jobs":[{"status":"in_progress","startedAt":"%s","name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"in_progress","name":"Install zenohd"}]}]}\n' "$started"
+          ;;
+        hang_null_started)
+          echo '{"jobs":[{"status":"in_progress","startedAt":null,"name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"in_progress","name":"Install zenohd"}]}]}'
           ;;
         *)
           echo '{"jobs":[]}'
@@ -117,6 +137,25 @@ echo "saved: $OUT"
 FAKE_TRIAGE_OK
 chmod +x "$WORKDIR/pi-triage-ok.sh"
 
+# --- フェイク pi-log-triage.sh (成功、ただし少し遅い: 並行実行の競合窓を広げる用) -----
+cat > "$WORKDIR/pi-triage-slow.sh" <<'FAKE_TRIAGE_SLOW'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$#" -ge 2 ] || { echo "usage: $0 <log> <yaml> [timeout]" >&2; exit 64; }
+OUT="$2"
+[ -e "$OUT" ] && { echo "error: refusing to overwrite existing output: $OUT" >&2; exit 73; }
+sleep 0.4
+cat > "$OUT" <<'YAML'
+failed_step: "n/a"
+failure_signals: []
+candidate_causes: []
+next_check: "n/a"
+unknowns: []
+YAML
+echo "saved: $OUT"
+FAKE_TRIAGE_SLOW
+chmod +x "$WORKDIR/pi-triage-slow.sh"
+
 # --- フェイク pi-log-triage.sh (常に失敗) ------------------------------------
 cat > "$WORKDIR/pi-triage-fail.sh" <<'FAKE_TRIAGE_FAIL'
 #!/usr/bin/env bash
@@ -133,8 +172,8 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
 
+# 1回だけ実行し、出力とステータスをファイル/変数に残す。
 run_case() {
-  # 1回だけ実行し、出力とステータスをファイル/変数に残す (呼び出し元でアサーションに使う)。
   local inbox="$1" scenario="$2" triage="$3"; shift 3
   set +e
   FAKE_GH_SCENARIO="$scenario" CI_WATCH_INBOX="$inbox" CI_WATCH_PI_TRIAGE="$triage" \
@@ -146,22 +185,19 @@ run_case() {
 echo "=== case 1: normal run -> 何も出力せず exit 0 ==="
 INBOX1="$WORKDIR/inbox1.md"
 run_case "$INBOX1" normal "$WORKDIR/pi-triage-ok.sh" 42
-echo "--- raw output ---"
-cat "$WORKDIR/last_output.txt"
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
 echo "--- exit code: $return_code ---"
 if [ "$return_code" -eq 0 ]; then pass "case1: exit 0"; else fail "case1: exit code was $return_code, want 0"; fi
 if [ ! -f "$INBOX1" ]; then pass "case1: inbox not created"; else fail "case1: inbox unexpectedly created"; fi
 
 echo
-echo "=== case 2: failure run -> inbox に1行追記、非ゼロ終了 ==="
+echo "=== case 2: failure run -> inbox に1行追記、非ゼロ終了 (exit 2) ==="
 INBOX2="$WORKDIR/inbox2.md"
 run_case "$INBOX2" failure "$WORKDIR/pi-triage-ok.sh" 43
-echo "--- raw output ---"
-cat "$WORKDIR/last_output.txt"
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
 echo "--- exit code: $return_code ---"
-echo "--- inbox content ---"
-cat "$INBOX2" 2>&1 || true
-if [ "$return_code" -ne 0 ]; then pass "case2: non-zero exit"; else fail "case2: exit was 0, want non-zero"; fi
+echo "--- inbox content ---"; cat "$INBOX2" 2>&1 || true
+if [ "$return_code" -eq 2 ]; then pass "case2: exit 2 (anomaly)"; else fail "case2: exit was $return_code, want 2"; fi
 if grep -qF "[CI] PR #43" "$INBOX2" 2>/dev/null && grep -qF "Run pytest" "$INBOX2"; then
   pass "case2: inbox line has PR + failed step"
 else
@@ -174,15 +210,13 @@ else
 fi
 
 echo
-echo "=== case 3: ハング run (Install zenohd, 700s > 600s既定) を検知、ログ取得も失敗するが継続 ==="
+echo "=== case 3: ハング run (Install zenohd, 1000s > 既定900s) を検知、ログ取得も失敗するが継続 ==="
 INBOX3="$WORKDIR/inbox3.md"
 run_case "$INBOX3" hang_no_log "$WORKDIR/pi-triage-ok.sh" 44
-echo "--- raw output ---"
-cat "$WORKDIR/last_output.txt"
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
 echo "--- exit code: $return_code ---"
-echo "--- inbox content ---"
-cat "$INBOX3" 2>&1 || true
-if [ "$return_code" -ne 0 ]; then pass "case3: non-zero exit"; else fail "case3: exit was 0, want non-zero"; fi
+echo "--- inbox content ---"; cat "$INBOX3" 2>&1 || true
+if [ "$return_code" -eq 2 ]; then pass "case3: exit 2 (anomaly)"; else fail "case3: exit was $return_code, want 2"; fi
 if grep -qF "Install zenohd" "$INBOX3" 2>/dev/null; then
   pass "case3: hang detected on Install zenohd"
 else
@@ -203,13 +237,12 @@ first_lines="$(wc -l < "$INBOX4")"
 run_case "$INBOX4" hang "$WORKDIR/pi-triage-ok.sh" 45
 second_run_rc="$return_code"
 second_lines="$(wc -l < "$INBOX4")"
-echo "--- inbox after 2 runs ---"
-cat "$INBOX4"
+echo "--- inbox after 2 runs ---"; cat "$INBOX4"
 echo "--- line counts: 1st=$first_lines 2nd=$second_lines ---"
-if [ "$first_run_rc" -ne 0 ] && [ "$second_run_rc" -ne 0 ]; then
-  pass "case4: both runs report the anomaly (non-zero exit)"
+if [ "$first_run_rc" -eq 2 ] && [ "$second_run_rc" -eq 2 ]; then
+  pass "case4: both runs report the anomaly (exit 2)"
 else
-  fail "case4: expected non-zero exit both times (got $first_run_rc, $second_run_rc)"
+  fail "case4: expected exit 2 both times (got $first_run_rc, $second_run_rc)"
 fi
 if [ "$first_lines" -eq "$second_lines" ]; then
   pass "case4: no duplicate line appended on second run"
@@ -226,12 +259,10 @@ echo
 echo "=== case 5: pi-log-triage.sh が失敗しても ci-watch.sh は検知結果を出して続行する ==="
 INBOX5="$WORKDIR/inbox5.md"
 run_case "$INBOX5" triage_fail "$WORKDIR/pi-triage-fail.sh" 46
-echo "--- raw output ---"
-cat "$WORKDIR/last_output.txt"
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
 echo "--- exit code: $return_code ---"
-echo "--- inbox content ---"
-cat "$INBOX5" 2>&1 || true
-if [ "$return_code" -ne 0 ]; then pass "case5: non-zero exit despite triage failure"; else fail "case5: exit was 0"; fi
+echo "--- inbox content ---"; cat "$INBOX5" 2>&1 || true
+if [ "$return_code" -eq 2 ]; then pass "case5: exit 2 despite triage failure"; else fail "case5: exit was $return_code, want 2"; fi
 if grep -qF "[CI] PR #46" "$INBOX5" 2>/dev/null; then
   pass "case5: raw detection still written to inbox"
 else
@@ -241,6 +272,113 @@ if grep -qF "triage:" "$INBOX5" 2>/dev/null; then
   fail "case5: triage line present despite triage script failure"
 else
   pass "case5: no triage line recorded (triage script failed as expected)"
+fi
+
+echo
+echo "=== case 6 (B1): 2プロセス同時起動でも inbox の該当run行は1つだけ ==="
+INBOX6="$WORKDIR/inbox6.md"
+FAKE_GH_SCENARIO=hang CI_WATCH_INBOX="$INBOX6" CI_WATCH_PI_TRIAGE="$WORKDIR/pi-triage-slow.sh" \
+  bash "$CI_WATCH" 47 > "$WORKDIR/race_a.log" 2>&1 &
+pid_a=$!
+FAKE_GH_SCENARIO=hang CI_WATCH_INBOX="$INBOX6" CI_WATCH_PI_TRIAGE="$WORKDIR/pi-triage-slow.sh" \
+  bash "$CI_WATCH" 47 > "$WORKDIR/race_b.log" 2>&1 &
+pid_b=$!
+set +e
+wait "$pid_a"; rc_a=$?
+wait "$pid_b"; rc_b=$?
+set -e
+echo "--- process a output ---"; cat "$WORKDIR/race_a.log"
+echo "--- process b output ---"; cat "$WORKDIR/race_b.log"
+echo "--- inbox after concurrent race ---"; cat "$INBOX6" 2>&1 || true
+if [ "$rc_a" -eq 2 ] && [ "$rc_b" -eq 2 ]; then
+  pass "case6: both concurrent processes report the anomaly"
+else
+  fail "case6: expected both to exit 2 (got a=$rc_a b=$rc_b)"
+fi
+race_lines="$(grep -c "\[CI\] PR #47" "$INBOX6" 2>/dev/null || echo 0)"
+if [ "$race_lines" -eq 1 ]; then
+  pass "case6: exactly 1 line after concurrent race (flock serialized append_inbox)"
+else
+  fail "case6: got $race_lines lines for PR #47, want 1 (inbox race not prevented)"
+fi
+
+echo
+echo "=== case 7 (B2): gh pr view 自体が失敗 (単一PR) -> stderr メッセージ + exit 3 ==="
+INBOX7="$WORKDIR/inbox7.md"
+run_case "$INBOX7" gh_fail_pr_view "$WORKDIR/pi-triage-ok.sh" 48
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then pass "case7: exit 3 (operational failure)"; else fail "case7: exit was $return_code, want 3"; fi
+if grep -qF "authentication failed" "$WORKDIR/last_output.txt"; then
+  pass "case7: stderr carries the gh failure message"
+else
+  fail "case7: stderr message missing"
+fi
+if [ -f "$INBOX7" ]; then
+  fail "case7: inbox created despite operational failure (should not treat as a normal/anomaly detection)"
+else
+  pass "case7: no inbox entry written for an operational failure"
+fi
+
+echo
+echo "=== case 8 (B2): gh pr list 自体が失敗 (--all-open) -> stderr メッセージ + exit 3 ==="
+INBOX8="$WORKDIR/inbox8.md"
+run_case "$INBOX8" gh_fail_pr_list "$WORKDIR/pi-triage-ok.sh" --all-open
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then pass "case8: exit 3 (operational failure)"; else fail "case8: exit was $return_code, want 3"; fi
+if grep -qF "rate limit exceeded" "$WORKDIR/last_output.txt"; then
+  pass "case8: stderr carries the gh pr list failure message"
+else
+  fail "case8: stderr message missing"
+fi
+
+echo
+echo "=== case 9 (NB4): --all-open 経路、複数 PR とも正常なら exit 0 ==="
+INBOX9="$WORKDIR/inbox9.md"
+run_case "$INBOX9" all_open "$WORKDIR/pi-triage-ok.sh" --all-open
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 0 ]; then pass "case9: --all-open with 2 normal PRs exits 0"; else fail "case9: exit was $return_code, want 0"; fi
+if [ ! -f "$INBOX9" ]; then pass "case9: no inbox entries for normal PRs"; else fail "case9: unexpected inbox entries"; fi
+
+echo
+echo "=== case 10 (NB4): CI run が0件 (まだ走っていない) -> 正常系として exit 0 ==="
+INBOX10="$WORKDIR/inbox10.md"
+run_case "$INBOX10" no_runs "$WORKDIR/pi-triage-ok.sh" 49
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 0 ]; then pass "case10: run 0件は正常系 (exit 0)"; else fail "case10: exit was $return_code, want 0"; fi
+if [ ! -f "$INBOX10" ]; then pass "case10: no inbox entry for a PR with no runs yet"; else fail "case10: unexpected inbox entry"; fi
+
+echo
+echo "=== case 11 (NB2): startedAt が null の in_progress job は正しくスキップされる ==="
+INBOX11="$WORKDIR/inbox11.md"
+run_case "$INBOX11" hang_null_started "$WORKDIR/pi-triage-ok.sh" 50
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 0 ]; then pass "case11: null startedAt does not trigger a false hang (exit 0)"; else fail "case11: exit was $return_code, want 0"; fi
+if [ ! -f "$INBOX11" ]; then pass "case11: no inbox entry written"; else fail "case11: unexpected inbox entry"; fi
+
+echo
+echo "=== case 12 (NB2): CI_WATCH_STALL_SECONDS の不正値を拒否する ==="
+set +e
+CI_WATCH_STALL_SECONDS="not-a-number" bash "$CI_WATCH" 51 > "$WORKDIR/badstall1.log" 2>&1
+rc1=$?
+CI_WATCH_STALL_SECONDS="-5" bash "$CI_WATCH" 51 > "$WORKDIR/badstall2.log" 2>&1
+rc2=$?
+set -e
+echo "--- non-integer: exit $rc1 ---"; cat "$WORKDIR/badstall1.log"
+echo "--- negative: exit $rc2 ---"; cat "$WORKDIR/badstall2.log"
+if [ "$rc1" -eq 1 ] && grep -qF "CI_WATCH_STALL_SECONDS" "$WORKDIR/badstall1.log"; then
+  pass "case12: non-integer CI_WATCH_STALL_SECONDS rejected with exit 1"
+else
+  fail "case12: non-integer value not rejected as expected (rc=$rc1)"
+fi
+if [ "$rc2" -eq 1 ] && grep -qF "CI_WATCH_STALL_SECONDS" "$WORKDIR/badstall2.log"; then
+  pass "case12: negative CI_WATCH_STALL_SECONDS rejected with exit 1"
+else
+  fail "case12: negative value not rejected as expected (rc=$rc2)"
 fi
 
 echo
@@ -255,6 +393,7 @@ if grep -nE '\b(eval|exec|source)\b|sh[[:space:]]+-c|bash[[:space:]]+-c' "$CI_WA
 else
   pass "extra: ci-watch.sh に triage 出力を実行する経路が無い (eval/exec/-c 系コマンド無し)"
 fi
+# shellcheck disable=SC2016
 if grep -qE '\.\s*"\$triage' "$CI_WATCH"; then
   fail "extra: ci-watch.sh が triage YAML を source している"
 else

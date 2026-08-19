@@ -6,8 +6,33 @@
 # 入力ログそのものは変更しない。Pi には read/grep/find/ls だけを許可し、出力は
 # 一時ファイルを経由して原子的に保存する。判断を含むレビュー・仕様・task YAML
 # には使わないこと。
+#
+# Pi に渡す前に、既知の secret パターン (Authorization ヘッダ、GitHub token、AWS
+# キー、Bearer token、URL 埋め込み credential、SSH 秘密鍵ブロック) をマスクした
+# 一時コピーを作り、Pi にはそのコピーだけを読ませる (元ログは無傷)。local-vllm は
+# LAN 上のサービスであり、CI ログに紛れ込んだ secret がそのまま送信されるのを防ぐ
+# ための最低限の対策。既知パターン外の secret は防げないので、CI ログに
+# secret を残さない (secret はログに出さない/マスクする) 運用が引き続き前提となる。
 
 set -euo pipefail
+
+# 送信前に既知の secret パターンをマスクする。行数を変えない (置換のみ) ことで、
+# Pi が返す行番号がマスク後ログの行番号として一貫するようにする。
+mask_secrets() {
+    sed -E \
+        -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/{
+              /-----BEGIN [A-Z ]*PRIVATE KEY-----/b
+              /-----END [A-Z ]*PRIVATE KEY-----/b
+              s/.*/[REDACTED PRIVATE KEY LINE]/
+            }' \
+        -e 's/^([[:space:]]*[Aa]uthorization:[[:space:]]*).*/\1<redacted>/' \
+        -e 's/\bBearer[[:space:]]+[A-Za-z0-9._~+\/=-]+/Bearer <redacted>/g' \
+        -e 's/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/\1_<redacted>/g' \
+        -e 's/\bgithub_pat_[A-Za-z0-9_]{20,}\b/github_pat_<redacted>/g' \
+        -e 's/\bAKIA[0-9A-Z]{16}\b/AKIA<redacted>/g' \
+        -e 's/(aws_secret_access_key[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<redacted>/gI' \
+        -e 's#(https?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1<redacted>@#g'
+}
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
     echo "Usage: $0 <input-log> <output-yaml> [timeout-seconds]" >&2
@@ -44,7 +69,9 @@ OUTPUT_DIR="$(dirname "$OUTPUT_YAML")"
 OUTPUT_BASE="$(basename "$OUTPUT_YAML")"
 mkdir -p "$OUTPUT_DIR"
 TEMP_OUTPUT="$(mktemp "$OUTPUT_DIR/.${OUTPUT_BASE}.XXXXXX")"
-trap 'rm -f "$TEMP_OUTPUT"' EXIT
+MASKED_LOG="$(mktemp)"
+mask_secrets < "$INPUT_LOG" > "$MASKED_LOG"
+trap 'rm -f "$TEMP_OUTPUT" "$MASKED_LOG"' EXIT
 
 normalize_and_validate_output() {
     python3 - "$TEMP_OUTPUT" <<'PY'
@@ -135,7 +162,7 @@ unknowns:
 PROMPT
 )
 
-PROMPT="入力ログは ${INPUT_LOG} です。ログを機械的に絞り込み、指定形式の YAML を返してください。"
+PROMPT="入力ログは ${MASKED_LOG} です。ログを機械的に絞り込み、指定形式の YAML を返してください。"
 
 timeout "$TIMEOUT_SECONDS" pi -p \
     --provider local-vllm \
