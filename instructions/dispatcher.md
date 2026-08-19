@@ -448,6 +448,11 @@ head が動けば無効になる。
   差分限定（`<approve時head>..<現head>`）の再レビューを発注する。
 - 再レビューの verdict は `approve_continues` / 新規 blocking のいずれかで記録する。
 
+review・修正タスクを起票する際、サボタージュ（mutation テスト）を含む検証は共有
+worktree を直接壊さず使い捨てコピーで行うよう指示する。report には
+`source_tree_clean` 相当の作業ツリー clean 確認（`git status -s` 等の出力）を
+含めさせること。
+
 ### マージ前ゲート: `/pr-ready`
 
 現状 `/pr-ready` skill は未実装で、`gh pr view` 等のコマンドによる手動確認で代替している。

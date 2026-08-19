@@ -23,6 +23,10 @@ status: completed
 # 必須: pass / fail / skipped
 # (検証ゲートの結果。verify: が無いタスクは skipped)
 verify_status: pass
+# レビュー/サボタージュ検証タスクのみ必須。作業ツリーを汚さず使い捨てコピーで
+# 検証したことの確認。true/false + 確認コマンド (git status -s 等) の出力を書く。
+# 非レビュータスクは省略可。
+source_tree_clean: ""
 # 例: /path/to/worktree/reports/worker1_verdict.yaml
 # (verify した場合の verifier 出力先)
 verdict_path: ""
