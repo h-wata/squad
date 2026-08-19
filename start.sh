@@ -139,9 +139,10 @@ if [ -n "${SQUAD_OWNED_PROJECTS:-}" ]; then
         _pj="$(echo "$_pj" | xargs)"
         [ -z "$_pj" ] && continue
         _pj_dir="$SCRIPT_DIR/queue/projects/$_pj"
-        # 新規 project はここで scaffold する (存在しないからとスキップすると、
-        # 初回 workspace の立ち上げで担当 0 件 idle になる)
-        mkdir -p "$_pj_dir/tasks" "$_pj_dir/reports"
+        if [ ! -d "$_pj_dir" ]; then
+            echo "[WARN] SQUAD_OWNED_PROJECTS: project '$_pj' ($_pj_dir) が存在しないためマーカーをスキップします"
+            continue
+        fi
         _marker="$_pj_dir/.squad_session"
         if [ -f "$_marker" ]; then
             _existing="$(head -n1 "$_marker" | tr -d '[:space:]')"

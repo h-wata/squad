@@ -70,9 +70,10 @@ tmux attach -t ros-agents     # 再アタッチ
 
 `-s` / `SQUAD_SESSION` とも未指定で端末が対話可能なら、起動時にセッション名を聞く
 (空 Enter で既定の `ros-agents`)。同様に、担当 project がどのマーカーにも無い session で
-起動した場合は担当 project を聞く (空 Enter でスキップ)。`-p` で指定した project の
-ディレクトリが無ければ scaffold ごと作成される。非対話 (CI 等) では従来通り
-既定値に落ちるだけで、対話プロンプトは出ない。
+起動した場合は担当 project を聞く (空 Enter でスキップ)。非対話 (CI 等) では従来通り
+既定値に落ちるだけで、対話プロンプトは出ない。`-p` に `queue/projects/` 配下に無い
+project を指定した場合は、typo でゴミディレクトリを作らないよう従来通り警告して
+スキップする。
 
 Codex CLI を使わない場合は Pane 6 (Worker 4/Codex) の起動自体をスキップできる:
 
