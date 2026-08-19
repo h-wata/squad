@@ -6,7 +6,9 @@
 # (readlink -f で実体を辿って SQUAD_ROOT を解決する)。
 #
 # 使い方:
-#   squad start <workspace> [-s <session>]   # 起動 (session 既定: ros-agents)
+#   squad start <workspace> [-s <session>] [-p <projects>]
+#                                            # 起動。-s 省略時は対話で聞く (既定 ros-agents)
+#                                            # -p は担当 project (カンマ区切り)
 #   squad stop [<session>]                   # 停止 (並行運用時は明示必須)
 #   squad status                             # セッション / watcher 一覧
 #   squad attach [<session>]                 # tmux attach
@@ -46,19 +48,25 @@ cmd="${1:-}"
 case "$cmd" in
     start)
         workspace=""
-        session="$DEFAULT_SESSION"
+        # 既定値をここで埋めない: 埋めると start.sh 側の対話フォールバック
+        # (セッション名・担当 project を聞く) が squad 経由では発火しなくなる
+        session="${SQUAD_SESSION:-}"
+        projects="${SQUAD_OWNED_PROJECTS:-}"
         while [ $# -gt 0 ]; do
             case "$1" in
                 -s|--session) session="$2"; shift 2 ;;
+                -p|--projects) projects="$2"; shift 2 ;;
                 -*) echo "不明なオプション: $1" >&2; exit 1 ;;
                 *) workspace="$1"; shift ;;
             esac
         done
         if [ -z "$workspace" ]; then
-            echo "使用方法: squad start <workspace> [-s <session>]" >&2
+            echo "使用方法: squad start <workspace> [-s <session>] [-p <project1,project2>]" >&2
             exit 1
         fi
-        exec env SQUAD_SESSION="$session" "$SQUAD_ROOT/start.sh" "$workspace"
+        exec env ${session:+SQUAD_SESSION="$session"} \
+            ${projects:+SQUAD_OWNED_PROJECTS="$projects"} \
+            "$SQUAD_ROOT/start.sh" "$workspace"
         ;;
     stop)
         exec "$SQUAD_ROOT/stop.sh" "$@"
