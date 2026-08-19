@@ -153,7 +153,13 @@ detect_stall() {
     job_started="$(jq -r '.startedAt // empty' <<<"$job")"
     [ -z "$job_started" ] && continue
     local started_epoch
-    started_epoch="$(date -u -d "$job_started" +%s 2>/dev/null)" || continue
+    # startedAt が非空なのに date が解釈できないのは、null/空文字 (NB2, 意図的スキップ)
+    # とは別物 — API 応答の日時形式異常や環境不整合であり、握り潰さず操作エラーとして
+    # 扱う (blocking B2, 3巡目レビュー)。
+    if ! started_epoch="$(date -u -d "$job_started" +%s 2>&1)"; then
+      echo "エラー: job startedAt (${job_started}) を date で解釈できなかった: ${started_epoch}" >&2
+      return 2
+    fi
     local elapsed=$(( now_epoch - started_epoch ))
     if [ "$elapsed" -gt "$threshold" ]; then
       local step_name
@@ -268,6 +274,16 @@ process_pr() {
   conclusion="$(jq -r '.conclusion // empty' <<<"$run_json")"
   run_id="$(jq -r '.databaseId' <<<"$run_json")"
   url="$(jq -r '.url // empty' <<<"$run_json")"
+
+  # gh run list が (空ではなく) 必須フィールド欠落のオブジェクトを返すケース
+  # (例: [{}]) を、正常な run 情報と取り違えない (blocking B2, 3巡目レビュー)。
+  # jq -r は欠落/null フィールドを文字列 "null" として出す点に注意。
+  if [ -z "$status" ] || [ "$status" = "null" ] \
+      || [ -z "$run_id" ] || [ "$run_id" = "null" ] \
+      || [ -z "$url" ] || [ "$url" = "null" ]; then
+    echo "エラー: PR #${pr} の run JSON に必須フィールド (status/databaseId/url) が欠落している: ${run_json}" >&2
+    return 2
+  fi
 
   case "$conclusion" in
     failure|cancelled|timed_out)

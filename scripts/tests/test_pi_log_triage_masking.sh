@@ -129,6 +129,15 @@ ssh_body_line='2026-08-20T00:00:07Z b3BlbnNzaC1rZXktdjEAAAAAB3NzaC1yc2EAAAADAQAB
 ssh_end='2026-08-20T00:00:08Z -----END OPENSSH PRIVATE KEY-----'
 run_masking_case "SSH private key body" "$ssh_body" "$ssh_begin" "$ssh_body_line" "$ssh_end"
 
+json_auth_secret='json-value+/='  # pragma: allowlist secret
+json_auth_line='{"authorization":"Basic json-value+/="}'  # pragma: allowlist secret
+run_masking_case "Authorization (JSON形式, キー末尾にクォート)" "$json_auth_secret" "$json_auth_line"
+
+folded_secret='Basic folded-value+/='  # pragma: allowlist secret
+folded_header='Authorization:'
+folded_continuation=' Basic folded-value+/='  # pragma: allowlist secret (先頭スペースは折り返しの印)
+run_masking_case "Authorization (ヘッダと値が別行に折り返し)" "$folded_secret" "$folded_header" "$folded_continuation"
+
 echo
 echo "=== 構造チェック: 非 secret 行の保持・行数維持・indirection・原本無変更 ==="
 

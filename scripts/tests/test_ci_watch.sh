@@ -33,6 +33,10 @@ mkdir -p "$FAKE_BIN"
 #                         このシナリオ1つで両パスをカバーする)
 #   jobs_fetch_fail     : run は in_progress を返すが、gh run view --json jobs だけが
 #                         非ゼロで失敗する (2巡目レビュー B2)
+#   run_missing_fields  : gh run list が [{}] (databaseId/status/url 欠落) を返す
+#                         (3巡目レビュー B2 残件)
+#   date_fail           : run は in_progress・startedAt も正常値を返すが、FAKE_BIN の
+#                         date コマンド自体が -d 呼び出しで失敗する (3巡目レビュー B2 残件)
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -66,7 +70,7 @@ case "$sub" in
       failure|triage_fail)
         echo '[{"databaseId":2002,"status":"completed","conclusion":"failure","headSha":"bbb","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/2002"}]'
         ;;
-      hang|hang_no_log|hang_null_started|jobs_fetch_fail)
+      hang|hang_no_log|hang_null_started|jobs_fetch_fail|date_fail)
         echo '[{"databaseId":32269209831,"status":"in_progress","conclusion":null,"headSha":"decfdc6","event":"pull_request","workflowName":"CI","url":"https://github.com/h-wata/kioku-mesh/actions/runs/32269209831"}]'
         ;;
       no_runs)
@@ -77,6 +81,9 @@ case "$sub" in
         ;;
       run_list_empty)
         echo -n ""
+        ;;
+      run_missing_fields)
+        echo '[{}]'
         ;;
       *)
         echo '[]'
@@ -109,6 +116,11 @@ case "$sub" in
         hang_null_started)
           echo '{"jobs":[{"status":"in_progress","startedAt":null,"name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"in_progress","name":"Install zenohd"}]}]}'
           ;;
+        date_fail)
+          # startedAt は正規の値。壊すのは PATH 上のフェイク date バイナリ側
+          # (このケース専用に FAKE_DATE_BIN を PATH の先頭に置いて呼ぶ)。
+          echo '{"jobs":[{"status":"in_progress","startedAt":"2026-08-19T15:00:00Z","name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"in_progress","name":"Install zenohd"}]}]}'
+          ;;
         *)
           echo '{"jobs":[]}'
           ;;
@@ -125,6 +137,21 @@ case "$sub" in
 esac
 FAKE_GH
 chmod +x "$FAKE_BIN/gh"
+
+# --- フェイク date (-d だけ失敗させる。date_fail シナリオ専用、PATH には常設しない) -----
+FAKE_DATE_BIN="$WORKDIR/fake_date_bin"
+mkdir -p "$FAKE_DATE_BIN"
+cat > "$FAKE_DATE_BIN/date" <<'FAKE_DATE'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "-d" ]; then
+    echo "simulated: date -d failure (fake_date_bin)" >&2
+    exit 1
+  fi
+done
+exec /usr/bin/date "$@"
+FAKE_DATE
+chmod +x "$FAKE_DATE_BIN/date"
 
 # --- フェイク pi-log-triage.sh (成功) ----------------------------------------
 cat > "$WORKDIR/pi-triage-ok.sh" <<'FAKE_TRIAGE_OK'
@@ -442,6 +469,49 @@ if [ -f "$INBOX15" ]; then
   fail "case15: 操作エラーなのに inbox が作られた"
 else
   pass "case15: 操作エラー時に inbox エントリを作らない"
+fi
+
+echo
+echo "=== case 16 (B2, 3巡目残件): run JSON の必須フィールド欠落 ([{}]) -> exit 3 ==="
+INBOX16="$WORKDIR/inbox16.md"
+run_case "$INBOX16" run_missing_fields "$WORKDIR/pi-triage-ok.sh" 54
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case16: run JSON の必須フィールド欠落は操作エラーとして exit 3"
+else
+  fail "case16: exit was $return_code, want 3 (databaseId/status/url 欠落を正常系と誤認している)"
+fi
+if [ -f "$INBOX16" ]; then
+  fail "case16: 操作エラーなのに inbox が作られた"
+else
+  pass "case16: 操作エラー時に inbox エントリを作らない"
+fi
+
+echo
+echo "=== case 17 (B2, 3巡目残件): 正常な startedAt でも date -d 自体が失敗 -> exit 3 ==="
+INBOX17="$WORKDIR/inbox17.md"
+set +e
+PATH="$FAKE_DATE_BIN:$PATH" FAKE_GH_SCENARIO=date_fail CI_WATCH_INBOX="$INBOX17" \
+  CI_WATCH_PI_TRIAGE="$WORKDIR/pi-triage-ok.sh" bash "$CI_WATCH" 55 > "$WORKDIR/last_output.txt" 2>&1
+return_code=$?
+set -e
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case17: date -d の失敗は continue で握り潰さず操作エラーとして exit 3"
+else
+  fail "case17: exit was $return_code, want 3 (date -d 失敗を『ハング無し』として握り潰している)"
+fi
+if grep -qF "date で解釈できなかった" "$WORKDIR/last_output.txt"; then
+  pass "case17: stderr に date 失敗の詳細が伝播している"
+else
+  fail "case17: stderr に date 失敗の詳細が無い"
+fi
+if [ -f "$INBOX17" ]; then
+  fail "case17: 操作エラーなのに inbox が作られた"
+else
+  pass "case17: 操作エラー時に inbox エントリを作らない"
 fi
 
 echo

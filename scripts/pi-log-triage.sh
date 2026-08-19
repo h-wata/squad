@@ -18,14 +18,33 @@ set -euo pipefail
 
 # 送信前に既知の secret パターンをマスクする。行数を変えない (置換のみ) ことで、
 # Pi が返す行番号がマスク後ログの行番号として一貫するようにする。
+#
+# 前段の awk は RFC 7230 の obsolete line folding (Authorization: ヘッダの値が
+# 次行以降に続き、継続行が空白/タブで始まる形式) を検出し、継続行を丸ごと
+# 置換する。ヘッダ行自体は awk では触らず、後段の sed の Authorization 規則に
+# 任せる (1行ごとの置換だけで完結させ、行数を変えない設計を維持するため)。
 mask_secrets() {
-    sed -E \
+    awk '
+        BEGIN { fold = 0 }
+        {
+            line = $0
+            if (fold && (line ~ /^[ \t]/)) {
+                print "[REDACTED FOLDED HEADER VALUE]"
+                next
+            }
+            fold = 0
+            if (tolower(line) ~ /authorization"?[ \t]*:/) {
+                fold = 1
+            }
+            print line
+        }
+    ' | sed -E \
         -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/{
               /-----BEGIN [A-Z ]*PRIVATE KEY-----/b
               /-----END [A-Z ]*PRIVATE KEY-----/b
               s/.*/[REDACTED PRIVATE KEY LINE]/
             }' \
-        -e 's/(Authorization:[[:space:]]*).*/\1<redacted>/gI' \
+        -e 's/(Authorization"?[[:space:]]*:[[:space:]]*).*/\1<redacted>/gI' \
         -e 's/\bBearer[[:space:]]+[A-Za-z0-9._~+\/=-]+/Bearer <redacted>/g' \
         -e 's/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/\1_<redacted>/g' \
         -e 's/\bgithub_pat_[A-Za-z0-9_]{20,}\b/github_pat_<redacted>/g' \
