@@ -1,0 +1,36 @@
+{
+  "providers": {
+    "local-vllm": {
+      "baseUrl": "http://192.168.129.35:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "local-only",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "nemotron-35-lightning",
+          "name": "Nemotron 3.5 Lightning 30B-A3B NVFP4 (LAN vLLM)",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 65536,
+          "maxTokens": 8192,
+          "samplingParams": {
+            "temperature": 1.0,
+            "top_p": 0.95
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        }
+      ]
+    }
+  }
+}

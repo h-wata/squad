@@ -85,10 +85,13 @@
   - 禁止の根拠が「未測定」として明示されるので、後から実測で広げられる。
     「悪いと分かっている」という誤読で固定化しない
 - **悪い点**:
-  - **接続設定 (`~/.pi/agent/models.json`) がリポジトリ管理外**である。agent 定義
-    (`.claude/agents/local-coder.md`) は追跡されるが、pi の provider 設定は個人の
-    ホーム配下にあり、新しい環境では手で書く必要がある。旧 `vllm-consultant` は
-    agent 定義そのものが存在せず、実体の無い参照になっていた。同じ壊れ方をしうる
+  - **初回のみ手作業が要る**。pi の接続設定はリポジトリ (`config/pi/models.json`) に
+    置き、`scripts/link-pi-config.sh` で `~/.pi/agent/models.json` に symlink する
+    方式にした。ADR 0002 の `bin/squad` と同じく symlink は手動である。張り忘れると
+    agent はあるのに接続先が無い状態になる (旧 `vllm-consultant` は agent 定義
+    そのものが存在せず、まさにこの壊れ方をしていた)
+  - **`baseUrl` の IP がリポジトリに直書きされる**。LAN のサーバ 1 台を前提とした
+    構成なので許容したが、環境が増えたら差分が出る
   - worker の手順が 1 段増える。委譲するかの判断と、返ってきた差分の目視が要る。
     自分で書いたほうが速い規模のタスクでは割に合わない
   - **squad が LAN の vLLM に依存する**。停止時は worker が自分で実装する形に

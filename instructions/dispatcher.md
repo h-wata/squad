@@ -271,9 +271,9 @@ local-coder は **worker のターンの中から呼ぶ外部プロセス**で�
 agent が無い / vLLM 停止 / タイムアウトなら、**復旧を試みず worker 自身で実装する**。
 local-coder を前提にしたフローを組んではならない。
 
-> agent 定義は `.claude/agents/local-coder.md`。旧 `vllm-consultant` は定義が存在せず、
-> この節は実体の無い参照になっていた。接続設定は `~/.pi/agent/models.json` の
-> provider `local-vllm` にあり、**リポジトリ管理外**なので新しい環境では書く必要がある。
+> agent 定義は `.claude/agents/local-coder.md`、pi の接続設定は `config/pi/models.json`。
+> 後者は `scripts/link-pi-config.sh` で `~/.pi/agent/models.json` に symlink する
+> (初回のみ)。旧 `vllm-consultant` は agent 定義が存在せず、実体の無い参照になっていた。
 
 ## tmux 通知
 
