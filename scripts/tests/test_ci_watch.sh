@@ -28,6 +28,11 @@ mkdir -p "$FAKE_BIN"
 #   all_open            : gh pr list が複数 PR を返す。各 PR の run list は normal 相当
 #   gh_fail_pr_view     : gh pr view 自体が失敗する (B2, 単一PRパス)
 #   gh_fail_pr_list     : gh pr list 自体が失敗する (B2, --all-open パス)
+#   run_list_empty      : gh run list が exit 0 のまま空 stdout を返す (2巡目レビュー B2:
+#                         単一PRパスでも --all-open パスでも同じ get_latest_run を通るため
+#                         このシナリオ1つで両パスをカバーする)
+#   jobs_fetch_fail     : run は in_progress を返すが、gh run view --json jobs だけが
+#                         非ゼロで失敗する (2巡目レビュー B2)
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -47,7 +52,7 @@ case "$sub" in
       echo "simulated: gh: API rate limit exceeded" >&2
       exit 1
     fi
-    if [ "$scenario" = "all_open" ]; then
+    if [ "$scenario" = "all_open" ] || [ "$scenario" = "run_list_empty" ]; then
       echo '[{"number":101},{"number":102}]'
     else
       echo '[]'
@@ -61,7 +66,7 @@ case "$sub" in
       failure|triage_fail)
         echo '[{"databaseId":2002,"status":"completed","conclusion":"failure","headSha":"bbb","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/2002"}]'
         ;;
-      hang|hang_no_log|hang_null_started)
+      hang|hang_no_log|hang_null_started|jobs_fetch_fail)
         echo '[{"databaseId":32269209831,"status":"in_progress","conclusion":null,"headSha":"decfdc6","event":"pull_request","workflowName":"CI","url":"https://github.com/h-wata/kioku-mesh/actions/runs/32269209831"}]'
         ;;
       no_runs)
@@ -69,6 +74,9 @@ case "$sub" in
         ;;
       all_open)
         echo '[{"databaseId":1001,"status":"completed","conclusion":"success","headSha":"aaa","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/1001"}]'
+        ;;
+      run_list_empty)
+        echo -n ""
         ;;
       *)
         echo '[]'
@@ -86,6 +94,10 @@ case "$sub" in
       echo "2026-08-19T15:18:07Z ##[group]Install zenohd"
       echo "... still installing, no output for a while ..."
     elif [[ " $* " == *" jobs "* ]]; then
+      if [ "$scenario" = "jobs_fetch_fail" ]; then
+        echo "simulated: gh: connection reset by peer" >&2
+        exit 1
+      fi
       case "$scenario" in
         failure|triage_fail)
           echo '{"jobs":[{"status":"completed","startedAt":"2026-01-01T00:00:00Z","name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"completed","conclusion":"failure","name":"Run pytest"}]}]}'
@@ -379,6 +391,57 @@ if [ "$rc2" -eq 1 ] && grep -qF "CI_WATCH_STALL_SECONDS" "$WORKDIR/badstall2.log
   pass "case12: negative CI_WATCH_STALL_SECONDS rejected with exit 1"
 else
   fail "case12: negative value not rejected as expected (rc=$rc2)"
+fi
+
+echo
+echo "=== case 13 (B2, 2巡目): run list が exit 0 のまま空 stdout (単一PR) -> exit 3 ==="
+INBOX13="$WORKDIR/inbox13.md"
+run_case "$INBOX13" run_list_empty "$WORKDIR/pi-triage-ok.sh" 52
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case13: run list の空 stdout (単一PR) は操作エラーとして exit 3"
+else
+  fail "case13: exit was $return_code, want 3 (run list 空出力が『run無し』正常系と混同されている)"
+fi
+if [ -f "$INBOX13" ]; then
+  fail "case13: 操作エラーなのに inbox が作られた"
+else
+  pass "case13: 操作エラー時に inbox エントリを作らない"
+fi
+
+echo
+echo "=== case 14 (B2, 2巡目): run list が exit 0 のまま空 stdout (--all-open) -> exit 3 ==="
+INBOX14="$WORKDIR/inbox14.md"
+run_case "$INBOX14" run_list_empty "$WORKDIR/pi-triage-ok.sh" --all-open
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case14: run list の空 stdout (--all-open) は操作エラーとして exit 3"
+else
+  fail "case14: exit was $return_code, want 3"
+fi
+
+echo
+echo "=== case 15 (B2, 2巡目): in-progress run で gh run view --json jobs が非ゼロ -> exit 3 ==="
+INBOX15="$WORKDIR/inbox15.md"
+run_case "$INBOX15" jobs_fetch_fail "$WORKDIR/pi-triage-ok.sh" 53
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case15: jobs 取得の非ゼロ失敗は『ハング無し』ではなく操作エラーとして exit 3"
+else
+  fail "case15: exit was $return_code, want 3 (detect_stall がハング無しと操作失敗を混同している)"
+fi
+if grep -qF "connection reset by peer" "$WORKDIR/last_output.txt"; then
+  pass "case15: stderr に gh の失敗理由が伝播している"
+else
+  fail "case15: stderr に操作エラーの詳細が無い"
+fi
+if [ -f "$INBOX15" ]; then
+  fail "case15: 操作エラーなのに inbox が作られた"
+else
+  pass "case15: 操作エラー時に inbox エントリを作らない"
 fi
 
 echo

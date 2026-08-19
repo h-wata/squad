@@ -25,7 +25,7 @@ mask_secrets() {
               /-----END [A-Z ]*PRIVATE KEY-----/b
               s/.*/[REDACTED PRIVATE KEY LINE]/
             }' \
-        -e 's/^([[:space:]]*[Aa]uthorization:[[:space:]]*).*/\1<redacted>/' \
+        -e 's/(Authorization:[[:space:]]*).*/\1<redacted>/gI' \
         -e 's/\bBearer[[:space:]]+[A-Za-z0-9._~+\/=-]+/Bearer <redacted>/g' \
         -e 's/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/\1_<redacted>/g' \
         -e 's/\bgithub_pat_[A-Za-z0-9_]{20,}\b/github_pat_<redacted>/g' \

@@ -104,6 +104,13 @@ get_latest_run() {
     echo "エラー: gh run list (branch=${head_ref}) が失敗した: ${list_raw}" >&2
     return 1
   fi
+  # gh run list は正常なら (run が0件でも) 少なくとも "[]" を返す。stdout が完全に空
+  # なのは exit 0 のまま何も出力しなかった異常系 (API断線・プロキシ不全等) であり、
+  # 「run が無い」正常系と混同してはならない (blocking B2, 2巡目レビュー)。
+  if [ -z "$list_raw" ]; then
+    echo "エラー: gh run list (branch=${head_ref}) が空の出力を返した (異常終了の疑い)" >&2
+    return 1
+  fi
   local parsed
   if ! parsed="$(jq -c '.[0] // empty' <<<"$list_raw" 2>&1)"; then
     echo "エラー: gh run list の出力を jq で解釈できなかった: ${parsed}" >&2
@@ -114,12 +121,26 @@ get_latest_run() {
 }
 
 # 実行中 job のうち status=in_progress の経過時間 (job の startedAt 起点) が閾値を超えたら
-# 「<ステップ名> (elapsed <秒>s)」を1行出力する。無ければ何も出さず非ゼロで返る。
-# startedAt が null/空文字の job は「まだ計測できない」として静かにスキップする (NB2)。
+# 「<ステップ名> (elapsed <秒>s)」を1行出力する。startedAt が null/空文字の job は
+# 「まだ計測できない」として静かにスキップする (NB2)。
+# 戻り値: 0=ハングを検知 (stdout に説明を1行), 1=ハング無し (正常), 2=gh/jq の操作失敗
+# (blocking B2, 2巡目レビュー: 「ハング無し」と「取得自体に失敗した」を区別する)。
 detect_stall() {
   local run_id="$1" threshold="$2"
+  local jobs_raw
+  if ! jobs_raw="$(gh run view "$run_id" "${REPO_ARGS[@]}" --json jobs 2>&1)"; then
+    echo "エラー: gh run view --json jobs (run=${run_id}) が失敗した: ${jobs_raw}" >&2
+    return 2
+  fi
+  if [ -z "$jobs_raw" ]; then
+    echo "エラー: gh run view --json jobs (run=${run_id}) が空の出力を返した (異常終了の疑い)" >&2
+    return 2
+  fi
   local jobs_json
-  jobs_json="$(gh run view "$run_id" "${REPO_ARGS[@]}" --json jobs 2>/dev/null | jq -c '.jobs // []')" || return 1
+  if ! jobs_json="$(jq -c '.jobs // []' <<<"$jobs_raw" 2>&1)"; then
+    echo "エラー: gh run view --json jobs の出力を jq で解釈できなかった: ${jobs_json}" >&2
+    return 2
+  fi
   local now_epoch
   now_epoch="$(date -u +%s)"
   local job
@@ -256,11 +277,22 @@ process_pr() {
   esac
 
   if [ "$status" != "completed" ]; then
-    local stalled_step
-    if stalled_step="$(detect_stall "$run_id" "$STALL_SECONDS")"; then
-      handle_hang "$pr" "$run_id" "$url" "$stalled_step"
-      return 1
-    fi
+    local stalled_step stall_rc
+    # set -e 下で detect_stall の非ゼロ (1=ハング無し, 2=操作失敗) を区別して拾うため、
+    # if 文の外で一時的に errexit を外す (cmd || true だと本来の終了コードが消える)。
+    set +e
+    stalled_step="$(detect_stall "$run_id" "$STALL_SECONDS")"
+    stall_rc=$?
+    set -e
+    case "$stall_rc" in
+      0)
+        handle_hang "$pr" "$run_id" "$url" "$stalled_step"
+        return 1
+        ;;
+      2)
+        return 2
+        ;;
+    esac
   fi
 
   return 0
