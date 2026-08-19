@@ -450,8 +450,8 @@ head が動けば無効になる。
 
 review・修正タスクを起票する際、サボタージュ（mutation テスト）を含む検証は共有
 worktree を直接壊さず使い捨てコピーで行うよう指示する。report には
-`source_tree_clean` 相当の作業ツリー clean 確認（`git status -s` 等の出力）を
-含めさせること。
+`source_worktree` / `source_tree_status` / `status_command` / `checked_at`
+相当の作業ツリー clean 確認（`git status -s` 等の出力）を含めさせること。
 
 ### マージ前ゲート: `/pr-ready`
 
