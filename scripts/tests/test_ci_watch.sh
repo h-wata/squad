@@ -37,6 +37,11 @@ mkdir -p "$FAKE_BIN"
 #                         (3巡目レビュー B2 残件)
 #   date_fail           : run は in_progress・startedAt も正常値を返すが、FAKE_BIN の
 #                         date コマンド自体が -d 呼び出しで失敗する (3巡目レビュー B2 残件)
+#   jobs_bad            : run は正常な in_progress を返すが、gh run view --json jobs が
+#                         妥当な JSON ながら jobs がオブジェクト {"jobs":{}} である
+#                         (4巡目レビュー B5)
+#   bad_status_nojobs   : gh run list の status が文字列ではなく真偽値 false、
+#                         gh run view --json jobs は {"jobs":[]} を返す (4巡目レビュー B5)
 cat > "$FAKE_BIN/gh" <<'FAKE_GH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -70,8 +75,11 @@ case "$sub" in
       failure|triage_fail)
         echo '[{"databaseId":2002,"status":"completed","conclusion":"failure","headSha":"bbb","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/2002"}]'
         ;;
-      hang|hang_no_log|hang_null_started|jobs_fetch_fail|date_fail)
+      hang|hang_no_log|hang_null_started|jobs_fetch_fail|date_fail|jobs_bad)
         echo '[{"databaseId":32269209831,"status":"in_progress","conclusion":null,"headSha":"decfdc6","event":"pull_request","workflowName":"CI","url":"https://github.com/h-wata/kioku-mesh/actions/runs/32269209831"}]'
+        ;;
+      bad_status_nojobs)
+        echo '[{"databaseId":1,"status":false,"conclusion":null,"headSha":"ccc","event":"pull_request","workflowName":"CI","url":"https://example.invalid/actions/runs/1"}]'
         ;;
       no_runs)
         echo '[]'
@@ -120,6 +128,10 @@ case "$sub" in
           # startedAt は正規の値。壊すのは PATH 上のフェイク date バイナリ側
           # (このケース専用に FAKE_DATE_BIN を PATH の先頭に置いて呼ぶ)。
           echo '{"jobs":[{"status":"in_progress","startedAt":"2026-08-19T15:00:00Z","name":"lint-and-test","steps":[{"status":"completed","conclusion":"success","name":"Set up job"},{"status":"in_progress","name":"Install zenohd"}]}]}'
+          ;;
+        jobs_bad)
+          # jobs が配列ではなくオブジェクト (4巡目レビュー B5)。
+          echo '{"jobs":{}}'
           ;;
         *)
           echo '{"jobs":[]}'
@@ -512,6 +524,40 @@ if [ -f "$INBOX17" ]; then
   fail "case17: 操作エラーなのに inbox が作られた"
 else
   pass "case17: 操作エラー時に inbox エントリを作らない"
+fi
+
+echo
+echo "=== case 18 (B5, 4巡目): gh run view --json jobs が {\"jobs\":{}} (配列ではない) -> exit 3 ==="
+INBOX18="$WORKDIR/inbox18.md"
+run_case "$INBOX18" jobs_bad "$WORKDIR/pi-triage-ok.sh" 56
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case18: jobs がオブジェクトの構造破損は操作エラーとして exit 3"
+else
+  fail "case18: exit was $return_code, want 3 (jobs の構造破損をハング無しと混同している)"
+fi
+if [ -f "$INBOX18" ]; then
+  fail "case18: 操作エラーなのに inbox が作られた"
+else
+  pass "case18: 操作エラー時に inbox エントリを作らない"
+fi
+
+echo
+echo "=== case 19 (B5, 4巡目): status:false (型違反) + jobs:[] -> exit 3 ==="
+INBOX19="$WORKDIR/inbox19.md"
+run_case "$INBOX19" bad_status_nojobs "$WORKDIR/pi-triage-ok.sh" 57
+echo "--- raw output ---"; cat "$WORKDIR/last_output.txt"
+echo "--- exit code: $return_code ---"
+if [ "$return_code" -eq 3 ]; then
+  pass "case19: status の型違反は操作エラーとして exit 3"
+else
+  fail "case19: exit was $return_code, want 3 (status:false を文字列 \"false\" に丸めて正常系と誤認している)"
+fi
+if [ -f "$INBOX19" ]; then
+  fail "case19: 操作エラーなのに inbox が作られた"
+else
+  pass "case19: 操作エラー時に inbox エントリを作らない"
 fi
 
 echo

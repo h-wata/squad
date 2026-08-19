@@ -136,9 +136,28 @@ detect_stall() {
     echo "エラー: gh run view --json jobs (run=${run_id}) が空の出力を返した (異常終了の疑い)" >&2
     return 2
   fi
+  # gh run view --json jobs が JSON としては妥当でも構造が壊れているケース
+  # (例: jobs がオブジェクト {"jobs":{}} である、要素が job object ではない) を、
+  # 「監視対象 job が無い」正常系と取り違えない (blocking B5, 4巡目レビュー)。
   local jobs_json
-  if ! jobs_json="$(jq -c '.jobs // []' <<<"$jobs_raw" 2>&1)"; then
-    echo "エラー: gh run view --json jobs の出力を jq で解釈できなかった: ${jobs_json}" >&2
+  if ! jobs_json="$(jq -c '
+      if (has("jobs") | not) or (.jobs == null) then
+        []
+      elif (.jobs | type) != "array" then
+        error("jobs フィールドが配列ではない (type=" + (.jobs | type) + ")")
+      else
+        (.jobs | map(
+          if (type != "object") then
+            error("jobs 配列の要素が job object ではない (type=" + type + ")")
+          elif (has("status") | not) or ((.status | type) != "string") then
+            error("job に文字列の status フィールドが無い: " + (. | tostring))
+          else
+            .
+          end
+        ))
+      end
+    ' <<<"$jobs_raw" 2>&1)"; then
+    echo "エラー: gh run view --json jobs のスキーマが不正 (run=${run_id}): ${jobs_json}" >&2
     return 2
   fi
   local now_epoch
@@ -269,21 +288,39 @@ process_pr() {
     return 0
   fi
 
+  # gh run list が (空ではなく) 必須フィールド欠落のオブジェクトを返すケース
+  # (例: [{}]) や、JSON としては妥当でも型が壊れているケース (例: status:false) を、
+  # 正常な run 情報と取り違えない (blocking B2, 3巡目レビュー / blocking B5, 4巡目レビュー)。
+  # status は既知の値のみ許容し、databaseId は数値、url は非空文字列であることを
+  # jq の型 (`type`) で明示検証する。jq -r で文字列化してから bash の文字列比較で
+  # チェックすると、status:false のような型違反が "false" という文字列に丸まって
+  # すり抜けてしまう (B5 で実測)。
+  local schema_err
+  schema_err="$(jq -r '
+      . as $root |
+      def known_statuses: ["queued","in_progress","completed","waiting","requested","pending"];
+      if ($root.status | type) != "string" then
+        "status フィールドが文字列ではない (type=" + ($root.status | type) + "): " + ($root.status | tostring)
+      elif (known_statuses | index($root.status)) == null then
+        "status フィールドが未知の値: " + $root.status
+      elif ($root.databaseId | type) != "number" then
+        "databaseId フィールドが数値ではない (type=" + ($root.databaseId | type) + "): " + ($root.databaseId | tostring)
+      elif ($root.url | type) != "string" or ($root.url | length) == 0 then
+        "url フィールドが非空文字列ではない (type=" + ($root.url | type) + "): " + ($root.url | tostring)
+      else
+        empty
+      end
+    ' <<<"$run_json" 2>&1)"
+  if [ -n "$schema_err" ]; then
+    echo "エラー: PR #${pr} の run JSON のスキーマが不正 (${schema_err}): ${run_json}" >&2
+    return 2
+  fi
+
   local status conclusion run_id url
   status="$(jq -r '.status' <<<"$run_json")"
   conclusion="$(jq -r '.conclusion // empty' <<<"$run_json")"
   run_id="$(jq -r '.databaseId' <<<"$run_json")"
   url="$(jq -r '.url // empty' <<<"$run_json")"
-
-  # gh run list が (空ではなく) 必須フィールド欠落のオブジェクトを返すケース
-  # (例: [{}]) を、正常な run 情報と取り違えない (blocking B2, 3巡目レビュー)。
-  # jq -r は欠落/null フィールドを文字列 "null" として出す点に注意。
-  if [ -z "$status" ] || [ "$status" = "null" ] \
-      || [ -z "$run_id" ] || [ "$run_id" = "null" ] \
-      || [ -z "$url" ] || [ "$url" = "null" ]; then
-    echo "エラー: PR #${pr} の run JSON に必須フィールド (status/databaseId/url) が欠落している: ${run_json}" >&2
-    return 2
-  fi
 
   case "$conclusion" in
     failure|cancelled|timed_out)
