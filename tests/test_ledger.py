@@ -395,6 +395,16 @@ class TestReportIdentity:
         key_b, _ = delivery_key({}, SHA1, '', PATH_B)
         assert key_a != key_b
 
+    def test_delivery_key_review_without_id_is_not_invalid(self) -> None:
+        """review.yaml は schema 上 report_id を持たないため、欠落は invalid 扱いしない."""
+        rid, invalid = delivery_key({}, SHA1, '', PATH_B)
+        assert invalid == ''
+        assert rid == f'review:{PATH_B}:{SHA1}'
+
+    def test_delivery_key_review_still_uses_report_id_if_present(self) -> None:
+        rid, invalid = delivery_key({'report_id': ID1}, SHA1, '', PATH_B)
+        assert (rid, invalid) == (ID1, '')
+
 
 class TestFindReports:
     def test_finds_only_report_and_review_with_project(self, tmp_path: Path) -> None:

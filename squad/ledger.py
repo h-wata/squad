@@ -139,11 +139,19 @@ def delivery_key(meta: dict[str, str], sha: str, parse_error: str, path: str) ->
         コピペ漏れ) の report を書いたとき、sha だけをキーにすると片方が「配達済み」を共有して
         もう片方が永久に通知されなくなるため。内容が直るまで path ごとに 1 回だけ通知され、
         直せば別キー (正規の report_id) として改めて通知される。
+
+        worker*_review.yaml (cross-review 報告) は queue/templates/review.yaml の schema上
+        そもそも report_id フィールドを持たない (通常 report とは意図的に分離された別 schema)。
+        欠落を invalid 扱いすると、schema 通りに書かれた review report が二度と解消できない
+        [REPORT-INVALID] を永久に (未 ack の critical は再送されるため) 出し続けることになる。
+        review report は path + 内容ハッシュを配達キーとして正常に配達する。
     """
     if parse_error:
         return f'{INVALID_PREFIX}{path}:{sha}', parse_error
     raw = meta.get('report_id', '')
     if not raw:
+        if path.endswith('_review.yaml'):
+            return f'review:{path}:{sha}', ''
         return f'{INVALID_PREFIX}{path}:{sha}', 'report_id 欠落'
     rid = normalize_report_id(raw)
     if not rid:
