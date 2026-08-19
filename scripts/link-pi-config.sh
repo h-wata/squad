@@ -22,7 +22,17 @@ if [ -L "$DEST" ]; then
         echo "既に link 済み: $DEST -> $SRC"
         exit 0
     fi
-    echo "警告: $DEST は別の場所を指す symlink ($current)"
+    # 実ファイルと同じ扱いにする。他の設定を指す link を黙って外さない。
+    echo "既存の $DEST は別の場所を指す symlink: $current"
+    if [ "$FORCE" -ne 1 ]; then
+        echo
+        echo "黙って張り替えはしない。リンク先を確認して、進めるなら --force を付けて再実行する。"
+        exit 1
+    fi
+    # symlink 自体を保存する (-P)。リンク先の実体はコピーしない。
+    backup="$DEST.bak.$(date +%Y%m%d-%H%M%S)"
+    cp -P "$DEST" "$backup"
+    echo "退避: $backup -> $current"
 elif [ -e "$DEST" ]; then
     # 実ファイルを黙って壊さない。他の provider が入っていることがある。
     if diff -q "$SRC" "$DEST" >/dev/null 2>&1; then
