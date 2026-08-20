@@ -125,6 +125,8 @@ fi
 # 使い方: カンマ区切りで複数 project を指定できる。
 #   例: SQUAD_OWNED_PROJECTS=squad,note ./start.sh ~/work
 # 既に別 session を指すマーカーがある project は無警告で奪わない (スキップ + 警告表示)。
+# queue/projects/<pj> が無ければ tasks/ reports/ ごと新規作成する (-p は「この session が
+# 担当する」という明示指定なので、存在しないだけで担当 0 件のまま idle 起動させない)。
 #
 # -p / env とも未指定で、この session を指すマーカーが 1 つも無い場合は対話端末なら聞く。
 # 担当 0 件のまま起動すると watcher が idle になり、Dispatcher が全 project を
@@ -138,10 +140,18 @@ if [ -n "${SQUAD_OWNED_PROJECTS:-}" ]; then
     for _pj in "${_OWNED_PJS[@]}"; do
         _pj="$(echo "$_pj" | xargs)"
         [ -z "$_pj" ] && continue
+        # project 名はディレクトリ名 1 つぶん。typo で queue/projects の外や隠しディレクトリを
+        # 掘らないよう、パス区切りと先頭ドット (. / .. 含む) を弾く。
+        case "$_pj" in
+            */* | .*)
+                echo "[WARN] SQUAD_OWNED_PROJECTS: project 名 '$_pj' は不正です (/ と先頭ドットは使えません)。スキップします"
+                continue
+                ;;
+        esac
         _pj_dir="$SCRIPT_DIR/queue/projects/$_pj"
         if [ ! -d "$_pj_dir" ]; then
-            echo "[WARN] SQUAD_OWNED_PROJECTS: project '$_pj' ($_pj_dir) が存在しないためマーカーをスキップします"
-            continue
+            mkdir -p "$_pj_dir/tasks" "$_pj_dir/reports"
+            echo "project '$_pj' の queue ディレクトリを新規作成しました ($_pj_dir)"
         fi
         _marker="$_pj_dir/.squad_session"
         if [ -f "$_marker" ]; then

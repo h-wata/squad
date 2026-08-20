@@ -70,7 +70,7 @@ def test_owned_projects_writes_marker_for_existing_project(tmp_path: Path) -> No
     assert (pj / '.squad_session').read_text().strip() == 'testsess'
 
 
-def test_owned_projects_skips_missing_project_dir(tmp_path: Path) -> None:
+def test_owned_projects_creates_missing_project_dir(tmp_path: Path) -> None:
     root = _fake_root(tmp_path)
     workspace = tmp_path / 'ws'
     workspace.mkdir()
@@ -78,8 +78,23 @@ def test_owned_projects_skips_missing_project_dir(tmp_path: Path) -> None:
     r = _run_start(root, workspace, 'testsess', owned='ghost')
 
     assert r.returncode == 0, r.stderr
-    assert not (root / 'queue' / 'projects' / 'ghost').exists()
-    assert '存在しない' in r.stdout
+    ghost = root / 'queue' / 'projects' / 'ghost'
+    assert (ghost / 'tasks').is_dir()
+    assert (ghost / 'reports').is_dir()
+    assert (ghost / '.squad_session').read_text().strip() == 'testsess'
+
+
+def test_owned_projects_rejects_path_like_names(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', owned='../escape, .hidden')
+
+    assert r.returncode == 0, r.stderr
+    assert not (root / 'queue' / 'escape').exists()
+    assert not (root / 'queue' / 'projects' / '.hidden').exists()
+    assert r.stdout.count('不正です') == 2
 
 
 def test_owned_projects_does_not_overwrite_other_session_marker(tmp_path: Path) -> None:

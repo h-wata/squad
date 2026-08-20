@@ -4,6 +4,10 @@
 
 ### Added
 
+- `start.sh -p` / `SQUAD_OWNED_PROJECTS` に `queue/projects/` 配下に無い project を
+  指定した場合、警告してスキップするのをやめて `<project>/{tasks,reports}` を自動作成する
+  ようにした。手動 `mkdir` 忘れで担当 0 件のまま watcher が idle 起動するのを防ぐ。
+  併せて project 名に `/` と先頭ドットを禁止した (`queue/projects` の外を掘る typo 対策)。
 - `start.sh` に `SQUAD_OWNED_PROJECTS` (カンマ区切り) を追加。指定した project の
   `.squad_session` マーカーを起動時に自動生成する。未指定の既定動作は変更なし。
   既に別 session を指すマーカーは無警告で奪わない (スキップ + 警告表示) (SQUAD-210)。
