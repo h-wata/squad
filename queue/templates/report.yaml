@@ -30,9 +30,12 @@ verify_status: pass
 source_worktree: ""
 # `git status -s` の生出力 (空文字列なら clean)
 source_tree_status: ""
-# 実際に実行したコマンド全文
+# 必須固定書式: "git -C <source_worktree> status -s"
+# <source_worktree> の位置には上記 source_worktree フィールドと**文字列一致する絶対パス**
+# を書くこと。`git -C` を省いた形式・`cd <path> && git status -s` のような形式は無効
+# (scripts/check_source_tree_clean.py が機械検証で弾く)。
 status_command: ""
-# 確認時刻 (ISO8601)
+# 確認時刻。ISO8601 (タイムゾーン付き、例: 2026-08-21T12:00:00+09:00) 必須
 checked_at: ""
 # 例: /path/to/worktree/reports/worker1_verdict.yaml
 # (verify した場合の verifier 出力先)

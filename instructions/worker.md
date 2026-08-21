@@ -270,6 +270,16 @@ approve しても自動 merge しない（ユーザー手動）。
   コピーを作り、そこで壊す
 - 残骸を消す前に diff とファイル全体の 2 形式で退避する（証跡）
 
+report の `source_worktree` / `status_command` は独立した自由記述にしない。
+`status_command` は **`git -C <source_worktree> status -s` 固定書式**で書き、
+`<source_worktree>` の位置には同じ report の `source_worktree` フィールドと
+**文字列一致する絶対パス**を入れる（`scripts/check_source_tree_clean.py` が
+Dispatcher 側でこの一致・書式・`checked_at` の ISO8601 (タイムゾーン付き)・
+`source_tree_status` 空文字列を機械検証する）。**別 worktree で取った
+`git status -s` の出力を、確認対象と異なるパスの `source_worktree` に貼るのは
+規約違反**（SQUAD-248 NB1: 形式上 clean を装えてしまうため）。`git -C` を省いた
+形式・`cd <path> && git status -s` のような形式も無効。
+
 **事故時の復旧手順（許可された運用ではない）**: 誤って共有 worktree を
 変更してしまった場合は、report を書く前ではなく**気付いた時点で即座に**
 復元し、`git status -s` の生出力とともにそのことを report に記録する。
