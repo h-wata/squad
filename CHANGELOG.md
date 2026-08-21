@@ -39,6 +39,10 @@
 
 ### Fixed
 
+- `scripts/check_source_tree_clean.py`: `source_worktree` の allowlist 検証が
+  `re.match` + `^...$` だったため、Python `re` の仕様上 `$` が文字列末尾の改行の
+  直前にもマッチしてしまい、末尾に改行を1つ付けるだけでシェルメタ文字チェックを
+  bypass できていた。`re.fullmatch` に変更して修正 (SQUAD-256, cross-review SQUAD-255)。
 - `squad/watchd.py`: `WATCH_NOTIFY_QUEUE` を off に戻す (rollback) と、flag on 時に
   enqueue 済みの未 ack event が `_process_queue_fallbacks()` ごと呼ばれなくなり永久に
   Pane 0 へ届かなくなっていた不具合を修正。age-based fallback は flag の on/off に

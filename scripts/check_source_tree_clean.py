@@ -31,12 +31,19 @@ REQUIRED_FIELDS = ('source_worktree', 'status_command', 'checked_at', 'source_tr
 # シェルによって漏れがあり得るため。この repo の実際の worktree パス
 # (/home/gisen/work/squad-wt-squad249 等) は英数字と `/ _ - .` のみで構成されており、
 # 非 ASCII 文字は許可対象に含めていない。
-_SAFE_WORKTREE_RE = re.compile(r'^[A-Za-z0-9/_.~-]+$')
+_SAFE_WORKTREE_RE = re.compile(r'[A-Za-z0-9/_.~-]+')
 
 
 def has_safe_worktree_characters(source_worktree: str) -> bool:
-    """`source_worktree` がシェルへ渡しても単一トークンとして解釈される文字だけか."""
-    return bool(_SAFE_WORKTREE_RE.match(source_worktree))
+    """`source_worktree` がシェルへ渡しても単一トークンとして解釈される文字だけか.
+
+    `re.match` + `^...$` は使わない。Python の `re` は `$` が文字列末尾の改行の
+    "直前" にもマッチする仕様のため、`match()` は末尾に改行が付いた文字列に対しても
+    先頭からの部分一致を真として返してしまい、末尾改行だけを混入させた偽装が
+    allowlist を素通りする (SQUAD-256)。`fullmatch` は文字列全体を消費しない限り
+    真を返さないため、この末尾改行 bypass が起きない。
+    """
+    return bool(_SAFE_WORKTREE_RE.fullmatch(source_worktree))
 
 
 def status_command_for(source_worktree: str) -> str:

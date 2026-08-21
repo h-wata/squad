@@ -174,3 +174,30 @@ def test_w4_semicolon_reproduction_fails() -> None:
     }
     errors = check_source_tree_clean(meta)
     assert any('メタ文字' in e for e in errors)
+
+
+def test_trailing_newline_in_source_worktree_fails() -> None:
+    """SQUAD-256: re.match + `^...$` は末尾改行の直前にもマッチするため bypass できていた."""
+    worktree = f'{WORKTREE}\n'
+    meta = _meta_with_worktree(worktree)
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_multiple_trailing_newlines_in_source_worktree_fails() -> None:
+    worktree = f'{WORKTREE}\n\n\n'
+    meta = _meta_with_worktree(worktree)
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_trailing_newline_in_status_command_fails() -> None:
+    meta = {**GOOD, 'status_command': f'git -C {WORKTREE} status -s\n'}
+    errors = check_source_tree_clean(meta)
+    assert any('status_command' in e for e in errors)
+
+
+def test_trailing_newline_in_checked_at_fails() -> None:
+    meta = {**GOOD, 'checked_at': '2026-08-21T12:00:00+09:00\n'}
+    errors = check_source_tree_clean(meta)
+    assert any('checked_at' in e for e in errors)
