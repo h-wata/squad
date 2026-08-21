@@ -39,6 +39,9 @@ def _setup_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, 
     monkeypatch.setattr(mtc, 'QUEUE_ROOT', repo_root)
     monkeypatch.setattr(mtc, 'CLAUDE_PROJECTS', claude_projects)
     monkeypatch.setattr(mtc, 'METRICS_PATH', metrics_path)
+    # 実環境の /tmp/claude_usage_cache.json や実 tmux pane に依存しないよう既定で無効化する。
+    monkeypatch.setattr(mtc, 'QUOTA_CACHE_PATH', tmp_path / 'no_such_quota_cache.json')
+    monkeypatch.setattr(mtc, 'capture_own_tmux_pane', lambda: None)
     return tasks_dir, reports_dir
 
 
@@ -54,12 +57,27 @@ def _write_task(tasks_dir: Path, *, mtime: datetime | None = None) -> Path:
     return path
 
 
-def _write_report(reports_dir: Path, *, completed_at: str, verdict_path: str = '', session_id: str = '') -> Path:
+def _write_report(
+    reports_dir: Path,
+    *,
+    completed_at: str,
+    verdict_path: str = '',
+    session_id: str = '',
+    quota_5h_before_pct: str = '',
+    quota_5h_after_pct: str = '',
+    quota_7d_before_pct: str = '',
+    quota_7d_after_pct: str = '',
+    quota_source: str = '',
+) -> Path:
     path = reports_dir / 'worker1_report.yaml'
     path.write_text(
         f'task_id: {TASK_ID}\nproject: {PROJECT}\nworker: worker1\nagent: claude\n'
         f'status: completed\nverify_status: pass\nverdict_path: "{verdict_path}"\n'
-        f'session_id: "{session_id}"\ncompleted_at: "{completed_at}"\n',
+        f'session_id: "{session_id}"\n'
+        f'quota_5h_before_pct: "{quota_5h_before_pct}"\nquota_5h_after_pct: "{quota_5h_after_pct}"\n'
+        f'quota_7d_before_pct: "{quota_7d_before_pct}"\nquota_7d_after_pct: "{quota_7d_after_pct}"\n'
+        f'quota_source: "{quota_source}"\n'
+        f'completed_at: "{completed_at}"\n',
         encoding='utf-8',
     )
     return path
@@ -282,3 +300,167 @@ def test_session_id_present_but_transcript_missing_falls_back_to_approximate(
     assert record['attribution'] == 'approximate'
     assert record['input_tokens'] == 3
     assert 'approximate にフォールバック' in record['notes']
+
+
+# --- quota (5h/7d) 消費計測 (SQUAD-265) ---
+
+
+def test_read_quota_cache_parses_valid_file(tmp_path: Path) -> None:
+    cache_path = tmp_path / 'quota_cache.json'
+    cache_path.write_text(
+        json.dumps({'data': {'five_hour': {'utilization': 48.0}, 'seven_day': {'utilization': 90.0}}}),
+        encoding='utf-8',
+    )
+
+    result = mtc.read_quota_cache(cache_path)
+
+    assert result == {'five_hour_pct': 48, 'seven_day_pct': 90}
+
+
+def test_read_quota_cache_returns_none_for_missing_file(tmp_path: Path) -> None:
+    assert mtc.read_quota_cache(tmp_path / 'no_such_file.json') is None
+
+
+def test_read_quota_cache_returns_none_for_malformed_json(tmp_path: Path) -> None:
+    cache_path = tmp_path / 'quota_cache.json'
+    cache_path.write_text('{not valid json', encoding='utf-8')
+
+    assert mtc.read_quota_cache(cache_path) is None
+
+
+def test_read_quota_cache_returns_none_when_utilization_missing(tmp_path: Path) -> None:
+    cache_path = tmp_path / 'quota_cache.json'
+    cache_path.write_text(json.dumps({'data': {'five_hour': {}, 'seven_day': {}}}), encoding='utf-8')
+
+    assert mtc.read_quota_cache(cache_path) is None
+
+
+def test_parse_tmux_status_line_extracts_percentages() -> None:
+    text = '   Sonnet 5   Usage   5h:49%~18:19   7d:90%~8/24   ctx:12%\n'
+
+    assert mtc.parse_tmux_status_line(text) == {'five_hour_pct': 49, 'seven_day_pct': 90}
+
+
+def test_parse_tmux_status_line_returns_none_when_percentages_absent() -> None:
+    assert mtc.parse_tmux_status_line('no usage info here') is None
+
+
+def test_get_quota_snapshot_prefers_cache_file_over_tmux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cache_path = tmp_path / 'quota_cache.json'
+    cache_path.write_text(
+        json.dumps({'data': {'five_hour': {'utilization': 10}, 'seven_day': {'utilization': 20}}}),
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(mtc, 'QUOTA_CACHE_PATH', cache_path)
+
+    def _boom() -> str | None:
+        raise AssertionError('tmux should not be consulted when the cache file is available')
+
+    monkeypatch.setattr(mtc, 'capture_own_tmux_pane', _boom)
+
+    result = mtc.get_quota_snapshot()
+
+    assert result == {'five_hour_pct': 10, 'seven_day_pct': 20, 'source': 'usage_cache_file'}
+
+
+def test_get_quota_snapshot_falls_back_to_tmux_when_cache_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mtc, 'QUOTA_CACHE_PATH', tmp_path / 'no_such_file.json')
+    monkeypatch.setattr(mtc, 'capture_own_tmux_pane', lambda: '5h:33%~10:00   7d:77%~8/30')
+
+    result = mtc.get_quota_snapshot()
+
+    assert result == {'five_hour_pct': 33, 'seven_day_pct': 77, 'source': 'tmux_status_line'}
+
+
+def test_get_quota_snapshot_unavailable_when_both_sources_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mtc, 'QUOTA_CACHE_PATH', tmp_path / 'no_such_file.json')
+    monkeypatch.setattr(mtc, 'capture_own_tmux_pane', lambda: None)
+
+    result = mtc.get_quota_snapshot()
+
+    assert result == {'five_hour_pct': None, 'seven_day_pct': None, 'source': 'unavailable'}
+
+
+def test_extract_quota_deltas_computes_delta_when_both_points_present() -> None:
+    meta = {
+        'quota_5h_before_pct': '10',
+        'quota_5h_after_pct': '15',
+        'quota_7d_before_pct': '80',
+        'quota_7d_after_pct': '82',
+    }
+
+    result = mtc.extract_quota_deltas(meta)
+
+    assert result == {'quota_5h_delta_pct': 5, 'quota_7d_delta_pct': 2}
+
+
+def test_extract_quota_deltas_none_when_only_one_point_present_distinguishes_from_zero() -> None:
+    """片方しか無い場合は 0 と区別できる None (=未取得) にする."""
+    meta = {'quota_5h_before_pct': '10'}
+
+    result = mtc.extract_quota_deltas(meta)
+
+    assert result == {'quota_5h_delta_pct': None, 'quota_7d_delta_pct': None}
+
+
+def test_measure_includes_quota_delta_when_report_has_before_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(
+        reports_dir,
+        completed_at=end.isoformat(),
+        quota_5h_before_pct='40',
+        quota_5h_after_pct='44',
+        quota_7d_before_pct='88',
+        quota_7d_after_pct='89',
+        quota_source='usage_cache_file',
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['quota_5h_delta_pct'] == 4
+    assert record['quota_7d_delta_pct'] == 1
+    assert record['quota_source'] == 'usage_cache_file'
+
+
+def test_measure_quota_delta_is_none_when_report_has_no_quota_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat())
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['quota_5h_delta_pct'] is None
+    assert record['quota_7d_delta_pct'] is None
+
+
+def test_measure_negative_quota_delta_is_noted_as_possible_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(
+        reports_dir,
+        completed_at=end.isoformat(),
+        quota_7d_before_pct='95',
+        quota_7d_after_pct='3',
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['quota_7d_delta_pct'] == -92
+    assert 'reset' in record['notes']
