@@ -4,6 +4,12 @@
 
 ### Added
 
+- `scripts/check_task_yaml.py` を追加。task YAML の必須フィールド・`agent`/`model` 値・
+  `assigned_to` とファイル名の一致・`task_id` 重複・`acceptance_criteria`・`verify` (または
+  `verify_skip_reason`)・`evidence_card` のプレースホルダ・`created_at` の ISO8601・
+  `context.workspace` の存在を機械検証する。`--all` で `queue/projects/*/tasks/*.yaml` と
+  `queue/projects/*/archive/*.yaml` を一括検査できる。task-yaml-author の下位モデル
+  (Haiku / local-coder) 委譲判定に使う (SQUAD-260)。
 - `start.sh -p` / `SQUAD_OWNED_PROJECTS` に `queue/projects/` 配下に無い project を
   指定した場合、警告してスキップするのをやめて `<project>/{tasks,reports}` を自動作成する
   ようにした。手動 `mkdir` 忘れで担当 0 件のまま watcher が idle 起動するのを防ぐ。
