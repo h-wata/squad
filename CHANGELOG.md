@@ -4,6 +4,12 @@
 
 ### Added
 
+- `scripts/check_dashboard_update.py` を新設。dashboard.md / dashboards/<project>.md
+  の更新前後をイベント仕様 (JSON/YAML) と突き合わせて機械検査する。下位モデルへの
+  dashboard-updater 委譲実験の前提として、既知の再発バグ（進行中タスクを「直近の
+  完了タスク」欄に誤記載）を最優先で検出する。見出し・列名が見つからない場合は
+  NG ではなく WARN とし、exit code は NG のみで 1 にする fail-soft 設計
+  (SQUAD-259)。
 - `start.sh -p` / `SQUAD_OWNED_PROJECTS` に `queue/projects/` 配下に無い project を
   指定した場合、警告してスキップするのをやめて `<project>/{tasks,reports}` を自動作成する
   ようにした。手動 `mkdir` 忘れで担当 0 件のまま watcher が idle 起動するのを防ぐ。
