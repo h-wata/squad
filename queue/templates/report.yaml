@@ -26,13 +26,18 @@ verify_status: pass
 # 以下4フィールドはレビュー/サボタージュ検証タスクのみ必須。作業ツリーを汚さず
 # 使い捨てコピーで検証したことを Dispatcher が機械判定できるようにする。
 # 非レビュータスクは省略可。
-# 確認対象の worktree 絶対パス
+# 確認対象の worktree 絶対パス。使える文字は英数字と `/ _ - . ~` のみ (allowlist)。
+# シェルメタ文字 (`;` `&` `|` バッククォート `$` `(` `)` `<` `>`)・空白・改行/タブは禁止
+# (scripts/check_source_tree_clean.py が機械検証で弾く。SQUAD-254)。
 source_worktree: ""
 # `git status -s` の生出力 (空文字列なら clean)
 source_tree_status: ""
-# 実際に実行したコマンド全文
+# 必須固定書式: "git -C <source_worktree> status -s"
+# <source_worktree> の位置には上記 source_worktree フィールドと**文字列一致する絶対パス**
+# を書くこと。`git -C` を省いた形式・`cd <path> && git status -s` のような形式は無効
+# (scripts/check_source_tree_clean.py が機械検証で弾く)。
 status_command: ""
-# 確認時刻 (ISO8601)
+# 確認時刻。ISO8601 (タイムゾーン付き、例: 2026-08-21T12:00:00+09:00) 必須
 checked_at: ""
 # 例: /path/to/worktree/reports/worker1_verdict.yaml
 # (verify した場合の verifier 出力先)

@@ -453,6 +453,13 @@ worktree を直接壊さず使い捨てコピーで行うよう指示する。re
 `source_worktree` / `source_tree_status` / `status_command` / `checked_at`
 相当の作業ツリー clean 確認（`git status -s` 等の出力）を含めさせること。
 
+report を受け取ったら `scripts/check_source_tree_clean.py <report.yaml>` で
+`source_tree_clean` の自己申告を機械検証する（SQUAD-249, SQUAD-248 NB1）。
+`status_command` が `git -C <source_worktree> status -s` の固定書式で
+`source_worktree` と文字列一致しているか、`checked_at` が ISO8601
+（タイムゾーン付き）か、`source_tree_status` が空かを見る。exit 1 なら、
+その report を「clean 確認済み」として扱わず worker に再提出を指示する。
+
 ### マージ前ゲート: `/pr-ready`
 
 現状 `/pr-ready` skill は未実装で、`gh pr view` 等のコマンドによる手動確認で代替している。
