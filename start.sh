@@ -157,8 +157,12 @@ if [ -n "${SQUAD_OWNED_PROJECTS:-}" ]; then
         if [ -f "$_marker" ]; then
             _existing="$(head -n1 "$_marker" | tr -d '[:space:]')"
             if [ -n "$_existing" ] && [ "$_existing" != "$SESSION_NAME" ]; then
-                echo "警告: queue/projects/$_pj/.squad_session は既に '$_existing' が担当中です。上書きするには手動で編集してください"
-                continue
+                if command -v tmux >/dev/null 2>&1 && ! tmux has-session -t "$_existing" 2>/dev/null; then
+                    echo "project '$_pj' の .squad_session は停止済み session '$_existing' が保持していたため '$SESSION_NAME' に引き継ぎました"
+                else
+                    echo "警告: queue/projects/$_pj/.squad_session は既に '$_existing' が担当中です。上書きするには手動で編集してください"
+                    continue
+                fi
             fi
         fi
         echo "$SESSION_NAME" > "$_marker"

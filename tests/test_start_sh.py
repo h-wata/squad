@@ -26,16 +26,64 @@ def _fake_root(tmp_path: Path) -> Path:
     return root
 
 
+def _fake_tmux(tmp_path: Path, *, alive: bool) -> Path:
+    """has-session が alive の生死を返す偽 tmux バイナリを作り、その bin dir を返す."""
+    fake_bin = tmp_path / 'fake-tmux-bin'
+    fake_bin.mkdir(exist_ok=True)
+    fake_tmux = fake_bin / 'tmux'
+    exit_code = 0 if alive else 1
+    fake_tmux.write_text(f'#!/usr/bin/env bash\nexit {exit_code}\n')
+    fake_tmux.chmod(0o755)
+    return fake_bin
+
+
+def _path_without_tmux(tmp_path: Path, path_value: str) -> str:
+    """PATH 上の全実行ファイルを tmux だけ除いてシンボリックリンクした bin dir を作る.
+
+    ディレクトリ単位で PATH から除外すると mkdir/dirname 等の必須コマンドも
+    巻き添えで消えるため、ファイル単位で tmux だけを取り除く。
+    """
+    fake_bin = tmp_path / 'no-tmux-bin'
+    fake_bin.mkdir(exist_ok=True)
+    for entry in path_value.split(os.pathsep):
+        d = Path(entry)
+        if not d.is_dir():
+            continue
+        for f in d.iterdir():
+            if f.name == 'tmux' or (fake_bin / f.name).exists():
+                continue
+            try:
+                (fake_bin / f.name).symlink_to(f)
+            except OSError:
+                continue
+    return str(fake_bin)
+
+
 def _run_start(
-    root: Path, workspace: Path, session: str, owned: str | None = None
+    root: Path,
+    workspace: Path,
+    session: str,
+    owned: str | None = None,
+    *,
+    tmux_alive: bool | None = None,
+    strip_tmux_from_path: bool = False,
+    tmp_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, 'SQUAD_SESSION': session, 'SQUAD_DRY_RUN': '1'}
     if owned is not None:
         env['SQUAD_OWNED_PROJECTS'] = owned
     else:
         env.pop('SQUAD_OWNED_PROJECTS', None)
+    if tmux_alive is not None:
+        assert tmp_path is not None
+        fake_bin = _fake_tmux(tmp_path, alive=tmux_alive)
+        env['PATH'] = f'{fake_bin}:{env["PATH"]}'
+    bash_bin = shutil.which('bash') or 'bash'
+    if strip_tmux_from_path:
+        assert tmp_path is not None
+        env['PATH'] = _path_without_tmux(tmp_path, env['PATH'])
     return subprocess.run(
-        ['bash', str(root / 'start.sh'), str(workspace)],
+        [bash_bin, str(root / 'start.sh'), str(workspace)],
         env=env,
         capture_output=True,
         text=True,
@@ -97,7 +145,7 @@ def test_owned_projects_rejects_path_like_names(tmp_path: Path) -> None:
     assert r.stdout.count('不正です') == 2
 
 
-def test_owned_projects_does_not_overwrite_other_session_marker(tmp_path: Path) -> None:
+def test_owned_projects_does_not_overwrite_alive_session_marker(tmp_path: Path) -> None:
     root = _fake_root(tmp_path)
     pj = root / 'queue' / 'projects' / 'pj'
     pj.mkdir(parents=True)
@@ -105,10 +153,40 @@ def test_owned_projects_does_not_overwrite_other_session_marker(tmp_path: Path) 
     workspace = tmp_path / 'ws'
     workspace.mkdir()
 
-    r = _run_start(root, workspace, 'testsess', owned='pj')
+    r = _run_start(root, workspace, 'testsess', owned='pj', tmux_alive=True, tmp_path=tmp_path)
 
     assert r.returncode == 0, r.stderr
     assert (pj / '.squad_session').read_text().strip() == 'othersess'
+    assert '既に' in r.stdout
+
+
+def test_owned_projects_takes_over_stale_session_marker(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    pj = root / 'queue' / 'projects' / 'pj'
+    pj.mkdir(parents=True)
+    (pj / '.squad_session').write_text('deadsess\n')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', owned='pj', tmux_alive=False, tmp_path=tmp_path)
+
+    assert r.returncode == 0, r.stderr
+    assert (pj / '.squad_session').read_text().strip() == 'testsess'
+    assert '引き継ぎました' in r.stdout
+
+
+def test_owned_projects_no_tmux_in_path_is_conservative(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    pj = root / 'queue' / 'projects' / 'pj'
+    pj.mkdir(parents=True)
+    (pj / '.squad_session').write_text('deadsess\n')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', owned='pj', strip_tmux_from_path=True, tmp_path=tmp_path)
+
+    assert r.returncode == 0, r.stderr
+    assert (pj / '.squad_session').read_text().strip() == 'deadsess'
     assert '既に' in r.stdout
 
 
