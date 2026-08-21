@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ruff: noqa: CPY001
-"""task 単位でモデル別の token / usage quota を集計する (SQUAD-258 Phase 0 / SQUAD-261).
+"""task 単位でモデル別の token / usage quota を集計する (SQUAD-258 Phase 0 / SQUAD-261 / SQUAD-265).
 
 下位モデル / local-coder への委譲判断を「勘」ではなく実測に基づかせるための計測基盤。
 task YAML の mtime (発注時刻) 〜 report YAML の `completed_at` (完了時刻) を区間として、
@@ -15,6 +15,22 @@ usage を合算し、`metrics/task_costs.jsonl` に追記する。
 cwd」で固定され (dedicated worktree に `cd` しても専用ディレクトリは作られない)、同じ cwd で
 複数 worker / Dispatcher が同時に活動していると時間窓だけでは対象セッションを分離できない
 という限界がある (複数の異なる sessionId が窓に含まれていた場合は `notes` に明記する)。
+
+**quota (5h/7d リミット) 消費の計測 (SQUAD-265)**: token 数とは別に、squad の律速である
+5h/7d usage limit の実消費率 (%) を扱う。データ源は `/tmp/claude_usage_cache.json`
+(Claude Code のカスタム statusLine スクリプトが公式 OAuth usage API から取得しキャッシュした
+もの。本スクリプトは credential にはアクセスせず、既にキャッシュされたこのファイルを読むのみ)、
+無ければ自 pane の `tmux capture-pane`（`$TMUX_PANE` の自分自身のみ、他 pane は読まない）で
+ステータス行の `5h:NN%` / `7d:NN%` 表示を読む。`--quota-snapshot` でこの値を JSON 出力でき、
+worker が task 着手前後に呼んで report YAML の `quota_5h_before_pct` 等に記録する運用を
+想定する (2 点が揃わない限り delta は計算できないため、記録は worker の運用に依存する)。
+
+**重要な限界 (実測で確認)**: この 5h/7d 使用率は **アカウント全体で共有される値**であり、
+同時に開いている全 pane (Dispatcher・W1〜W3 のどれか) で同一の値を示す。並行して他 worker が
+稼働していると、単一 task の消費だけを分離することはできない。また表示は整数 % の丸め値で
+粒度が粗く、`resets_at` を跨ぐと差分が負になり得る。モデル別 (Sonnet:Haiku 等) の重み比は、
+観測できた API レスポンスに Sonnet/Haiku 個別の scoped entry が存在しなかったため実測できて
+おらず「不明」として扱う (詳細は SQUAD-265 report 参照)。
 """
 
 from __future__ import annotations
@@ -23,7 +39,9 @@ import argparse
 from datetime import datetime
 from datetime import timezone
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -61,6 +79,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 QUEUE_ROOT = _resolve_queue_root()
 CLAUDE_PROJECTS = Path.home() / '.claude' / 'projects'
 METRICS_PATH = REPO_ROOT / 'metrics' / 'task_costs.jsonl'
+QUOTA_CACHE_PATH = Path('/tmp/claude_usage_cache.json')
+_TMUX_PCT_RE = re.compile(r'(5h|7d):(\d+)%')
 USAGE_FIELDS = (
     ('input_tokens', 'input_tokens'),
     ('output_tokens', 'output_tokens'),
@@ -156,6 +176,64 @@ def find_session_transcript(session_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
+def read_quota_cache(path: Path) -> dict | None:
+    """`/tmp/claude_usage_cache.json` から 5h/7d 使用率 (%) を読む. credential にはアクセスしない."""
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return None
+    data = raw.get('data')
+    if not isinstance(data, dict):
+        return None
+    try:
+        five_hour = data.get('five_hour', {}).get('utilization')
+        seven_day = data.get('seven_day', {}).get('utilization')
+    except AttributeError:
+        return None
+    if not isinstance(five_hour, (int, float)) or not isinstance(seven_day, (int, float)):
+        return None
+    return {'five_hour_pct': int(five_hour), 'seven_day_pct': int(seven_day)}
+
+
+def parse_tmux_status_line(text: str) -> dict | None:
+    """`5h:NN%` / `7d:NN%` を含むテキストから使用率 (%) を抽出する (tmux capture-pane 出力用)."""
+    found = dict(_TMUX_PCT_RE.findall(text))
+    if '5h' not in found or '7d' not in found:
+        return None
+    return {'five_hour_pct': int(found['5h']), 'seven_day_pct': int(found['7d'])}
+
+
+def capture_own_tmux_pane() -> str | None:
+    """自分自身の tmux pane (`$TMUX_PANE`) の内容のみを読む. 他 pane は対象にしない."""
+    pane = os.environ.get('TMUX_PANE')
+    if not pane:
+        return None
+    try:
+        result = subprocess.run(
+            ['tmux', 'capture-pane', '-t', pane, '-p'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        return result.stdout
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def get_quota_snapshot() -> dict:
+    """現時点の 5h/7d 使用率 (%) を取得する. `--quota-snapshot` および worker の手動記録用."""
+    cached = read_quota_cache(QUOTA_CACHE_PATH)
+    if cached is not None:
+        return {**cached, 'source': 'usage_cache_file'}
+    pane_text = capture_own_tmux_pane()
+    if pane_text is not None:
+        parsed = parse_tmux_status_line(pane_text)
+        if parsed is not None:
+            return {**parsed, 'source': 'tmux_status_line'}
+    return {'five_hour_pct': None, 'seven_day_pct': None, 'source': 'unavailable'}
+
+
 def collect_usage(jsonl_paths: list[Path], start: datetime | None, end: datetime | None) -> dict:
     """時間窓内の assistant message usage を合算する. どのファイルにも触れなくても例外を出さない."""
     totals = {field: 0 for _, field in USAGE_FIELDS}
@@ -223,6 +301,24 @@ def extract_attempts(report_meta: dict[str, str]) -> int | None:
         return int(raw)
     except ValueError:
         return None
+
+
+def extract_quota_deltas(report_meta: dict[str, str]) -> dict:
+    """Report の `quota_*_{before,after}_pct` から delta を計算する. 揃わなければ None (=未取得)."""
+
+    def to_int(key: str) -> int | None:
+        raw = report_meta.get(key, '')
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return None
+
+    before_5h, after_5h = to_int('quota_5h_before_pct'), to_int('quota_5h_after_pct')
+    before_7d, after_7d = to_int('quota_7d_before_pct'), to_int('quota_7d_after_pct')
+    return {
+        'quota_5h_delta_pct': after_5h - before_5h if before_5h is not None and after_5h is not None else None,
+        'quota_7d_delta_pct': after_7d - before_7d if before_7d is not None and after_7d is not None else None,
+    }
 
 
 def measure(project: str, task_id: str) -> dict:
@@ -299,6 +395,11 @@ def measure(project: str, task_id: str) -> dict:
 
     wall_clock_sec = (end - start).total_seconds() if (start is not None and end is not None) else None
 
+    quota = extract_quota_deltas(report_meta)
+    for label, delta in (('5h', quota['quota_5h_delta_pct']), ('7d', quota['quota_7d_delta_pct'])):
+        if delta is not None and delta < 0:
+            notes.append(f'quota_{label}_delta_pct が負 ({delta}) — 集計区間中に usage limit の reset を跨いだ可能性')
+
     return {
         'task_id': task_id,
         'project': project,
@@ -314,6 +415,9 @@ def measure(project: str, task_id: str) -> dict:
         'cache_creation_tokens': totals['cache_creation_tokens'] if has_usage else None,
         'wall_clock_sec': wall_clock_sec,
         'attribution': attribution,
+        'quota_5h_delta_pct': quota['quota_5h_delta_pct'],
+        'quota_7d_delta_pct': quota['quota_7d_delta_pct'],
+        'quota_source': report_meta.get('quota_source', ''),
         'measured_at': datetime.now(tz=timezone.utc).isoformat(),
         'notes': '; '.join(notes) if notes else '',
     }
@@ -325,15 +429,32 @@ def summarize(record: dict) -> str:
         f'status={record["status"]}/{record["verify_status"]} attribution={record["attribution"]} '
         f'in={record["input_tokens"]} out={record["output_tokens"]} '
         f'cache_read={record["cache_read_tokens"]} cache_creation={record["cache_creation_tokens"]} '
-        f'wall_clock_sec={record["wall_clock_sec"]}'
+        f'wall_clock_sec={record["wall_clock_sec"]} '
+        f'quota_5h_delta_pct={record["quota_5h_delta_pct"]} quota_7d_delta_pct={record["quota_7d_delta_pct"]}'
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--project', required=True)
-    parser.add_argument('--task-id', required=True)
+    parser.add_argument('--project')
+    parser.add_argument('--task-id')
+    parser.add_argument(
+        '--quota-snapshot',
+        action='store_true',
+        help=(
+            '現時点の 5h/7d 使用率 (%) を JSON で標準出力に印字して終了する。'
+            'worker が task 着手前後に呼び、report YAML の quota_5h_before_pct 等に'
+            '手動で転記する運用を想定 (--project/--task-id とは併用しない)。'
+        ),
+    )
     args = parser.parse_args()
+
+    if args.quota_snapshot:
+        print(json.dumps(get_quota_snapshot(), ensure_ascii=False))
+        return
+
+    if not args.project or not args.task_id:
+        parser.error('--project と --task-id が必要です (または --quota-snapshot 単独で指定)')
 
     record = measure(args.project, args.task_id)
 
