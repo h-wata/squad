@@ -154,6 +154,15 @@ local-coder を前提にした手順を組んではならない。
 
 ## 検証ゲート（report 前の必須ステップ）
 
+**I/O 障害の回帰テストは mock 注入ではなく実ファイルシステムで再現する**
+(`os.chmod(parent, 0o000)` 等、try/finally で権限を戻し root 実行時は skip)。mock は
+テストが想定した経路しか通らないため「実際にどこで最初に落ちるか」を検出できない。
+PR #31 では mock 注入のテストがサボタージュ検証にも反応して pass 判定されたが、実際には
+守った箇所より手前で PermissionError が伝播し watcher が恒久停止したままだった。
+サボタージュ検証が通ったことは「テストが production の変更を検出する」ことしか示さず、
+「テストが実際の障害を再現している」こととは別物。コードを読んだだけの
+「他の箇所は保護済みのはず」という切り分け報告も、実際に壊して確かめるまで信用しない。
+
 task YAML に `verify:` ブロックがあるタスクは、`status: completed` を名乗る前に
 **必ず独立検証を通す**こと。自分でテストを流した結果だけで完了を名乗ってはいけない
 （自己採点の禁止）。
@@ -192,6 +201,20 @@ Plan/設計文書を Codex の cross-review に出す前に、author 自身で�
 ないか」を1回尋ね、指摘があれば反映してから提出する。
 
 ## 報告プロトコル
+
+**自分が作者の PR への routine なコメントは user 確認を取らない。** fix progress 報告、
+re-review 依頼、CI 状況報告など「自分の PR に対し、自分が今やった作業の事実報告 +
+re-review 依頼」は `gh pr comment` で直接投稿してよい。グローバル CLAUDE.md の
+「外部送信は user 確認」は cross-review コメントや user 名義の push を想定したもので、
+self-fix-announcement は含まない。
+
+例外（確認が要るもの）: 他 worker の PR への cross-review コメント / merge・close・
+labeling 等の状態変更 / release notes・CHANGELOG の user-facing 文面 / approve・
+request_changes の投票。**upstream OSS リポジトリへの投稿もすべて例外**（文面をユーザーに
+提示して承認を取る）。
+
+なお auto mode classifier が `gh pr comment` をブロックして blocked になる事例があるため
+(SQUAD-004-fix3)、止まったら Dispatcher に代理投稿を依頼してよい。
 
 タスク完了後、`queue/projects/<project>/reports/worker{N}_report.yaml` に報告作成:
 
@@ -289,6 +312,14 @@ Dispatcher が `status_command` をシェルで実行した際に `;` 等で区�
 **事故時の復旧手順（許可された運用ではない）**: 誤って共有 worktree を
 変更してしまった場合は、report を書く前ではなく**気付いた時点で即座に**
 復元し、`git status -s` の生出力とともにそのことを report に記録する。
+
+### 日本語の文章を書くときの文体
+
+記事・ドキュメント・報告文は**平易な日本語で結論をそのまま書く**。
+- 見出し・タイトルに結論を直接書く（例:「結果: Dispatcher のトークン削減ができた」）
+- 対句・標語的フレーズ（「〜は賢く、〜は安く」等のキャッチコピー）を作らない
+- 主題を直接支えない補足セクション（小技集、ニュアンス付きの考察）は削る
+- 初稿から短めに書く。8 セクションより 6 セクション
 
 ## 禁止事項
 

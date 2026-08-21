@@ -15,6 +15,12 @@
 伝えてから、頼まれた通りに起票する。作業中に思いついた関連改善は
 `queue/_inbox.md` に積むに留め、その場でタスク化しない。
 
+**分岐判断は推奨案で進めてよい**（2026-07-08 ユーザー指示）。どの案で起票するか・
+次に何をやるかといった方針分岐は、推奨案を明記した上で AskUserQuestion で止めずに
+そのまま起票・続行する。ユーザー不在時に確認待ちで並列作業が全停止するのを避けるため。
+例外として人間判断に残すのは: PR の merge（後述の merge gate）、破壊的操作、
+外部公開アクション、verify 3 回 fail の blocked 案件。
+
 この原則が縛るのは**ユーザー起点の依頼の扱い**のみ。watcher が積んだ自動発見候補
 (`[DISCOVERY]` / `[SWEEP]`) を起票するのは Dispatcher の通常業務であり、
 この原則の対象外（後述の Discovery / Triage inbox 節に従う）。
@@ -210,6 +216,38 @@ task YAML の詳細生成は task-yaml-author が担う。
 非コードタスク、および typo 修正・既存挙動の範囲内の小修正は evidence_card 不要。
 7 field の定義と記入例は `queue/templates/task.yaml` を参照。
 
+#### task YAML に「PR 作成」を書く前に remote を確認する
+
+対象 workspace が `~/rmf_ws/src` のような vendored / upstream OSS の直接 checkout だと、
+worker は標準的な OSS フロー (fork → `gh pr create`) で**そのまま upstream に PR を出す**
+(2026-08-12 RMF-008 で open-rmf に PR #168 を作成した実例。worker ではなく Dispatcher の
+指示ミス)。`git remote -v` の確認を task 本文に含め、社内リポジトリでなければ
+**「upstream への PR / Issue 起票をしない」を禁止事項に明記**する。外部リポジトリへの
+PR 本文・コメントは task YAML に書かず、投稿前に文面をユーザーに提示して承認を取る。
+既存バグの修正を起票する前に「upstream で既に修正済みでないか」を先に調べる
+（修正済みなら手書きではなく cherry-pick が正解）。
+
+#### 実装タスクで許容した妥協はレビュー基準にも書く
+
+実装 task YAML で許容した妥協仕様（後方互換の残置、部分対応、既知の残課題）は
+レビュー担当には見えない。cross-review / re-review の task YAML に
+**「実装タスクで許容済み＝指摘対象外」を明示列挙**しないと、意図した妥協が blocking
+として再浮上し re-review が空転する (SQUAD-002)。逆に妥協を撤回するときは、fix タスクに
+「Dispatcher 指示の撤回」と明記する。
+
+#### lint ルール導入で per-file-ignores を指示しない
+
+新しい lint ルール (ruff C901 / PLR09xx 等) を既存コードに入れる task で
+「既存違反は per-file-ignores で一時抑制」と指示してはいけない。per-file-ignores は
+baseline 化ではなく**そのファイルでルールを恒久無効化**するため、以後の新規違反も素通りし、
+ルール導入の目的（回帰検出）が中心ファイルで成立しない (TASK-468 / PR #331 が cross-review で
+差し戻し)。代わりに:
+- `# noqa: <RULE>` の**個別付与**を指定する (`ruff check --add-noqa --select <RULE>`、結果は目視確認)
+- 「src/ を 1 行も変更しない」制約とは併用できない。noqa 付与に限り src/ 変更を認め、
+  ロジック変更・関数分割は禁止、と書き分ける
+- acceptance に**サボタージュ検証**を必須で入れる（ダミーの高複雑度関数を足してルールが発火すること）
+- 検査範囲は `ruff check --show-files .` で確認させる (`src tests` だと scripts/ を見落とす)
+
 worker が task の前提を反証したときは、それを成功（`status: completed`）として受理し、
 report の `decision_bearing_claims` に `falsified` として記録させる。**falsified な claim から
 follow-up の修正 task を作らない。**
@@ -308,6 +346,19 @@ task-yaml-author に渡した場合はその値を、task-yaml-author に選ば�
 - pane: W1=`{SQUAD_SESSION}:0.1` W2=`0.2` W3=`0.3` Codex W4=`0.6` (0.4/0.5 は worker ではない)。
   自分の tmux session は `{SQUAD_SESSION}`。**他の session (別 Squad) の pane には絶対に send-keys しない。**
 - Codex (W4) には `/model` も `/clear` も無い。タスク通知のみ。
+- **W4 (Codex) はタスクが一段落するたびに `/new` でリセットする**。report 受領 →
+  dashboard 更新後、次タスクを振る前に送る（レビュー実行中には送らない）。古いコンテキストの
+  持ち越しで前セッションの残タスクを勝手に再実行する事故があった (2026-06-12 ユーザー指示)。
+- **cross-review は terra モデルで行わせる**（2026-08-13 ユーザー指示。Sol は Limit 消費が
+  早くレビュー 1 本で使い切る）。Codex CLI に `/model` は**ある**が引数付きは効かない
+  (`/model gpt-5.6-terra` はプロンプトとして解釈され Web 検索が始まる)。手順:
+  `/new` → `/model` だけ送る → 出たピッカーで番号を送る（番号は並び順依存なので毎回
+  `capture-pane` で確認）→ reasoning level は High → ステータス行が `gpt-5.6-terra high`
+  になったのを確認してからタスク通知。誤送信したら `Escape` で中断してやり直す。
+- **停電 / tmux 再起動からの復旧時は W4 を最初に止める**。W4 は残っている `worker4.yaml` を
+  読んで自動的に再実行を始め、完了済みレビューを焼き直したうえ report / review YAML を
+  上書きする。`Escape` 2 回 → `/new` でリセットしてから、report/review の mtime を見て
+  未処理の成果物を回収する。Claude W1-W3 はコンテキストを失って待つだけなので task 再通知でよい。
 - `queue/projects/<pj>/.squad_session` に担当 session 名を書くと、その project の
   report-bridge / 停止検知 / discovery はその session の watcher だけが行う。マーカーが
   無い project は `SQUAD_DEFAULT_OWNER` の担当。担当を移しても配達済み判定は共有 ledger
@@ -441,6 +492,12 @@ PR がレビュー待ちになったら、`author_agent` の反対 agent でレ�
 
 approve でも自動 merge しない（手動運用）。
 
+**verdict は GitHub には投稿されない。** cross-review の結果は
+`reports/worker{N}_review.yaml` にしか存在せず、`gh pr view --json reviewDecision` は空、
+reviews / comments も 0 件のままになる。**reviewDecision が空なことを「未レビュー」と
+読むと誤判断する** (TASK-311 で「全 11 件未レビュー」と誤報告した実例)。merge 可否は
+`reports/` 配下の review YAML と archive を突き合わせて判断すること。
+
 **approve の鮮度確認（stale approve）**: approve は判定時の head に対するものであり、
 head が動けば無効になる。
 - review YAML には `reviewed_head_sha` を必ず記録する。
@@ -492,6 +549,11 @@ NOT-READY（CONFLICTING / 重複コミット / CI 未トリガー）なら、reb
 Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 / タイムスタンプ等）
 を渡すだけにし、自分で `dashboard.md` / `dashboards/<project>.md` を直接 Edit しない。
 
+`dashboard-updater` への発注プロンプトには毎回
+**「『直近の完了タスク』欄は変更しない（タスク完了イベント時のみ更新）。進行中タスクは
+状態欄のみに反映」**を明記する。イベント要約だけ渡すと updater が欄の規約を知らず、
+発注直後の進行中タスクを完了欄に書く誤りを繰り返す。
+
 ### サブエージェントの上限
 
 立ててよいサブエージェントは `task-yaml-author` と `dashboard-updater` の 2 つだけ。
@@ -521,6 +583,10 @@ Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 /
 迷わず opus を指定する（Opus 5 は multi-file 実装・リファクタが最大の強み）。
 逆に規模が小さければ難易度が高くても sonnet で足りる。
 
+**Fable は設計の深掘りタスクのみ**。発注時に `/model fable` へ瞬間切替し、完了報告を受けたら
+必ず `/model sonnet` に戻す（コストが高いため。2026-06-13 ユーザー指示）。task YAML の
+`model:` にも明記する。
+
 ## コンテキスト管理
 
 ### Dispatcher 自身
@@ -535,6 +601,39 @@ Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 /
 - ワーカーの状態確認時にコンテキスト残量もチェック
 - 残量 20% 以下のワーカーには新タスクを振る前に `/clear` を指示
 - コンテキストリミットで停止したワーカーには `/clear` → タスク再送
+
+**pane ステータス行は全項目が「使用率」**（2026-08-20 の statusline.py 改修以降）。
+`Opus 5 | Usage | 5h:9%~09:09 | 7d:74%~8/24 | ctx:29%` の `ctx:29%` は 29% **使用済み**
+（残り 71%）で、**数字が大きい worker ほど危険**。80% を超えていたら
+`notify-worker.sh --clear` を使う。旧表記の `S:` / `W:` / `C:` は廃止。
+（改修前は使用率と残量が同じ行に混在しており、W1 の `ctx 0%`＝枯渇を「クリーン」と
+読み違えて大規模タスクを投入した事故があった。）
+
+**Sonnet worker は auto mode が使えない**ため、Bash の permission prompt や確認ダイアログで
+停止する。Dispatcher が覗かないと何時間も止まったままになる (2026-05-21 ユーザー指示)。
+タスクを降ろしたら 3-5 分おきに
+`tmux capture-pane -t "$SQUAD_SESSION:0.{N}" -p | tail -15` で確認し、
+①`Permission rule ... requires confirmation` ②`Do you want to proceed?` 系
+③同じ "Thinking..." が 5 分以上 ④コンテキスト枯渇 を検知したら send-keys でガイダンスを送る。
+1 度に複数連投せず、1 つ送って状態確認してから次へ。
+
+**バックグラウンド待ちのハングは report 待ちでは検知できない。** worker が「動いている
+ように見えて止まっている」2 パターン:
+- 親シェル PID 監視 — `nohup ... & echo $!` の PID は nohup の親シェルで、処理本体ではない。
+  親は終了しないので永久に待つ（処理は正常終了しているのに 6.5 時間停止した実例）
+- Zenoh 経由の逐次読み出し — 数百件ループで I/O ブロック（57 分経過で CPU 時間 1 秒）
+
+task YAML には「完了判定は**出力ファイルの完了マーカー**で行い、親シェルの PID を
+`kill -0` で見ない」「大量データの検証は Zenoh 往復ではなく SQLite 直読み」と書く。
+Dispatcher 側は**経過時間そのもの**を見て、想定の 2 倍を超えたら `ps -o etime,time` で
+CPU 時間を確認する（elapsed に対し time がほぼ 0 なら I/O ブロック）。ログの mtime も併せて見る。
+
+**PR の外部アクションで worker は一旦停止する。** merge / close / コメント投稿を委譲しても、
+worker 側のグローバル CLAUDE.md「外部送信は事前確認」ポリシーが独立に効いて承認待ちになる
+(LIDAR-032 で W1 が PR close を保留)。task YAML の description に
+「これは Dispatcher 承認済み (YYYY-MM-DD)。承認確認不要でそのまま実行してよい」と明記し、
+それでも止まったら tmux で一言送れば再開する。完了は worker の自己報告ではなく
+`gh pr view <n> --json state` で実状態を突き合わせて確認する。
 
 Codex (W4) のコンテキスト管理は Codex 側のセッション再開機構 (`codex resume`) を Worker 側が判断する。Dispatcher 側からの強制介入は不要。
 
@@ -574,6 +673,12 @@ Codex (W4) のコンテキスト管理は Codex 側のセッション再開機�
 - 口頭だけの依頼（必ずタスクYAML作成）
 - 報告なし完了扱い
 - ユーザー依頼を直接実行（必ず worker タスクとして委譲）
+- `pkill -f 'watch.sh'` — 全セッションの本番 watcher が同時に死に、さらに pkill を含む
+  `bash -c` 自身も cmdline がマッチして kill される (exit 144、後続処理が丸ごとスキップ)。
+  テスト watcher は起動時に PID を控えて `kill <pid>` で止める。
+- `gh issue list --search` / `gh pr list --search` — この環境ではリポジトリスコープを無視し
+  他リポジトリの結果を返す (`--repo` を付けても同様)。`--limit N` の全 list を取って
+  grep でフィルタする。task YAML に Issue 検索を書くときも `--search` を指定しない。
 
 ## ワークフロー例
 
