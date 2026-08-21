@@ -235,10 +235,23 @@ def check_update_line(after_text: str) -> list[str]:
     return errors
 
 
+def _is_subsequence(sub: list[str], full: list[str]) -> bool:
+    """引数 sub の各行が full 内に元の順序を保ったまま (連続でなくてよい) 全て出現するか."""
+    it = iter(full)
+    return all(any(item == line for item in it) for line in sub)
+
+
 def check_history_appended(
     before_text: str | None, after_text: str | None, history_path: Path
 ) -> tuple[list[str], list[str]]:
-    """検査項目6: 履歴ファイルへの追記確認 (行数が増え、最終行が更新前と異なる)."""
+    """検査項目6: 履歴ファイルへの追記確認.
+
+    実運用の履歴ファイル (dashboard_history.md / dashboards/<project>_history.md) は
+    最新の更新をファイル先頭 (タイトル直後) に**先頭挿入**する運用になっており、
+    末尾行は更新のたびに変わるとは限らない (SQUAD-262 で実物検証して判明)。
+    「最終行が変わったか」ではなく「行数が増え、かつ更新前の全行が順序を保って
+    残っているか (先頭挿入・末尾追記のどちらでも検出できる)」で判定する。
+    """
     errors: list[str] = []
     warnings: list[str] = []
     if before_text is None or after_text is None:
@@ -246,9 +259,7 @@ def check_history_appended(
         return errors, warnings
     before_lines = before_text.splitlines()
     after_lines = after_text.splitlines()
-    before_last = before_lines[-1] if before_lines else ''
-    after_last = after_lines[-1] if after_lines else ''
-    if not (len(after_lines) > len(before_lines) and after_last != before_last):
+    if not (len(after_lines) > len(before_lines) and _is_subsequence(before_lines, after_lines)):
         errors.append(f'履歴ファイルへの追記が確認できない: {history_path}')
     return errors, warnings
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
+from check_dashboard_update import check_history_appended  # noqa: E402
 from check_dashboard_update import check_unrelated_changes  # noqa: E402
 from check_dashboard_update import check_update_line  # noqa: E402
 from check_dashboard_update import find_tables  # noqa: E402
@@ -244,3 +245,32 @@ def test_find_tables_parses_header_and_rows() -> None:
     tables = find_tables(PROJECT_MD)
     assert any('worktree' in t['header'] for t in tables)
     assert any('完了日' in t['header'] for t in tables)
+
+
+def test_check_history_appended_detects_prepend_style_addition() -> None:
+    """SQUAD-262: 実運用の履歴ファイルはタイトル直後に先頭挿入する運用だった.
+
+    「最終行が変わったか」だけを見る実装では、既存の最終行 (最古のエントリ) が
+    変化しないため見逃す。先頭挿入でも検出できることを確認する。
+    """
+    before = '# タイトル\n\n更新: 古いエントリ\n'
+    after = '# タイトル\n\n更新: 新しいエントリ\n更新: 古いエントリ\n'
+    errors, warnings = check_history_appended(before, after, Path('dummy_history.md'))
+    assert errors == []
+    assert warnings == []
+
+
+def test_check_history_appended_rejects_no_growth_even_if_last_line_changes() -> None:
+    """行数が増えていなければ、最終行が変わっていても追記とは認めない."""
+    before = '# タイトル\n\n更新: A\n更新: B\n'
+    after = '# タイトル\n\n更新: A\n更新: C\n'
+    errors, _ = check_history_appended(before, after, Path('dummy_history.md'))
+    assert errors
+
+
+def test_check_history_appended_rejects_existing_lines_dropped() -> None:
+    """行数が増えても既存行が失われていれば NG (単なる置換を追記と誤認しない)."""
+    before = '# タイトル\n\n更新: A\n更新: B\n'
+    after = '# タイトル\n\n更新: C\n更新: D\n更新: E\n'
+    errors, _ = check_history_appended(before, after, Path('dummy_history.md'))
+    assert errors
