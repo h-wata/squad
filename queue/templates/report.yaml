@@ -68,5 +68,10 @@ issues: []
 notes: ""
 # 任意: 作業対象 worktree の HEAD SHA (git を使わないタスクは unknown / 空欄でよい)
 git_head: ""
+# 推奨 (SQUAD-261): 自分自身の session id。環境変数 `$CLAUDE_CODE_SESSION_ID` の値をそのまま
+# 記録する (`echo "$CLAUDE_CODE_SESSION_ID"` で取得可能)。scripts/measure_task_cost.py が
+# これを使って ~/.claude/projects/*/<session_id>.jsonl を直接特定し、同一 cwd の他セッション
+# を混入させずに集計できるようになる (無ければ時間窓による近似集計にフォールバックする)。
+session_id: ""
 # ISO8601形式
 completed_at: "2026-01-01T12:00:00+09:00"

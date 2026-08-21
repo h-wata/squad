@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # ruff: noqa: CPY001
-"""task 単位でモデル別の token / usage quota を集計する (SQUAD-258 Phase 0).
+"""task 単位でモデル別の token / usage quota を集計する (SQUAD-258 Phase 0 / SQUAD-261).
 
 下位モデル / local-coder への委譲判断を「勘」ではなく実測に基づかせるための計測基盤。
 task YAML の mtime (発注時刻) 〜 report YAML の `completed_at` (完了時刻) を区間として、
 その区間に含まれる `~/.claude/projects/<encoded-cwd>/*.jsonl` 内の assistant message の
 usage を合算し、`metrics/task_costs.jsonl` に追記する。
 
-**セッション対応の限界 (重要)**: Claude Code の session transcript は「セッション起動時の
-cwd」でディレクトリが決まり、`cd` で worktree に移動しても同じディレクトリに記録され続ける
-(実測: worker が dedicated worktree で作業しても専用の `~/.claude/projects/` ディレクトリは
-作られない)。かつ task/report YAML には sessionId が記録されていない。そのため同じ cwd で
-複数 worker / Dispatcher が同時に活動していると、時間窓だけでは対象セッションを一意に
-特定できない場合がある。本スクリプトは時間窓に重なる全 jsonl ファイルの assistant usage を
-合算し、複数の異なる sessionId が窓に含まれていた場合は `notes` にその旨を記録する
-(集計値が他セッション分を含み過大になっている可能性がある、という限界を可視化する)。
+**セッション単位の一意特定 (SQUAD-261)**: report YAML に `session_id` (worker 実行時の
+`$CLAUDE_CODE_SESSION_ID`) が記録されていれば、`~/.claude/projects/*/<session_id>.jsonl` を
+直接特定して集計する (`attribution: "exact"`)。session_id が無い古い report は、cwd 推測 +
+時間窓で重なる全 jsonl を合算する従来の近似にフォールバックする (`attribution:
+"approximate"`)。近似モードでは、Claude Code の session transcript が「セッション起動時の
+cwd」で固定され (dedicated worktree に `cd` しても専用ディレクトリは作られない)、同じ cwd で
+複数 worker / Dispatcher が同時に活動していると時間窓だけでは対象セッションを分離できない
+という限界がある (複数の異なる sessionId が窓に含まれていた場合は `notes` に明記する)。
 """
 
 from __future__ import annotations
@@ -143,49 +143,61 @@ def session_dirs_for(task_text: str) -> list[Path]:
     return dirs
 
 
-def collect_usage(session_dirs: list[Path], start: datetime | None, end: datetime | None) -> dict:
+def find_session_transcript(session_id: str) -> Path | None:
+    """`session_id` から transcript ファイルを横断的に特定する (exact attribution 用).
+
+    cwd 推測に頼らず `~/.claude/projects/*/<session_id>.jsonl` を直接探す。ファイル名は
+    sessionId と一致する (実測で確認済み: `$CLAUDE_CODE_SESSION_ID` == transcript ファイル名
+    == 各行の `sessionId` フィールド)。
+    """
+    if not session_id or not CLAUDE_PROJECTS.is_dir():
+        return None
+    matches = sorted(CLAUDE_PROJECTS.glob(f'*/{session_id}.jsonl'))
+    return matches[0] if matches else None
+
+
+def collect_usage(jsonl_paths: list[Path], start: datetime | None, end: datetime | None) -> dict:
     """時間窓内の assistant message usage を合算する. どのファイルにも触れなくても例外を出さない."""
     totals = {field: 0 for _, field in USAGE_FIELDS}
     session_ids: set[str] = set()
     matched = 0
     corrupt_lines = 0
     usage_missing = 0
-    for session_dir in session_dirs:
-        for jsonl_path in sorted(session_dir.glob('*.jsonl')):
-            try:
-                lines = jsonl_path.read_text(encoding='utf-8', errors='replace').splitlines()
-            except OSError:
+    for jsonl_path in jsonl_paths:
+        try:
+            lines = jsonl_path.read_text(encoding='utf-8', errors='replace').splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
                 continue
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    corrupt_lines += 1
-                    continue
-                if entry.get('type') != 'assistant':
-                    continue
-                ts = parse_iso8601(entry.get('timestamp', ''))
-                if ts is None:
-                    continue
-                if start is not None and ts < start:
-                    continue
-                if end is not None and ts > end:
-                    continue
-                message = entry.get('message')
-                if not isinstance(message, dict):
-                    continue
-                usage = message.get('usage')
-                if not isinstance(usage, dict):
-                    usage_missing += 1
-                    continue
-                matched += 1
-                session_ids.add(entry.get('sessionId', ''))
-                for src_key, dst_key in USAGE_FIELDS:
-                    val = usage.get(src_key)
-                    if isinstance(val, int):
-                        totals[dst_key] += val
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                corrupt_lines += 1
+                continue
+            if entry.get('type') != 'assistant':
+                continue
+            ts = parse_iso8601(entry.get('timestamp', ''))
+            if ts is None:
+                continue
+            if start is not None and ts < start:
+                continue
+            if end is not None and ts > end:
+                continue
+            message = entry.get('message')
+            if not isinstance(message, dict):
+                continue
+            usage = message.get('usage')
+            if not isinstance(usage, dict):
+                usage_missing += 1
+                continue
+            matched += 1
+            session_ids.add(entry.get('sessionId', ''))
+            for src_key, dst_key in USAGE_FIELDS:
+                val = usage.get(src_key)
+                if isinstance(val, int):
+                    totals[dst_key] += val
     return {
         'totals': totals,
         'matched_messages': matched,
@@ -240,9 +252,26 @@ def measure(project: str, task_id: str) -> dict:
         if end is None:
             notes.append('report の completed_at が ISO8601 として解釈できず終了時刻が不明 (unknown)')
 
-    session_dirs = session_dirs_for(task_text)
-    if not session_dirs:
-        notes.append('session transcript ディレクトリ (~/.claude/projects/...) が見つからない')
+    session_id = report_meta.get('session_id', '')
+    attribution = 'approximate'
+    jsonl_paths: list[Path] = []
+    if session_id:
+        exact_path = find_session_transcript(session_id)
+        if exact_path is not None:
+            jsonl_paths = [exact_path]
+            attribution = 'exact'
+        else:
+            notes.append(
+                f'report に session_id ({session_id}) はあるが transcript ファイルが '
+                '見つからず approximate にフォールバック',
+            )
+
+    if attribution == 'approximate':
+        session_dirs = session_dirs_for(task_text)
+        if not session_dirs:
+            notes.append('session transcript ディレクトリ (~/.claude/projects/...) が見つからない')
+        for session_dir in session_dirs:
+            jsonl_paths.extend(sorted(session_dir.glob('*.jsonl')))
 
     if start is None or end is None:
         # 区間の片側が不明なまま集計すると、際限なく過去まで遡って無関係な session まで
@@ -253,12 +282,12 @@ def measure(project: str, task_id: str) -> dict:
         totals = dict.fromkeys(('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens'), 0)
         has_usage = False
     else:
-        usage = collect_usage(session_dirs, start, end)
+        usage = collect_usage(jsonl_paths, start, end)
         if usage['corrupt_lines']:
             notes.append(f'JSONL 破損行を {usage["corrupt_lines"]} 件スキップ')
         if usage['usage_missing']:
             notes.append(f'usage フィールド欠損の assistant message を {usage["usage_missing"]} 件スキップ')
-        if len(usage['session_ids']) > 1:
+        if attribution == 'approximate' and len(usage['session_ids']) > 1:
             notes.append(
                 f'時間窓に {len(usage["session_ids"])} 個の異なる sessionId が含まれていた '
                 '(同一 cwd での並行セッションと区別できず、他セッション分を含み過大の可能性)',
@@ -284,6 +313,7 @@ def measure(project: str, task_id: str) -> dict:
         'cache_read_tokens': totals['cache_read_tokens'] if has_usage else None,
         'cache_creation_tokens': totals['cache_creation_tokens'] if has_usage else None,
         'wall_clock_sec': wall_clock_sec,
+        'attribution': attribution,
         'measured_at': datetime.now(tz=timezone.utc).isoformat(),
         'notes': '; '.join(notes) if notes else '',
     }
@@ -292,7 +322,7 @@ def measure(project: str, task_id: str) -> dict:
 def summarize(record: dict) -> str:
     return (
         f'{record["task_id"]} [{record["project"]}/{record["worker"]}] model={record["model"]} '
-        f'status={record["status"]}/{record["verify_status"]} '
+        f'status={record["status"]}/{record["verify_status"]} attribution={record["attribution"]} '
         f'in={record["input_tokens"]} out={record["output_tokens"]} '
         f'cache_read={record["cache_read_tokens"]} cache_creation={record["cache_creation_tokens"]} '
         f'wall_clock_sec={record["wall_clock_sec"]}'
