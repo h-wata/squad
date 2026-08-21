@@ -31,13 +31,25 @@ def status_command_for(source_worktree: str) -> str:
 
 
 def check_source_tree_clean(meta: dict[str, str]) -> list[str]:
-    """Report の top-level scalars を検証し、違反理由のリストを返す (空なら clean 確認 OK)."""
-    errors: list[str] = []
+    """Report の top-level scalars を検証し、違反理由のリストを返す (空なら clean 確認 OK).
+
+    「フィールドが存在しない (欠損)」と「フィールドは存在するが値が空文字列 (=clean の
+    明示的な申告)」を区別する。`dict.get(key, '')` だけでは両者を区別できず、何も
+    申告していない report が見かけ上 clean と判定されてしまう (SQUAD-252 B1)。
+    """
+    errors: list[str] = [
+        f'{field} が report に存在しません (必須フィールド欠損)' for field in REQUIRED_FIELDS if field not in meta
+    ]
 
     worktree = meta.get('source_worktree', '')
     status_command = meta.get('status_command', '')
     if not worktree:
         errors.append('source_worktree が空です')
+    elif not Path(worktree).is_absolute():
+        # 末尾スラッシュ / `..` を含む絶対パス / symlink 経由の絶対パスは同一ディレクトリへの
+        # 別表記として許容する (正規化はしない)。ここで弾くのは絶対パスでないものだけ
+        # (SQUAD-252 B2: '.' のような CWD 依存の値が通っていた)。
+        errors.append(f'source_worktree が絶対パスではありません: {worktree!r}')
     else:
         expected = status_command_for(worktree)
         if status_command != expected:
@@ -55,7 +67,7 @@ def check_source_tree_clean(meta: dict[str, str]) -> list[str]:
             if parsed.tzinfo is None:
                 errors.append(f'checked_at にタイムゾーンがありません: {checked_at!r}')
 
-    if meta.get('source_tree_status', '').strip():
+    if 'source_tree_status' in meta and meta['source_tree_status'].strip():
         errors.append('source_tree_status が空ではありません (作業ツリーが clean ではない)')
 
     return errors

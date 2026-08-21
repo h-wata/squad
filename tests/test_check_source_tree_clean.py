@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 from check_source_tree_clean import check_source_tree_clean  # noqa: E402
+from check_source_tree_clean import REQUIRED_FIELDS  # noqa: E402
 
 WORKTREE = '/home/gisen/work/squad-wt-squad249'
 OTHER_WORKTREE = '/home/gisen/work/some-other-worktree'
@@ -64,3 +65,38 @@ def test_non_empty_source_tree_status_is_not_clean() -> None:
     meta = {**GOOD, 'source_tree_status': ' M queue/templates/report.yaml'}
     errors = check_source_tree_clean(meta)
     assert any('clean ではない' in e for e in errors)
+
+
+def test_missing_source_tree_status_key_fails_even_though_empty_string_is_clean() -> None:
+    """SQUAD-252 B1: キー欠損 (get(..., '') では空文字と区別できない) は fail."""
+    meta = {k: v for k, v in GOOD.items() if k != 'source_tree_status'}
+    errors = check_source_tree_clean(meta)
+    assert any('source_tree_status' in e and '欠損' in e for e in errors)
+
+
+def test_missing_required_field_fails() -> None:
+    """SQUAD-252 B1: REQUIRED_FIELDS の各フィールドの欠損を回帰させない."""
+    for field in REQUIRED_FIELDS:
+        meta = {k: v for k, v in GOOD.items() if k != field}
+        errors = check_source_tree_clean(meta)
+        assert any(field in e and '欠損' in e for e in errors), f'{field} 欠損が検出されなかった'
+
+
+def test_relative_source_worktree_fails() -> None:
+    """SQUAD-252 B2: '.' のような CWD 依存の相対パスは fail."""
+    meta = {**GOOD, 'source_worktree': '.', 'status_command': 'git -C . status -s'}
+    errors = check_source_tree_clean(meta)
+    assert any('絶対パス' in e for e in errors)
+
+
+def test_trailing_slash_absolute_path_is_still_accepted() -> None:
+    """末尾スラッシュは同一ディレクトリへの別表記として許容する (正規化はしない、文字列一致のみ)."""
+    worktree = f'{WORKTREE}/'
+    meta = {**GOOD, 'source_worktree': worktree, 'status_command': f'git -C {worktree} status -s'}
+    assert check_source_tree_clean(meta) == []
+
+
+def test_dotdot_absolute_path_is_still_accepted() -> None:
+    worktree = f'{WORKTREE}/../squad-wt-squad249'
+    meta = {**GOOD, 'source_worktree': worktree, 'status_command': f'git -C {worktree} status -s'}
+    assert check_source_tree_clean(meta) == []
