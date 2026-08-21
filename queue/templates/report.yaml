@@ -26,7 +26,9 @@ verify_status: pass
 # 以下4フィールドはレビュー/サボタージュ検証タスクのみ必須。作業ツリーを汚さず
 # 使い捨てコピーで検証したことを Dispatcher が機械判定できるようにする。
 # 非レビュータスクは省略可。
-# 確認対象の worktree 絶対パス
+# 確認対象の worktree 絶対パス。使える文字は英数字と `/ _ - . ~` のみ (allowlist)。
+# シェルメタ文字 (`;` `&` `|` バッククォート `$` `(` `)` `<` `>`)・空白・改行/タブは禁止
+# (scripts/check_source_tree_clean.py が機械検証で弾く。SQUAD-254)。
 source_worktree: ""
 # `git status -s` の生出力 (空文字列なら clean)
 source_tree_status: ""

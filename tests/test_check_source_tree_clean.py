@@ -100,3 +100,77 @@ def test_dotdot_absolute_path_is_still_accepted() -> None:
     worktree = f'{WORKTREE}/../squad-wt-squad249'
     meta = {**GOOD, 'source_worktree': worktree, 'status_command': f'git -C {worktree} status -s'}
     assert check_source_tree_clean(meta) == []
+
+
+def _meta_with_worktree(worktree: str) -> dict[str, str]:
+    return {**GOOD, 'source_worktree': worktree, 'status_command': f'git -C {worktree} status -s'}
+
+
+def test_semicolon_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE}; rm -rf /')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_double_ampersand_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE} && rm -rf /')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_double_pipe_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE} || rm -rf /')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_pipe_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE} | rm -rf /')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_backtick_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE}`rm -rf /`')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_command_substitution_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE}$(rm -rf /)')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_newline_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE}\nrm -rf /')
+    errors = check_source_tree_clean(meta)
+    assert errors
+
+
+def test_tab_in_source_worktree_fails() -> None:
+    meta = _meta_with_worktree(f'{WORKTREE}\trm -rf /')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_space_in_source_worktree_fails() -> None:
+    """許可文字は allowlist (英数字 / -_.~/) のみ。空白は単一トークン性を壊すため拒否する."""
+    meta = _meta_with_worktree('/tmp/a b')
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_w4_semicolon_reproduction_fails() -> None:
+    """SQUAD-254 B2: W4 の再現手順そのもの (dirty な対象を ';' で clean な別パスへ切替える偽装)."""
+    sabotage = '/tmp/pr38-rereview-sabotage'
+    clean = '/tmp/pr38-rereview'
+    worktree = f'{sabotage}; git -C {clean}'
+    meta = {
+        'source_worktree': worktree,
+        'status_command': f'git -C {sabotage}; git -C {clean} status -s',
+        'checked_at': '2026-08-21T12:45:00+09:00',
+        'source_tree_status': '',
+    }
+    errors = check_source_tree_clean(meta)
+    assert any('メタ文字' in e for e in errors)

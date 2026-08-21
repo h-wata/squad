@@ -17,12 +17,26 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
 from ledger import parse_scalars  # noqa: E402
 
 REQUIRED_FIELDS = ('source_worktree', 'status_command', 'checked_at', 'source_tree_status')
+
+# source_worktree の許可文字 (allowlist)。英数字 / ASCII path 記号のみで、シェルメタ文字
+# (`;` `&` `|` `` ` `` `$` `(` `)` `<` `>`)・空白・改行/タブ等の制御文字を含め一切通さない
+# (SQUAD-254 B2)。denylist ではなく allowlist にしたのは、シェル特殊文字の一覧は環境や
+# シェルによって漏れがあり得るため。この repo の実際の worktree パス
+# (/home/gisen/work/squad-wt-squad249 等) は英数字と `/ _ - .` のみで構成されており、
+# 非 ASCII 文字は許可対象に含めていない。
+_SAFE_WORKTREE_RE = re.compile(r'^[A-Za-z0-9/_.~-]+$')
+
+
+def has_safe_worktree_characters(source_worktree: str) -> bool:
+    """`source_worktree` がシェルへ渡しても単一トークンとして解釈される文字だけか."""
+    return bool(_SAFE_WORKTREE_RE.match(source_worktree))
 
 
 def status_command_for(source_worktree: str) -> str:
@@ -50,6 +64,12 @@ def check_source_tree_clean(meta: dict[str, str]) -> list[str]:
         # 別表記として許容する (正規化はしない)。ここで弾くのは絶対パスでないものだけ
         # (SQUAD-252 B2: '.' のような CWD 依存の値が通っていた)。
         errors.append(f'source_worktree が絶対パスではありません: {worktree!r}')
+    elif not has_safe_worktree_characters(worktree):
+        # `;` 等のシェルメタ文字を含む source_worktree は is_absolute() と文字列一致だけでは
+        # 弾けない。status_command をシェルで実行すると `;` 以降が別コマンドとして走り、
+        # dirty な申告対象ではなく別の clean なディレクトリの status を偽装できる
+        # (SQUAD-254 B2)。
+        errors.append(f'source_worktree にシェルメタ文字または空白が含まれています: {worktree!r}')
     else:
         expected = status_command_for(worktree)
         if status_command != expected:
