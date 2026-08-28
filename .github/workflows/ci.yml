@@ -50,7 +50,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: install ruff + pytest
-        run: pip install ruff pytest
+        # PR #40 (check_dashboard_update.py) / #41 (check_task_yaml.py) が import yaml する
+        # スクリプトを追加したが、ここに PyYAML が無く CI が落ちていた (SQUAD-269)
+        run: pip install ruff pytest pyyaml
       - name: pytest (watchd / report ledger)
         run: python3 -m pytest tests/ -q
       - name: ruff check
