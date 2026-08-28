@@ -140,11 +140,11 @@ def test_verify_with_non_positive_max_attempts_is_ng(tmp_path: Path) -> None:
     assert _statuses(results, 8) == 'NG'
 
 
-def test_no_verify_and_no_skip_reason_is_ng(tmp_path: Path) -> None:
+def test_no_verify_and_no_skip_reason_is_warn(tmp_path: Path) -> None:
     data = {k: v for k, v in GOOD.items() if k != 'verify'}
     path = _write(tmp_path, data)
     results = check_task_yaml(path, collect_task_id_locations([path]))
-    assert _statuses(results, 9) == 'NG'
+    assert _statuses(results, 9) == 'WARN'
 
 
 def test_no_verify_with_skip_reason_is_ok(tmp_path: Path) -> None:

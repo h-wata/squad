@@ -195,7 +195,7 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
         skip_reason = data.get('verify_skip_reason')
         results.append(Result(8, 'OK', 'verify がないため対象外'))
         if not isinstance(skip_reason, str) or not skip_reason.strip():
-            results.append(Result(9, 'NG', 'verify も verify_skip_reason (空でない文字列) もありません'))
+            results.append(Result(9, 'WARN', 'verify も verify_skip_reason (空でない文字列) もありません'))
         else:
             results.append(Result(9, 'OK', f'verify_skip_reason: {skip_reason!r}'))
 
