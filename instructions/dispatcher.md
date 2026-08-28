@@ -516,6 +516,9 @@ report を受け取ったら `scripts/check_source_tree_clean.py <report.yaml>` 
 `source_worktree` と文字列一致しているか、`checked_at` が ISO8601
 （タイムゾーン付き）か、`source_tree_status` が空かを見る。exit 1 なら、
 その report を「clean 確認済み」として扱わず worker に再提出を指示する。
+report は 4 フィールドをトップレベルに直接書くフラット形式（単一 worktree）と、
+`source_tree_clean:` の下にマッピング（単一）/ リスト（複数 worktree）で書く
+ネスト形式のどちらでもよい（SQUAD-251）。
 
 ### マージ前ゲート: `/pr-ready`
 

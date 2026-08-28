@@ -327,6 +327,16 @@ Dispatcher 側でこの一致・書式・`checked_at` の ISO8601 (タイムゾ�
 Dispatcher が `status_command` をシェルで実行した際に `;` 等で区切られ、申告対象とは
 別のディレクトリの `git status -s` が実行されてしまう。
 
+**複数 worktree を同時に確認する場合**（例: rmf_ros2 と rmf_traffic の両方を同じ report
+で確認するタスク）は、上記 4 フィールドをトップレベルに直接書く代わりに
+`source_tree_clean:` の下にネストして書く（SQUAD-251）。単一 worktree ならマッピング、
+複数ならリストで、各エントリに同じ 4 フィールド（`source_worktree` /
+`status_command` / `source_tree_status` / `checked_at`）を書く。書式は
+`queue/templates/report.yaml` の記入例を参照。**フラット形式とネスト形式を同じ
+report に混在させない。** `source_tree_status` が複数行になる場合は block scalar
+(`source_tree_status: |` の下にインデントして生出力を書く形) でよい。
+`"clean"` のような説明語は書かない — 空文字列だけが clean の申告として扱われる。
+
 **事故時の復旧手順（許可された運用ではない）**: 誤って共有 worktree を
 変更してしまった場合は、report を書く前ではなく**気付いた時点で即座に**
 復元し、`git status -s` の生出力とともにそのことを report に記録する。

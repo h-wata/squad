@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 from check_source_tree_clean import check_source_tree_clean  # noqa: E402
+from check_source_tree_clean import extract_worktree_entries  # noqa: E402
 from check_source_tree_clean import REQUIRED_FIELDS  # noqa: E402
 
 WORKTREE = '/home/gisen/work/squad-wt-squad249'
@@ -201,3 +202,191 @@ def test_trailing_newline_in_checked_at_fails() -> None:
     meta = {**GOOD, 'checked_at': '2026-08-21T12:00:00+09:00\n'}
     errors = check_source_tree_clean(meta)
     assert any('checked_at' in e for e in errors)
+
+
+# --- SQUAD-251: source_tree_clean のネスト形式 (report 全文からの抽出) --------------
+#
+# check_source_tree_clean.py はもともと report 全体を ledger.parse_scalars (トップ
+# レベルの `key: value` だけ拾う簡易パーサ) に通していたため、`source_tree_clean:`
+# の下にネストして書かれた source_worktree 等を一切読めず、規約どおりの report を
+# 「4 フィールドとも欠損」として誤って NG 判定していた。extract_worktree_entries()
+# はこの report 全文からの抽出を担い、フラット形式 (トップレベル直書き, 後方互換) と
+# source_tree_clean: ネスト形式 (マッピング = 単一 worktree、リスト = 複数 worktree)
+# の両方を同じ検証にかけられるようにする。
+
+WORKTREE_2 = '/home/gisen/rmf_ws/src/rmf/rmf_traffic'
+
+
+def _errors_for(text: str) -> list[str]:
+    """Report 全文を extract → 各エントリを検証、というエンドツーエンドの経路."""
+    errors: list[str] = []
+    for entry in extract_worktree_entries(text):
+        errors.extend(check_source_tree_clean(entry))
+    return errors
+
+
+def test_list_format_multi_worktree_normal_case_has_no_errors() -> None:
+    """リスト形式 (複数 worktree) の正常系."""
+    text = f"""\
+report_id: "00000000-0000-4000-8000-000000000000"
+source_tree_clean:
+  - source_worktree: {WORKTREE}
+    status_command: "git -C {WORKTREE} status -s"
+    source_tree_status: ""
+    checked_at: "2026-08-28T22:45:46+09:00"
+  - source_worktree: {WORKTREE_2}
+    status_command: "git -C {WORKTREE_2} status -s"
+    source_tree_status: ""
+    checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    entries = extract_worktree_entries(text)
+    assert len(entries) == 2
+    assert _errors_for(text) == []
+
+
+def test_mapping_format_single_worktree_normal_case_has_no_errors() -> None:
+    """マッピング形式 (単一 worktree) の正常系."""
+    text = f"""\
+report_id: "00000000-0000-4000-8000-000000000000"
+source_tree_clean:
+  source_worktree: {WORKTREE}
+  status_command: "git -C {WORKTREE} status -s"
+  source_tree_status: ""
+  checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    entries = extract_worktree_entries(text)
+    assert len(entries) == 1
+    assert _errors_for(text) == []
+
+
+def test_nested_list_status_command_mismatch_fails() -> None:
+    text = f"""\
+source_tree_clean:
+  - source_worktree: {WORKTREE}
+    status_command: "git -C {WORKTREE_2} status -s"
+    source_tree_status: ""
+    checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    errors = _errors_for(text)
+    assert any('status_command' in e for e in errors)
+
+
+def test_nested_mapping_checked_at_without_timezone_fails() -> None:
+    text = f"""\
+source_tree_clean:
+  source_worktree: {WORKTREE}
+  status_command: "git -C {WORKTREE} status -s"
+  source_tree_status: ""
+  checked_at: "2026-08-28T22:45:46"
+"""
+    errors = _errors_for(text)
+    assert any('タイムゾーン' in e for e in errors)
+
+
+def test_nested_block_scalar_dirty_status_is_detected() -> None:
+    """worker1 の実 report と同じ block scalar (`|`) 書式で dirty を検出できること."""
+    text = f"""\
+source_tree_clean:
+  - source_worktree: {WORKTREE}
+    status_command: "git -C {WORKTREE} status -s"
+    source_tree_status: |
+      ?? .kioku-mesh.yaml
+      ?? watch.log
+    checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    entries = extract_worktree_entries(text)
+    assert entries[0]['source_tree_status'] == '?? .kioku-mesh.yaml\n?? watch.log'
+    errors = _errors_for(text)
+    assert any('clean ではない' in e for e in errors)
+
+
+def test_nested_list_missing_required_field_in_one_entry_fails() -> None:
+    """2 件のうち 1 件だけ checked_at が欠けていても検出されること."""
+    text = f"""\
+source_tree_clean:
+  - source_worktree: {WORKTREE}
+    status_command: "git -C {WORKTREE} status -s"
+    source_tree_status: ""
+    checked_at: "2026-08-28T22:45:46+09:00"
+  - source_worktree: {WORKTREE_2}
+    status_command: "git -C {WORKTREE_2} status -s"
+    source_tree_status: ""
+"""
+    entries = extract_worktree_entries(text)
+    assert len(entries) == 2
+    assert 'checked_at' not in entries[1]
+    errors = _errors_for(text)
+    assert any('checked_at' in e and '欠損' in e for e in errors)
+
+
+def test_flat_format_still_works_without_source_tree_clean_wrapper() -> None:
+    """後方互換: source_tree_clean: ラッパーの無い旧来のフラット形式."""
+    text = f"""\
+report_id: "00000000-0000-4000-8000-000000000000"
+source_worktree: "{WORKTREE}"
+status_command: "git -C {WORKTREE} status -s"
+source_tree_status: ""
+checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    entries = extract_worktree_entries(text)
+    assert len(entries) == 1
+    assert _errors_for(text) == []
+
+
+def test_report_with_neither_flat_nor_nested_fields_reports_all_missing() -> None:
+    """source_tree_clean も旧フラットフィールドも一切無い report は全欠損として fail する."""
+    text = 'report_id: "00000000-0000-4000-8000-000000000000"\ntask_id: TASK-1\n'
+    errors = _errors_for(text)
+    assert len(errors) >= len(REQUIRED_FIELDS)
+
+
+# --- サボタージュ検証: わざと壊した report が期待どおり fail することの確認 ---------
+
+
+def test_sabotage_second_worktree_in_list_is_dirty_but_first_is_clean() -> None:
+    """複数 worktree のうち後方だけが dirty でも見逃さないこと (先頭だけ見て pass しない)."""
+    text = f"""\
+source_tree_clean:
+  - source_worktree: {WORKTREE}
+    status_command: "git -C {WORKTREE} status -s"
+    source_tree_status: ""
+    checked_at: "2026-08-28T22:45:46+09:00"
+  - source_worktree: {WORKTREE_2}
+    status_command: "git -C {WORKTREE_2} status -s"
+    source_tree_status: " M some/dirty/file.py"
+    checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    errors = _errors_for(text)
+    assert any('clean ではない' in e for e in errors)
+
+
+def test_sabotage_nested_semicolon_path_switch_still_fails() -> None:
+    """SQUAD-254 B2 の ';' 切替偽装が、ネスト形式でも通らないこと."""
+    sabotage = '/tmp/pr38-rereview-sabotage'
+    clean = '/tmp/pr38-rereview'
+    worktree = f'{sabotage}; git -C {clean}'
+    text = f"""\
+source_tree_clean:
+  source_worktree: {worktree}
+  status_command: "git -C {sabotage}; git -C {clean} status -s"
+  source_tree_status: ""
+  checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    errors = _errors_for(text)
+    assert any('メタ文字' in e for e in errors)
+
+
+def test_sabotage_flat_format_claims_clean_via_wrong_word_still_fails() -> None:
+    """`source_tree_status: "clean"` のような説明語は空文字列ではないので dirty 扱いになる.
+
+    実際に worker2 の report がこの誤りをしていた。空文字列だけが clean の申告になる。
+    """
+    text = f"""\
+source_tree_clean:
+  source_worktree: {WORKTREE}
+  status_command: "git -C {WORKTREE} status -s"
+  source_tree_status: "clean"
+  checked_at: "2026-08-28T22:45:46+09:00"
+"""
+    errors = _errors_for(text)
+    assert any('clean ではない' in e for e in errors)

@@ -9,6 +9,17 @@
 report 自身の `source_worktree` フィールドと文字列一致させることで、この「守った
 ふり」を機械的に検出する。
 
+report は 2 通りの書き方を受け付ける (SQUAD-251):
+  (1) フラット形式: `source_worktree` / `status_command` / `checked_at` /
+      `source_tree_status` を report のトップレベルに直接書く (単一 worktree、
+      `queue/templates/report.yaml` の既定形式)。
+  (2) `source_tree_clean:` ネスト形式: 上記 4 フィールドをその下に
+      マッピング (単一 worktree) またはリスト (複数 worktree) で書く。
+      rmf_ros2 と rmf_traffic のように複数リポジトリを同時に確認する
+      タスクで使う。
+
+どちらの形式で書かれていても、各 worktree エントリごとに同じ検証を行う。
+
 使い方: check_source_tree_clean.py <report.yaml> [...]
   各 report について検証し、違反があれば理由を stderr に列挙して exit 1 する。
 """
@@ -24,6 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
 from ledger import parse_scalars  # noqa: E402
 
 REQUIRED_FIELDS = ('source_worktree', 'status_command', 'checked_at', 'source_tree_status')
+
+# ledger.parse_scalars と同じ「key: value」の行パーサ・block scalar マーカー定義。
+# private な ledger._SCALAR_RE / ledger._BLOCK_MARKERS は import しない
+# (SLF 越境を避けるため、同じ定義を独立して持つ)。
+_LINE_KV_RE = re.compile(r'^([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$')
+_BLOCK_MARKERS = ('|', '>', '|-', '>-', '|+', '>+')
+_SOURCE_TREE_CLEAN_HEADER_RE = re.compile(r'^source_tree_clean:\s*$')
 
 # source_worktree の許可文字 (allowlist)。英数字 / ASCII path 記号のみで、シェルメタ文字
 # (`;` `&` `|` `` ` `` `$` `(` `)` `<` `>`)・空白・改行/タブ等の制御文字を含め一切通さない
@@ -100,6 +118,125 @@ def check_source_tree_clean(meta: dict[str, str]) -> list[str]:
     return errors
 
 
+def _unquote(val: str) -> str:
+    """`parse_scalars` と同じ引用符除去 (先頭末尾が同じ引用符なら剥がす)."""
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in '"\'':
+        return val[1:-1]
+    return val
+
+
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _consume_block_scalar(lines: list[str], start: int, key_indent: int) -> tuple[str, int]:
+    r"""`key: |` の直後から、`key_indent` より深いインデントの本文行を読む.
+
+    `source_tree_status` は実際の `git status -s` の生出力 (複数行) を
+    そのまま書くために block scalar (`|`) で書かれることが多い
+    (worker1 の実 report がそう)。チョンピング指定 (`|-` / `|+` 等) の
+    厳密な改行差異は区別せず、本文行を `\n` で連結するだけの最小実装。
+    """
+    body: list[str] = []
+    i = start
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        if _line_indent(line) <= key_indent:
+            break
+        body.append(line.strip())
+        i += 1
+    return '\n'.join(body), i
+
+
+def _parse_entry_lines(lines: list[str], start: int, end: int, item_indent: int) -> dict[str, str]:
+    """`[start, end)` の範囲 (1 エントリ分) から `key: value` を集めて dict にする.
+
+    `item_indent` はこのエントリの `key:` 行が並ぶインデント幅
+    (リスト形式ならダッシュの次の桁、マッピング形式ならブロックの
+    インデント幅そのもの)。
+    """
+    entry: dict[str, str] = {}
+    i = start
+    while i < end:
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        m = _LINE_KV_RE.match(line.strip())
+        if not m:
+            i += 1
+            continue
+        key, val = m.group(1), _unquote(m.group(2))
+        i += 1
+        if val in _BLOCK_MARKERS:
+            body, i = _consume_block_scalar(lines, i, item_indent)
+            entry[key] = body
+        else:
+            entry[key] = val
+    return entry
+
+
+def extract_worktree_entries(text: str) -> list[dict[str, str]]:
+    """Report 本文から検証対象の worktree エントリを 1 つ以上取り出す.
+
+    `source_tree_clean:` キーが無ければ、旧来どおりトップレベルの
+    `source_worktree` 等をそのまま 1 エントリとして扱う (フラット形式、
+    後方互換)。`source_tree_clean:` があれば、その下のインデントブロックを
+    リスト (`- key: value` の繰り返し = 複数 worktree) またはマッピング
+    (`key: value` の並び = 単一 worktree) として解釈する。`source_tree_status`
+    が block scalar (`|`) で書かれている場合も本文を読む。
+    """
+    lines = text.splitlines()
+    header_idx = next((i for i, line in enumerate(lines) if _SOURCE_TREE_CLEAN_HEADER_RE.match(line)), None)
+
+    if header_idx is None:
+        flat = parse_scalars(text)
+        return [flat] if flat else [{}]
+
+    i = header_idx + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines) or not lines[i][0].isspace():
+        return [{}]
+
+    block_indent = _line_indent(lines[i])
+    is_list = lines[i].lstrip().startswith('- ')
+
+    if not is_list:
+        end = i
+        while end < len(lines) and (not lines[end].strip() or _line_indent(lines[end]) >= block_indent):
+            end += 1
+        return [_parse_entry_lines(lines, i, end, block_indent)]
+
+    entries: list[dict[str, str]] = []
+    item_starts: list[int] = []
+    j = i
+    while j < len(lines):
+        line = lines[j]
+        if line.strip() and _line_indent(line) < block_indent:
+            break
+        if line.strip() and _line_indent(line) == block_indent and line.lstrip().startswith('- '):
+            item_starts.append(j)
+        j += 1
+    block_end = j
+
+    for idx, item_start in enumerate(item_starts):
+        item_end = item_starts[idx + 1] if idx + 1 < len(item_starts) else block_end
+        # ダッシュ行自体も `- key: value` を含みうるので、ダッシュを剥がした
+        # 仮想行として先頭行を差し込み、続きの行 (item_start+1 .. item_end) と
+        # まとめて 1 エントリとして解釈する。
+        dash_line = lines[item_start]
+        key_col = _line_indent(dash_line) + 2
+        virtual_first_line = ' ' * key_col + dash_line.lstrip()[2:]
+        entry_lines = [*lines[:item_start], virtual_first_line, *lines[item_start + 1 :]]
+        entries.append(_parse_entry_lines(entry_lines, item_start, item_end, key_col))
+
+    return entries if entries else [{}]
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print('usage: check_source_tree_clean.py <report.yaml> [...]', file=sys.stderr)
@@ -108,15 +245,20 @@ def main(argv: list[str]) -> int:
     exit_code = 0
     for raw_path in argv:
         path = Path(raw_path)
-        meta = parse_scalars(path.read_text())
-        errors = check_source_tree_clean(meta)
-        if errors:
+        entries = extract_worktree_entries(path.read_text())
+
+        all_errors: list[str] = []
+        for idx, entry in enumerate(entries, start=1):
+            label = entry.get('source_worktree') or f'entry {idx}/{len(entries)}'
+            all_errors.extend(f'[{label}] {err}' for err in check_source_tree_clean(entry))
+
+        if all_errors:
             exit_code = 1
             print(f'{path}: NG', file=sys.stderr)
-            for err in errors:
+            for err in all_errors:
                 print(f'  - {err}', file=sys.stderr)
         else:
-            print(f'{path}: OK (source_tree_clean)')
+            print(f'{path}: OK (source_tree_clean, {len(entries)} worktree(s))')
 
     return exit_code
 

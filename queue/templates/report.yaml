@@ -26,11 +26,37 @@ verify_status: pass
 # 以下4フィールドはレビュー/サボタージュ検証タスクのみ必須。作業ツリーを汚さず
 # 使い捨てコピーで検証したことを Dispatcher が機械判定できるようにする。
 # 非レビュータスクは省略可。
+#
+# 書き方は 2 通り (どちらも scripts/check_source_tree_clean.py が機械検証する。SQUAD-251):
+#
+# (A) フラット形式 (単一 worktree のみ確認する場合。既定はこちら):
+#   下の 4 フィールドをこのままトップレベルに直接書く。
+#
+# (B) source_tree_clean: ネスト形式 (複数 worktree を同時に確認する場合。
+#     例: rmf_ros2 と rmf_traffic を同じ report で確認するタスク):
+#   下の 4 フィールドは書かず、代わりに次のように書く。
+#
+#   source_tree_clean:
+#     - source_worktree: "/path/to/worktree-a"
+#       status_command: "git -C /path/to/worktree-a status -s"
+#       source_tree_status: ""
+#       checked_at: "2026-08-28T12:00:00+09:00"
+#     - source_worktree: "/path/to/worktree-b"
+#       status_command: "git -C /path/to/worktree-b status -s"
+#       source_tree_status: ""
+#       checked_at: "2026-08-28T12:00:00+09:00"
+#
+#   worktree が 1 つだけでもネスト形式で書きたい場合は、リストの `-` を外した
+#   マッピング (`source_tree_clean:` の直下に 4 フィールドを並べる) でもよい。
+#   (A) と (B) を同じ report に混在させない。
+#
 # 確認対象の worktree 絶対パス。使える文字は英数字と `/ _ - . ~` のみ (allowlist)。
 # シェルメタ文字 (`;` `&` `|` バッククォート `$` `(` `)` `<` `>`)・空白・改行/タブは禁止
 # (scripts/check_source_tree_clean.py が機械検証で弾く。SQUAD-254)。
 source_worktree: ""
-# `git status -s` の生出力 (空文字列なら clean)
+# `git status -s` の生出力 (空文字列なら clean)。"clean" のような説明語を書かない
+# こと — 空文字列だけが clean の申告として扱われる。複数行になる場合は block scalar
+# (`source_tree_status: |` の下に生出力をそのままインデントして書く) でよい。
 source_tree_status: ""
 # 必須固定書式: "git -C <source_worktree> status -s"
 # <source_worktree> の位置には上記 source_worktree フィールドと**文字列一致する絶対パス**
