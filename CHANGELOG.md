@@ -55,6 +55,16 @@
 
 ### Fixed
 
+- `scripts/check_dashboard_update.py`: 正当な dashboard 更新を NG と誤検出する
+  false positive を 2 件解消 (SQUAD-263 の A/B 実験で両レーンが同一の false
+  positive を踏んだことから判明)。(1) `check_unrelated_changes` の許可範囲に
+  dashboard.md の「アクティブ Project」表と「Active タスク」節本文
+  (表が「（なし）」に置き換わる遷移も含む) を追加。(2) `find_active_task_table`
+  の `worktree` 列必須条件を、見出しに「Active」を含むかどうかの判定に変更
+  (squad 以外の project の Active タスク表は列構成が異なり worktree 列を
+  持たないため、そもそも検出できていなかった)。本命の誤り検出 (進行中タスクを
+  完了欄に誤記載) は修正後も exit 1 のまま維持されることをサボタージュ検証・
+  実物 dashboard の使い捨てコピーで確認 (SQUAD-264)。
 - `scripts/check_source_tree_clean.py`: `source_worktree` の allowlist 検証が
   `re.match` + `^...$` だったため、Python `re` の仕様上 `$` が文字列末尾の改行の
   直前にもマッチしてしまい、末尾に改行を1つ付けるだけでシェルメタ文字チェックを

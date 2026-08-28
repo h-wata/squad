@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 from check_dashboard_update import check_history_appended  # noqa: E402
 from check_dashboard_update import check_unrelated_changes  # noqa: E402
 from check_dashboard_update import check_update_line  # noqa: E402
+from check_dashboard_update import find_active_task_table  # noqa: E402
 from check_dashboard_update import find_tables  # noqa: E402
 from check_dashboard_update import main  # noqa: E402
 
@@ -34,6 +35,33 @@ DASHBOARD_MD = """# マルチPJ ダッシュボード (Index)
 | Worker | Pane | Agent | 現在のPJ | 状態 | 直近のタスク |
 |--------|------|-------|----------|------|------------|
 | Worker 3 | 3 | Claude (Sonnet) | squad | 稼働中 | SQUAD-998 (完了) |
+
+## アクティブ Project
+
+| PJ 名 | active タスク数 | 担当 Worker | dashboard |
+|-------|----------------|------------|-----------|
+| squad | 1 | W3 | [dashboards/squad.md](dashboards/squad.md) |
+"""
+
+# SQUAD-264: dashboards/kioku-mesh.md 等、worktree 列を持たない実運用の Active タスク表
+# (Task ID | Worker | Agent | PR | サマリ)。squad.md 以外の project convention を再現する。
+PROJECT_MD_NO_WORKTREE_COLUMN = """# kioku-mesh Dashboard
+
+**最終更新**: 2026-08-21 10:00 JST
+
+更新: TASK-998 完了
+
+## Active タスク
+
+| Task ID | Worker | Agent | PR | サマリ |
+|---------|--------|-------|----|--------|
+| TASK-999 | W3 | Claude | - | テスト用タスク |
+
+## 完了タスク (2026-08-21)
+
+| Task | Worker | 内容 | 成果物 | 完了日 |
+|------|--------|------|--------|--------|
+| TASK-998 | W3 | 前回のタスク | PR #1 | 2026-08-21 |
 """
 
 PROJECT_MD = """# squad Dashboard
@@ -274,3 +302,86 @@ def test_check_history_appended_rejects_existing_lines_dropped() -> None:
     after = '# タイトル\n\n更新: C\n更新: D\n更新: E\n'
     errors, _ = check_history_appended(before, after, Path('dummy_history.md'))
     assert errors
+
+
+def test_find_active_task_table_without_worktree_column(tmp_path: Path) -> None:
+    """SQUAD-264: worktree 列を持たない Active タスク表 (kioku-mesh 等の実運用) も検出できる."""
+    table = find_active_task_table(PROJECT_MD_NO_WORKTREE_COLUMN)
+    assert table is not None
+    assert 'Task ID' in table['header']
+
+
+def test_active_project_table_change_in_dashboard_md_does_not_trigger_ng(tmp_path: Path) -> None:
+    """SQUAD-264 false positive 1.
+
+    dashboard.md「アクティブ Project」表の正当な更新が無関係セクション改変
+    (項目7) として NG にならないこと.
+    """
+    before = tmp_path / 'before'
+    after = tmp_path / 'after'
+    _write_before(before)
+
+    # active タスク数が 1 -> 0 に変わる正当な更新 (SQUAD-999 が完了した想定)
+    completed_dashboard_md = DASHBOARD_MD.replace(
+        '| squad | 1 | W3 | [dashboards/squad.md](dashboards/squad.md) |',
+        '| squad | 0 | — | [dashboards/squad.md](dashboards/squad.md) |',
+    ).replace('SQUAD-998 (完了)', 'SQUAD-999 (完了)')
+    completed_project_md = PROJECT_MD.replace(
+        '## Active タスク\n\n'
+        '| Task | Worker | 内容 | worktree | branch | 開始日 |\n'
+        '|------|--------|------|----------|--------|--------|\n'
+        '| SQUAD-999 | W3 | テスト用タスク | /tmp/wt | squad-999 | 2026-08-21 |\n',
+        '## Active タスク\n\n（なし）\n',
+    ).replace(
+        '| SQUAD-998 | W3 | 前回のタスク | PR #1 | 2026-08-21 |\n',
+        '| SQUAD-998 | W3 | 前回のタスク | PR #1 | 2026-08-21 |\n'
+        '| SQUAD-999 | W3 | テスト用タスク | PR #2 | 2026-08-21 |\n',
+    )
+
+    _write(after, 'dashboard.md', completed_dashboard_md.replace('SQUAD-998 完了', 'SQUAD-999 完了'))
+    _write(after, f'dashboards/{PROJECT}.md', completed_project_md.replace('SQUAD-998 完了', 'SQUAD-999 完了'))
+    _write(after, 'dashboard_history.md', DASHBOARD_HISTORY + '更新: SQUAD-999 完了\n')
+    _write(after, f'dashboards/{PROJECT}_history.md', PROJECT_HISTORY + '更新: SQUAD-999 完了\n')
+
+    events_path = _write_events(tmp_path, [_event('completed')])
+    assert main([str(before), str(after), str(events_path)]) == 0
+
+
+def test_active_task_table_without_worktree_column_updates_cleanly(tmp_path: Path) -> None:
+    """SQUAD-264 false positive 2.
+
+    worktree 列を持たない Active タスク表でも、正当な新規タスク追加更新が exit 0 に
+    なること (item1 の WARN 化・item7 の誤検知、両方の回帰).
+    """
+    before = tmp_path / 'before'
+    after = tmp_path / 'after'
+    _write(before, 'dashboard.md', DASHBOARD_MD)
+    _write(before, 'dashboards/kioku-mesh.md', PROJECT_MD_NO_WORKTREE_COLUMN)
+    _write(before, 'dashboard_history.md', DASHBOARD_HISTORY)
+    _write(before, 'dashboards/kioku-mesh_history.md', PROJECT_HISTORY)
+
+    new_task_row = '| TASK-1000 | W3 | Claude | - | 新規タスク |\n'
+    after_project_md = PROJECT_MD_NO_WORKTREE_COLUMN.replace(
+        '| TASK-999 | W3 | Claude | - | テスト用タスク |\n',
+        '| TASK-999 | W3 | Claude | - | テスト用タスク |\n' + new_task_row,
+    ).replace('更新: TASK-998 完了', '更新: TASK-1000 実装中')
+
+    _write(after, 'dashboard.md', DASHBOARD_MD)
+    _write(after, 'dashboards/kioku-mesh.md', after_project_md)
+    _write(after, 'dashboard_history.md', DASHBOARD_HISTORY + '更新: TASK-1000 実装中\n')
+    _write(after, 'dashboards/kioku-mesh_history.md', PROJECT_HISTORY + '更新: TASK-1000 実装中\n')
+
+    events_path = _write_events(
+        tmp_path,
+        [
+            {
+                'project': 'kioku-mesh',
+                'task_id': 'TASK-1000',
+                'worker': 'worker3',
+                'event_type': 'dispatched',
+                'expected_status': '',
+                'artifacts': [],
+            }
+        ],
+    )
+    assert main([str(before), str(after), str(events_path)]) == 0

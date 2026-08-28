@@ -89,10 +89,25 @@ def find_worker_status_table(text: str) -> dict | None:
     return None
 
 
+def _has_task_column(header: list[str]) -> bool:
+    """ヘッダーに Task 列があるか ('Task' 単独でも 'Task ID' 等の複合名でも可)."""
+    return any(cell == 'Task' or cell.startswith('Task ') for cell in header)
+
+
+def _task_column_index(header: list[str]) -> int | None:
+    """Task 列のインデックスを返す ('Task' 単独でも 'Task ID' 等の複合名でも可)."""
+    return next((i for i, cell in enumerate(header) if cell == 'Task' or cell.startswith('Task ')), None)
+
+
 def find_active_task_table(text: str) -> dict | None:
-    """Active タスク表 (dashboards/<project>.md) を探す. worktree 列の有無で完了タスク表と区別する."""
+    """Active タスク表 (dashboards/<project>.md) を探す.
+
+    列構成はプロジェクトごとに大きく異なる (squad は worktree/branch/開始日、kioku-mesh
+    は Task ID/Agent/PR/サマリ 等) ため、列名ではなく直前見出しに「Active」を含むかで
+    判定する (SQUAD-264: worktree 列必須だと squad 以外のどの project 表も検出できなかった)。
+    """
     for table in find_tables(text):
-        if 'Task' in table['header'] and 'worktree' in table['header']:
+        if 'Active' in table['heading'] and _has_task_column(table['header']):
             return table
     return None
 
@@ -130,7 +145,10 @@ def check_active_task(
     if table is None:
         warnings.append('Active タスク表が見つからない')
         return errors, warnings
-    task_col = table['header'].index('Task')
+    task_col = _task_column_index(table['header'])
+    if task_col is None:
+        warnings.append('Active タスク表に Task 列が見つからない')
+        return errors, warnings
     row = next((r for r in table['rows'] if len(r) > task_col and r[task_col] == task_id), None)
     if row is None:
         if event_type != 'completed':
@@ -264,15 +282,41 @@ def check_history_appended(
     return errors, warnings
 
 
+def _heading_section_ranges(text: str, needle: str) -> list[tuple[int, int]]:
+    """見出しに needle を含む節の本文行範囲 (次の見出し行の直前まで) を返す.
+
+    Active タスクが 0 件になると表そのものが「（なし）」というプレーンテキストに
+    置き換わり find_tables では捉えられない (SQUAD-264: SQUAD-261/262 が両方完了して
+    実際に発生した)。表の有無によらず節単位で許可範囲にすることで、この遷移も
+    「無関係セクションの改変」として誤検知しないようにする。
+    """
+    lines = text.splitlines()
+    ranges = []
+    n = len(lines)
+    for i, line in enumerate(lines):
+        if line.startswith('#') and needle in line:
+            j = i + 1
+            while j < n and not lines[j].startswith('#'):
+                j += 1
+            ranges.append((i + 1, j))
+    return ranges
+
+
 def _allowed_ranges(text: str) -> list[tuple[int, int]]:
-    """検査項目1-6が扱う行範囲 (表・「更新:」行・「**最終更新**:」行) を返す (項目7用)."""
+    """検査項目1-6が扱う行範囲 (表・節・「更新:」行・「**最終更新**:」行) を返す (項目7用).
+
+    「Active タスク」節と、dashboard.md の「アクティブ Project」表 (PJ 単位の active
+    タスク数サマリ) はどのイベントでも更新され得る正当な対象だが、検査項目1-6の
+    どれも直接は扱わない。含めないと event 反映のたびに項目7 (無関係セクション
+    不変性) が誤検知する (SQUAD-264)。
+    """
     ranges = [
         (t['start'], t['end'])
         for t in find_tables(text)
-        if ('Worker' in t['header'] and '状態' in t['header'])
-        or ('Task' in t['header'] and 'worktree' in t['header'])
-        or ('Task' in t['header'] and '完了日' in t['header'])
+        if ('Worker' in t['header'] and '状態' in t['header']) or ('Task' in t['header'] and '完了日' in t['header'])
     ]
+    ranges += _heading_section_ranges(text, 'Active タスク')
+    ranges += _heading_section_ranges(text, 'アクティブ Project')
     for i, line in enumerate(text.splitlines()):
         if UPDATE_LINE_RE.match(line) or LAST_UPDATE_LINE_RE.match(line):
             ranges.append((i, i + 1))
