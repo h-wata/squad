@@ -4,6 +4,12 @@
 
 ### Added
 
+- `scripts/check_task_yaml.py` を追加。task YAML の必須フィールド・`agent`/`model` 値・
+  `assigned_to` とファイル名の一致・`task_id` 重複・`acceptance_criteria`・`verify` (または
+  `verify_skip_reason`)・`evidence_card` のプレースホルダ・`created_at` の ISO8601・
+  `context.workspace` の存在を機械検証する。`--all` で `queue/projects/*/tasks/*.yaml` と
+  `queue/projects/*/archive/*.yaml` を一括検査できる。task-yaml-author の下位モデル
+  (Haiku / local-coder) 委譲判定に使う (SQUAD-260)。
 - `scripts/check_dashboard_update.py` を新設。dashboard.md / dashboards/<project>.md
   の更新前後をイベント仕様 (JSON/YAML) と突き合わせて機械検査する。下位モデルへの
   dashboard-updater 委譲実験の前提として、既知の再発バグ（進行中タスクを「直近の
