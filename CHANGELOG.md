@@ -4,6 +4,22 @@
 
 ### Added
 
+- `scripts/check_dashboard_update.py` を新設。dashboard.md / dashboards/<project>.md
+  の更新前後をイベント仕様 (JSON/YAML) と突き合わせて機械検査する。下位モデルへの
+  dashboard-updater 委譲実験の前提として、既知の再発バグ（進行中タスクを「直近の
+  完了タスク」欄に誤記載）を最優先で検出する。見出し・列名が見つからない場合は
+  NG ではなく WARN とし、exit code は NG のみで 1 にする fail-soft 設計
+  (SQUAD-259)。
+- `check_dashboard_update.py` の履歴ファイル追記判定を「最終行が変わったか」から
+  「行数が増え、かつ更新前の全行が順序を保って残っているか (先頭挿入でも検出可能)」
+  に修正。実物の履歴ファイルはタイトル直後に最新行を先頭挿入する運用だったため、
+  旧判定では見逃していた (SQUAD-262)。
+- `dashboards/<project>.md` の Active タスク表に「状態」列を追加 (テンプレート・
+  `dashboards/squad.md`・`instructions/dispatcher.md` を整合)。既存の
+  `worktree`/`branch`/`開始日` 列は維持しつつ、進行中タスクの状況変化を行移動
+  無しで反映できるようにした (SQUAD-262)。
+- `dashboard.md` に残存していた重複「更新:」行 (末尾の旧 `## 更新` 見出し節) を除去。
+  内容は既に `dashboards/squad_history.md` に記録済みのため情報欠落なし (SQUAD-262)。
 - `start.sh -p` / `SQUAD_OWNED_PROJECTS` に `queue/projects/` 配下に無い project を
   指定した場合、警告してスキップするのをやめて `<project>/{tasks,reports}` を自動作成する
   ようにした。手動 `mkdir` 忘れで担当 0 件のまま watcher が idle 起動するのを防ぐ。
@@ -39,6 +55,16 @@
 
 ### Fixed
 
+- `scripts/check_dashboard_update.py`: 正当な dashboard 更新を NG と誤検出する
+  false positive を 2 件解消 (SQUAD-263 の A/B 実験で両レーンが同一の false
+  positive を踏んだことから判明)。(1) `check_unrelated_changes` の許可範囲に
+  dashboard.md の「アクティブ Project」表と「Active タスク」節本文
+  (表が「（なし）」に置き換わる遷移も含む) を追加。(2) `find_active_task_table`
+  の `worktree` 列必須条件を、見出しに「Active」を含むかどうかの判定に変更
+  (squad 以外の project の Active タスク表は列構成が異なり worktree 列を
+  持たないため、そもそも検出できていなかった)。本命の誤り検出 (進行中タスクを
+  完了欄に誤記載) は修正後も exit 1 のまま維持されることをサボタージュ検証・
+  実物 dashboard の使い捨てコピーで確認 (SQUAD-264)。
 - `scripts/check_source_tree_clean.py`: `source_worktree` の allowlist 検証が
   `re.match` + `^...$` だったため、Python `re` の仕様上 `$` が文字列末尾の改行の
   直前にもマッチしてしまい、末尾に改行を1つ付けるだけでシェルメタ文字チェックを

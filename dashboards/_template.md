@@ -4,9 +4,9 @@
 
 ## Active タスク
 
-| Task | Worker | Agent | 内容 | 状態 |
-|------|--------|-------|------|------|
-| <Task-ID> | <Worker> | Claude (sonnet) / Codex | <作業内容> | 🔄 稼働中 |
+| Task | Worker | 内容 | 状態 | worktree | branch | 開始日 |
+|------|--------|------|------|----------|--------|--------|
+| <Task-ID> | <Worker> | <作業内容> | 実装中 | <worktree の絶対パス> | <branch 名> | <YYYY-MM-DD HH:MM> |
 
 ## 完了タスク
 
