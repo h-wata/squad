@@ -450,6 +450,49 @@ class TestStallDetection:
         w.check_workers()
         assert w.tmux.sent == []
 
+    def test_notification_hook_with_permission_prompt_warns_waiting(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQUAD-271: hook=Notification は permission prompt 待ちでも発火するため「完了しています」と誤読させない.
+
+        check_workers() の stall 判定用 capture は prompt 無しの画面を返し続け、
+        _notify_stall() 内部の独立 capture だけが直前に prompt へ変わった状態を
+        模す (FakeTmux.captures は残り1件になるまで先頭から消費するキュー)。
+        """
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+        w.cfg.stall_cycles = 1
+        monkeypatch.setattr(Watcher, '_recent_hook_event', staticmethod(lambda n: 'Notification'))
+        pane = f'{w.cfg.session}:0.1'
+        w.tmux.captures[pane] = ['idle screen', 'idle screen', 'Do you want to proceed? (y/n)']
+        w.refresh_owned_projects()
+        w.check_workers()  # 1回目: hash 初期化
+        w.check_workers()  # 2回目: stall 閾値到達 -> _notify_stall が独自に prompt を検知
+        events = [e for e in w.nq.unacked() if e['priority'] == 'low']
+        assert len(events) == 1
+        assert '完了' not in events[0]['message']
+        assert '応答待ち' in events[0]['message']
+
+    def test_notification_hook_without_prompt_keeps_completed_wording(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回帰防止: prompt 文言が無い Notification は従来どおり「完了」文言のまま."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+        w.cfg.stall_cycles = 1
+        monkeypatch.setattr(Watcher, '_recent_hook_event', staticmethod(lambda n: 'Notification'))
+        pane = f'{w.cfg.session}:0.1'
+        w.tmux.captures[pane] = ['idle screen, nothing to see']
+        w.refresh_owned_projects()
+        w.check_workers()  # 1回目: hash 初期化
+        w.check_workers()  # 2回目: stall 閾値到達
+        events = [e for e in w.nq.unacked() if e['priority'] == 'low']
+        assert len(events) == 1
+        assert '完了' in events[0]['message']
+        assert 'hook=Notification' in events[0]['message']
+
 
 class TestArchivedReportReconciliation:
     """Step 6: 完了済み task YAML が tasks/archive へ退避されず残っていても誤警報を出さない."""

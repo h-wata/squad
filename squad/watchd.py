@@ -614,7 +614,14 @@ class Watcher:
         secs = self.cfg.interval * self.cfg.stall_cycles
         hook_event = self._recent_hook_event(n)
         pane_short = pane.split(':', 1)[1]
-        if hook_event:
+        if hook_event == 'Notification' and YN_RE.search(self.tmux.capture(pane)):
+            self.log(f'Worker{n}: stall 検知、hook=Notification は permission prompt 待ちの疑い')
+            msg = (
+                f'Worker{n} は応答待ちの可能性があります (hook=Notification, 約{secs}s 経過)。'
+                f'pane {pane_short} を確認してください。'
+            )
+            source = 'stall-hook'
+        elif hook_event:
             self.log(f'Worker{n}: stall 検知だが hook={hook_event} のため完了通報に分類')
             msg = (
                 f'Worker{n} は完了 (hook={hook_event}) していますが task が pending のままです '
