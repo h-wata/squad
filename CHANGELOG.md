@@ -39,6 +39,13 @@
 
 ### Fixed
 
+- `squad/notify_queue.py`: `_load_strict()` が `path.exists()` の bool 判定に頼っていた
+  ため、dangling symlink（リンク先が無い symlink）や ENOTDIR（親パスが非ディレクトリ）
+  のケースで `exists()` が例外を出さず `False` を返し「空 queue」と誤判定されていた。
+  未 ack 通知が読めないまま Dispatcher に何も伝わらず沈黙する不具合があった。
+  `os.lstat()` で symlink 自体の存在を確認してから read する方式に変更し、「未作成」と
+  「存在するが読めない」を区別、後者は `QueueUnreadableError` を送出するようにした
+  (SQUAD-272, SQUAD-234 の続き)。
 - `scripts/check_source_tree_clean.py`: `source_worktree` の allowlist 検証が
   `re.match` + `^...$` だったため、Python `re` の仕様上 `$` が文字列末尾の改行の
   直前にもマッチしてしまい、末尾に改行を1つ付けるだけでシェルメタ文字チェックを
