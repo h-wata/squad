@@ -45,7 +45,7 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
 tmux session: ros-agents
   Pane 0: Dispatcher (Claude)         — タスク分配・進捗管理
   Pane 1-3: Worker 1-3 (Claude)       — 実装・調査全般
-  Pane 4: Opencode (Ornith)           — 既定モデル local/ornith-15-35b-a3b
+  Pane 4: Opencode (Flash-Next)       — 既定モデル local/qwen38-flash-next
   Pane 5: Aux-Shell                   — SSH 等の汎用利用
   Pane 6: Worker 4 (Codex)            — 設計・cross-review 担当
 ```

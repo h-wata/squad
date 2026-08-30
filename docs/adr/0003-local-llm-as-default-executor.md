@@ -1,6 +1,6 @@
 # ADR 0003: 仕様が確定したコード変更はローカル LLM (local-coder) に既定で委譲する
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR 0004](0004-flash-next-as-local-coder-backend.md)
 - **Date**: 2026-08-19
 - **Supersedes**: なし
 - **Related**: [ADR 0001](0001-multi-session-isolation-by-project-ownership.md),
