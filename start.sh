@@ -41,6 +41,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SQUAD_ENABLE_CODEX=0 で Pane 6 (Worker 4 / Codex) の起動を丸ごとスキップできる
 # (codex CLI を使わない環境向け)。既定は 1 (従来通り Codex を起動)。
 ENABLE_CODEX="${SQUAD_ENABLE_CODEX:-1}"
+# SQUAD_ENABLE_OPENCODE=0 で Pane 4 (Opencode) の起動を丸ごとスキップできる
+# (汎用ターミナルとして使い続けたい環境向け)。既定は 1 (Opencode を起動)。
+# Pane 4 を Opencode に置換するため、純粋な汎用-shell は Pane 5 (Aux-Shell) が担当。
+ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-1}"
+# Opencode の既定モデル。Ornith をデフォルトにしておく (LAN vLLM 上の local/ornith-15-35b-a3b)。
+OPENCODE_MODEL="local/ornith-15-35b-a3b"
+OPENCODE_MODEL_Q="$(printf '%q' "$OPENCODE_MODEL")"
 
 # --- fresh clone 対応: settings.local.json の自動生成 ---
 # .claude/settings.local.json は個人パス・MCP allow リストを含むため gitignore 対象。
@@ -243,7 +250,7 @@ tmux new-session -d -s "$SESSION_NAME" -x 220 -y 60
 # 配置は tiled レイアウトが決める。ペイン番号はレイアウト上の並び順
 # (左上から右へ、次の行へ) に一致する:
 #   Pane 0: Dispatcher | Pane 1: Worker 1 | Pane 2: Worker 2
-#   Pane 3: Worker 3   | Pane 4: Terminal | Pane 5: Aux-Shell
+#   Pane 3: Worker 3   | Pane 4: Opencode/Terminal | Pane 5: Aux-Shell
 #   Pane 6: Worker 4 (Codex)
 #
 # 重要: 分割ごとに tiled を掛け直すこと。tmux は分割のたびにペイン番号を
@@ -266,14 +273,25 @@ tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
 tmux select-pane -t "$SESSION_NAME:0.1" -T "Worker1 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
-tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
+if [ "$ENABLE_OPENCODE" = "1" ]; then
+    tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Ornith)"
+else
+    tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
+fi
 tmux select-pane -t "$SESSION_NAME:0.5" -T "Aux-Shell"
 if [ "$ENABLE_CODEX" = "1" ]; then
     tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
 fi
 
-# Terminal (Pane 4) は汎用シェル
-tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
+# Pane 4: Opencode (既定モデル Ornith) か汎用 Terminal のいずれか
+# Opencode は --add-dir / --append-system-prompt を持たないため、project 位置引数に
+# ワークスペースを渡し、カレントディレクトリもワークスペースに合わせる。system prompt
+# 注入は不要 (対話 / send-keys での指示受け取り方式)。
+if [ "$ENABLE_OPENCODE" = "1" ]; then
+    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && opencode -m $OPENCODE_MODEL_Q $WORKSPACE_Q" Enter
+else
+    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
+fi
 
 # Aux-Shell (Pane 5) は汎用シェル
 tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready (SSH 等の汎用利用)'" Enter
@@ -327,7 +345,11 @@ echo "  Pane 0: Dispatcher (Claude, タスク分配)"
 echo "  Pane 1: Worker 1 (Claude)"
 echo "  Pane 2: Worker 2 (Claude)"
 echo "  Pane 3: Worker 3 (Claude)"
-echo "  Pane 4: Terminal (汎用シェル)"
+if [ "$ENABLE_OPENCODE" = "1" ]; then
+    echo "  Pane 4: Opencode (Ornith, デフォルトモデル local/ornith-15-35b-a3b)"
+else
+    echo "  Pane 4: Terminal (汎用シェル)"
+fi
 echo "  Pane 5: Aux-Shell (汎用 SSH 等)"
 if [ "$ENABLE_CODEX" = "1" ]; then
     echo "  Pane 6: Worker 4 (Codex, 設計・cross-review 担当)"
