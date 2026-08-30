@@ -229,6 +229,34 @@ class TestCorruptQueue:
         assert fallback_backoff_seconds(99) == 3600  # 上限を超えても cap で鳴り続ける
 
 
+class TestUnreadablePath:
+    """SQUAD-272: path.exists() の bool 判定だけでは dangling symlink / ENOTDIR を「空 queue」と誤判定してしまう.
+
+    exists() は例外を出さず False を返すため。
+    """
+
+    def test_dangling_symlink_raises_unreadable(self, tmp_path: Path) -> None:
+        nq = make_nq(tmp_path)
+        nq.dir.mkdir(parents=True)
+        target = tmp_path / 'does_not_exist.json'
+        nq.events_path.symlink_to(target)
+
+        with pytest.raises(QueueUnreadableError):
+            nq.unacked()
+
+    def test_enotdir_in_parent_path_raises_unreadable(self, tmp_path: Path) -> None:
+        not_a_dir = tmp_path / 'not_a_dir'
+        not_a_dir.write_text('')
+        nq = NotificationQueue('testsess', not_a_dir / 'nested')
+
+        with pytest.raises(QueueUnreadableError):
+            nq.unacked()
+
+    def test_missing_file_with_normal_parent_returns_empty(self, tmp_path: Path) -> None:
+        nq = make_nq(tmp_path)
+        assert nq.unacked() == []
+
+
 class TestSessionNamespace:
     def test_different_sessions_do_not_see_each_others_events(self, tmp_path: Path) -> None:
         nq_a = make_nq(tmp_path, session='a')

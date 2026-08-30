@@ -68,6 +68,13 @@
 
 ### Fixed
 
+- `squad/notify_queue.py`: `_load_strict()` が `path.exists()` の bool 判定に頼っていた
+  ため、dangling symlink（リンク先が無い symlink）や ENOTDIR（親パスが非ディレクトリ）
+  のケースで `exists()` が例外を出さず `False` を返し「空 queue」と誤判定されていた。
+  未 ack 通知が読めないまま Dispatcher に何も伝わらず沈黙する不具合があった。
+  `os.lstat()` で symlink 自体の存在を確認してから read する方式に変更し、「未作成」と
+  「存在するが読めない」を区別、後者は `QueueUnreadableError` を送出するようにした
+  (SQUAD-272, SQUAD-234 の続き)。
 - `scripts/check_dashboard_update.py`: 正当な dashboard 更新を NG と誤検出する
   false positive を 2 件解消 (SQUAD-263 の A/B 実験で両レーンが同一の false
   positive を踏んだことから判明)。(1) `check_unrelated_changes` の許可範囲に

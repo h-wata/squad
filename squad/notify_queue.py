@@ -82,10 +82,19 @@ class NotificationQueue:
         `path.exists()` 自体も親ディレクトリの権限次第で PermissionError を送出しうる
         (mode 000 等)。read と同じ try に入れて OSError 全般を QueueUnreadableError に
         正規化する (SQUAD-234: これが外にあったため cycle() が恒久停止していた)。
+
+        SQUAD-272: `path.exists()` の bool 判定は dangling symlink (リンク先が無い)
+        や ENOTDIR (親パスが非ディレクトリ) でも例外を出さず False を返すため、
+        「未作成」と区別がつかず空 queue に化ける。os.lstat で symlink 自体の存在を
+        確認してから read することで両者を区別する。
         """
         try:
-            if not path.exists():
-                return {}
+            os.lstat(path)
+        except FileNotFoundError:
+            return {}
+        except OSError as e:
+            raise QueueUnreadableError(f'{path}: {e}') from e
+        try:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as e:
             raise QueueUnreadableError(f'{path}: {e}') from e
