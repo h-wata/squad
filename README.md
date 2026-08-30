@@ -28,10 +28,19 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
    自動生成される（`{SQUAD_ROOT}` プレースホルダは実パスに置換される）。カスタマイズ
    したい場合（例: 追加で参照したい他リポジトリのパスを `additionalDirectories` に
    足したい場合）は生成後の `.claude/settings.local.json` を直接編集すればよい。
-3. (任意) `./scripts/link-pi-config.sh` を 1 回実行する。ローカル LLM への委譲
-   (`local-coder` agent) を使う場合のみ必要。`config/pi/models.json` を
-   `~/.pi/agent/models.json` に symlink する。既存ファイルが違う内容なら退避を促して
-   止まるので、黙って壊すことはない。使わないなら実行しなくてよい。
+3. (任意) `./scripts/link-pi-config.sh` を実行する。ローカル LLM への委譲
+   (`local-coder` agent) を使う場合のみ必要。`config/pi/models.json.template` の
+   `__LLM_HOST__` を埋めて `~/.pi/agent/models.json` に配置する。接続先は
+   `LLM_HOST` で渡す (既定 `dell-server01.cs.local`)。
+
+   ```bash
+   ./scripts/link-pi-config.sh                        # 既定のホスト
+   LLM_HOST=192.168.0.x ./scripts/link-pi-config.sh   # 別環境
+   ```
+
+   既存ファイルが違う内容なら退避を促して止まるので、黙って壊すことはない。
+   **symlink ではなく生成ファイルなので、テンプレートを更新したら再実行が要る。**
+   使わないなら実行しなくてよい。
 4. `./start.sh <workspace_path>` で起動。`workspace_path` は Worker 1-3/4 が実際に
    作業する対象リポジトリ（群）を置く親ディレクトリで、squad 自体のディレクトリとは
    別の場所を指す（例: `~/work`）。Worker はこのディレクトリを起点に各タスクの
