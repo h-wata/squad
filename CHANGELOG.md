@@ -26,6 +26,13 @@
   無しで反映できるようにした (SQUAD-262)。
 - `dashboard.md` に残存していた重複「更新:」行 (末尾の旧 `## 更新` 見出し節) を除去。
   内容は既に `dashboards/squad_history.md` に記録済みのため情報欠落なし (SQUAD-262)。
+- `scripts/measure_task_cost.py` に 5h/7d usage limit (quota) 消費の計測を追加した。
+  `--quota-snapshot` で `/tmp/claude_usage_cache.json` (無ければ自 pane の
+  `tmux capture-pane`) から現在の使用率 (%) を取得でき、report YAML の
+  `quota_5h_before_pct` 等 (任意) に before/after を記録しておくと
+  `quota_5h_delta_pct` / `quota_7d_delta_pct` / `quota_source` として出力される。
+  この値はアカウント全体で共有されるため並行稼働する他 worker の消費と分離できない、
+  という限界を明記した (SQUAD-265)。
 - `start.sh -p` / `SQUAD_OWNED_PROJECTS` に `queue/projects/` 配下に無い project を
   指定した場合、警告してスキップするのをやめて `<project>/{tasks,reports}` を自動作成する
   ようにした。手動 `mkdir` 忘れで担当 0 件のまま watcher が idle 起動するのを防ぐ。
