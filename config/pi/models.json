@@ -1,15 +1,37 @@
 {
   "providers": {
     "local-vllm": {
-      "baseUrl": "http://192.168.129.35:8000/v1",
+      "baseUrl": "http://192.168.129.35:4000/v1",
       "api": "openai-completions",
-      "apiKey": "local-only",
+      "apiKey": "sk-local-dummy",
       "compat": {
         "supportsDeveloperRole": false,
         "supportsReasoningEffort": false,
         "maxTokensField": "max_tokens"
       },
       "models": [
+        {
+          "id": "qwen38-flash-next",
+          "name": "Qwen3.8-Flash-Next NVFP4 (LAN vLLM)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 262144,
+          "maxTokens": 32768,
+          "samplingParams": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
         {
           "id": "nemotron-35-lightning",
           "name": "Nemotron 3.5 Lightning 30B-A3B NVFP4 (LAN vLLM)",
@@ -22,6 +44,27 @@
           "samplingParams": {
             "temperature": 1.0,
             "top_p": 0.95
+          },
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "ornith-15-35b-a3b",
+          "name": "Ornith 1.5 35B-A3B FP8 (LAN vLLM)",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 262144,
+          "maxTokens": 32768,
+          "samplingParams": {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20
           },
           "cost": {
             "input": 0,

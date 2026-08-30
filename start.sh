@@ -45,8 +45,9 @@ ENABLE_CODEX="${SQUAD_ENABLE_CODEX:-1}"
 # (汎用ターミナルとして使い続けたい環境向け)。既定は 1 (Opencode を起動)。
 # Pane 4 を Opencode に置換するため、純粋な汎用-shell は Pane 5 (Aux-Shell) が担当。
 ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-1}"
-# Opencode の既定モデル。Ornith をデフォルトにしておく (LAN vLLM 上の local/ornith-15-35b-a3b)。
-OPENCODE_MODEL="local/ornith-15-35b-a3b"
+# Opencode の既定モデル。常用は Flash-Next (LAN vLLM 上の local/qwen38-flash-next)。
+# 切り替えの根拠は ADR 0004。
+OPENCODE_MODEL="local/qwen38-flash-next"
 OPENCODE_MODEL_Q="$(printf '%q' "$OPENCODE_MODEL")"
 
 # --- fresh clone 対応: settings.local.json の自動生成 ---
@@ -270,7 +271,7 @@ tmux select-pane -t "$SESSION_NAME:0.1" -T "Worker1 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
 if [ "$ENABLE_OPENCODE" = "1" ]; then
-    tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Ornith)"
+    tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Flash-Next)"
 else
     tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
 fi
@@ -279,7 +280,7 @@ if [ "$ENABLE_CODEX" = "1" ]; then
     tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
 fi
 
-# Pane 4: Opencode (既定モデル Ornith) か汎用 Terminal のいずれか
+# Pane 4: Opencode (既定モデル Flash-Next) か汎用 Terminal のいずれか
 # Opencode は --add-dir / --append-system-prompt を持たないため、project 位置引数に
 # ワークスペースを渡し、カレントディレクトリもワークスペースに合わせる。system prompt
 # 注入は不要 (対話 / send-keys での指示受け取り方式)。
@@ -342,7 +343,7 @@ echo "  Pane 1: Worker 1 (Claude)"
 echo "  Pane 2: Worker 2 (Claude)"
 echo "  Pane 3: Worker 3 (Claude)"
 if [ "$ENABLE_OPENCODE" = "1" ]; then
-    echo "  Pane 4: Opencode (Ornith, デフォルトモデル local/ornith-15-35b-a3b)"
+    echo "  Pane 4: Opencode (Flash-Next, デフォルトモデル local/qwen38-flash-next)"
 else
     echo "  Pane 4: Terminal (汎用シェル)"
 fi
