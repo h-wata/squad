@@ -54,12 +54,12 @@ def _write_task(tasks_dir: Path, *, mtime: datetime | None = None) -> Path:
     return path
 
 
-def _write_report(reports_dir: Path, *, completed_at: str, verdict_path: str = '') -> Path:
+def _write_report(reports_dir: Path, *, completed_at: str, verdict_path: str = '', session_id: str = '') -> Path:
     path = reports_dir / 'worker1_report.yaml'
     path.write_text(
         f'task_id: {TASK_ID}\nproject: {PROJECT}\nworker: worker1\nagent: claude\n'
         f'status: completed\nverify_status: pass\nverdict_path: "{verdict_path}"\n'
-        f'completed_at: "{completed_at}"\n',
+        f'session_id: "{session_id}"\ncompleted_at: "{completed_at}"\n',
         encoding='utf-8',
     )
     return path
@@ -220,3 +220,65 @@ def test_multiple_session_ids_in_window_are_noted_as_ambiguous(
     record = mtc.measure(PROJECT, TASK_ID)
 
     assert '異なる sessionId' in record['notes']
+    assert record['attribution'] == 'approximate'
+
+
+def test_no_session_id_gives_approximate_attribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat())
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'approximate'
+
+
+def test_session_id_gives_exact_attribution_and_excludes_other_sessions_in_same_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQUAD-261 の主目的: session_id があれば同じ時間窓に重なる他セッションを混入させない."""
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    my_session_id = 'aaaaaaaa-1111-1111-1111-111111111111'
+    _write_report(reports_dir, completed_at=end.isoformat(), session_id=my_session_id)
+    session_dir = _session_dir_for_repo_root(mtc.CLAUDE_PROJECTS, mtc.REPO_ROOT)
+
+    mine = _assistant_line(
+        start + timedelta(minutes=1), session_id=my_session_id, usage={'input_tokens': 10, 'output_tokens': 20}
+    )
+    other = _assistant_line(
+        start + timedelta(minutes=2),
+        session_id='other-worker-session',
+        usage={'input_tokens': 999, 'output_tokens': 999},
+    )
+    (session_dir / f'{my_session_id}.jsonl').write_text(mine + '\n', encoding='utf-8')
+    (session_dir / 'other-worker-session.jsonl').write_text(other + '\n', encoding='utf-8')
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'exact'
+    assert record['input_tokens'] == 10
+    assert record['output_tokens'] == 20
+
+
+def test_session_id_present_but_transcript_missing_falls_back_to_approximate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat(), session_id='does-not-exist')
+    session_dir = _session_dir_for_repo_root(mtc.CLAUDE_PROJECTS, mtc.REPO_ROOT)
+    line = _assistant_line(start + timedelta(minutes=1), usage={'input_tokens': 3, 'output_tokens': 4})
+    (session_dir / 'some-other-session.jsonl').write_text(line + '\n', encoding='utf-8')
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'approximate'
+    assert record['input_tokens'] == 3
+    assert 'approximate にフォールバック' in record['notes']
