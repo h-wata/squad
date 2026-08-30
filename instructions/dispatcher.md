@@ -545,6 +545,12 @@ NOT-READY（CONFLICTING / 重複コミット / CI 未トリガー）なら、reb
 - その PJ の完了タスク履歴
 - その PJ の保留中問題
 
+Active タスク表の列は `| Task | Worker | 内容 | 状態 | worktree | branch | 開始日 |`
+で統一する（`dashboards/_template.md` 参照）。「状態」列に実装中 / レビュー待ち /
+ブロック中 等の一言を入れ、進行中タスクの状況変化はこの列だけを書き換える
+（行を完了タスク表に動かさない。SQUAD-259/262 の `scripts/check_dashboard_update.py`
+がこの列の有無を機械検証する）。
+
 更新作業は原則 `dashboard-updater` サブエージェント（Agent tool）に委譲する。
 Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 / タイムスタンプ等）
 を渡すだけにし、自分で `dashboard.md` / `dashboards/<project>.md` を直接 Edit しない。
@@ -568,6 +574,12 @@ Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 /
 (index の場合は `dashboard_history.md`) に追記し、本体の「更新:」行は常に
 最新1件のみを残す。イベントが増えるたびに本体ファイルが肥大化し、Dispatcher の
 セッション開始時の固定読み込みコストが際限なく増えるのを防ぐため。
+
+「常に最新1件のみ」は `dashboard.md` / `dashboards/<project>.md` 双方に等しく適用する
+（見出し「## 更新」を追加で作って古い「更新:」行を残したままにしない。SQUAD-262 で
+`dashboard.md` に `## 更新` 見出し配下の古い1行が残存し「更新:」行が2箇所になっていた
+実例を確認・除去した）。履歴ファイルへの追記は先頭挿入 (タイトル直後) でも末尾追記でも
+どちらでもよい。
 
 ## モデル選択ガイドライン (Claude 用)
 
