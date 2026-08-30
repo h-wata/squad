@@ -234,8 +234,26 @@ details_path: ""           # 詳細を書いた場合のみ worker{N}_details.md
 issues: []
 notes: ""                  # blocked 時は verdict パス + 残課題を必ず記載
 git_head: ""               # 任意: 作業対象 worktree の HEAD SHA (無ければ空欄)
+session_id: ""             # 推奨 (SQUAD-261): $CLAUDE_CODE_SESSION_ID の値をそのまま記録
+quota_5h_before_pct: ""    # 任意 (SQUAD-265): quota 計測をしたい task のみ (下記参照)
+quota_5h_after_pct: ""
+quota_7d_before_pct: ""
+quota_7d_after_pct: ""
+quota_source: ""           # "usage_cache_file" | "tmux_status_line" | "unavailable"
 completed_at: "2026-05-18T12:00:00"
 ```
+
+`session_id` は `echo "$CLAUDE_CODE_SESSION_ID"` で取得できる自セッションの識別子。
+report に記録しておくと `scripts/measure_task_cost.py` が
+`~/.claude/projects/*/<session_id>.jsonl` を直接特定して集計できるようになり、同一 cwd で
+並行稼働する他 worker / Dispatcher のセッションを誤って混入させずに済む
+(記録が無い場合は時間窓による近似集計にフォールバックする)。
+
+`quota_5h_*_pct` / `quota_7d_*_pct` は 5h/7d usage limit の消費を測りたい task でのみ記録する
+(任意)。task 着手前後に `python3 scripts/measure_task_cost.py --quota-snapshot` を実行し、
+出力 JSON の `five_hour_pct` / `seven_day_pct` / `source` を before/after にそれぞれ転記する。
+**この値はアカウント全体で共有される**ため、並行稼働する他 worker / Dispatcher の消費も混ざり、
+単一 task の消費を厳密に分離できるわけではない (詳細は SQUAD-265 report 参照)。
 
 テンプレート: `queue/templates/report.yaml`
 
