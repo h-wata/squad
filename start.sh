@@ -49,6 +49,24 @@ ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-1}"
 # 切り替えの根拠は ADR 0004。
 OPENCODE_MODEL="local/qwen38-flash-next"
 OPENCODE_MODEL_Q="$(printf '%q' "$OPENCODE_MODEL")"
+# SQUAD_W3_AGENT=opencode で Worker 3 (Pane 3) を Claude ではなく Opencode
+# (LAN vLLM 上の $OPENCODE_MODEL) で起動する。W1/W2 は Claude のまま残るので、
+# 同一 Dispatcher 配下で Claude worker と直接比較できる。既定は claude。
+W3_AGENT="${SQUAD_W3_AGENT:-claude}"
+if [ "$W3_AGENT" != "claude" ] && [ "$W3_AGENT" != "opencode" ]; then
+    echo "SQUAD_W3_AGENT は claude か opencode を指定してください (指定値: $W3_AGENT)" >&2
+    exit 1
+fi
+# Opencode worker は Skill を ~/.claude/skills から skills.paths 経由で読む。
+# 未設定だと recommended_skills が黙って無視されるだけで失敗が見えないため、警告する。
+if [ "$W3_AGENT" = "opencode" ]; then
+    OC_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+    if ! grep -q '"skills"' "$OC_CONFIG" 2>/dev/null; then
+        echo "警告: $OC_CONFIG に skills.paths がありません。" >&2
+        echo "      W3 (Opencode) が Skill を読めません。以下を追記してください:" >&2
+        echo '      "skills": { "paths": ["'"$HOME"'/.claude/skills"] }' >&2
+    fi
+fi
 
 # --- fresh clone 対応: settings.local.json の自動生成 ---
 # .claude/settings.local.json は個人パス・MCP allow リストを含むため gitignore 対象。
@@ -110,6 +128,11 @@ if [ "$ENABLE_CODEX" = "1" ]; then
 else
     WORKER4_ROW="| Worker 4 | 6 | Codex | - | 無効 (SQUAD_ENABLE_CODEX=0) | - |"
 fi
+if [ "$W3_AGENT" = "opencode" ]; then
+    WORKER3_ROW="| Worker 3 | 3 | Opencode ($OPENCODE_MODEL) | - | 待機 | - |"
+else
+    WORKER3_ROW="| Worker 3 | 3 | Claude (Sonnet) | - | 待機 | - |"
+fi
 if [ ! -f "$SCRIPT_DIR/dashboard.md" ]; then
     cat > "$SCRIPT_DIR/dashboard.md" <<DASHEOF
 # マルチPJ ダッシュボード (Index)
@@ -123,7 +146,7 @@ squad 起動時に自動生成された初期ファイルです。Dispatcher が
 |--------|------|-------|----------|------|------------|
 | Worker 1 | 1 | Claude (Sonnet) | - | 待機 | - |
 | Worker 2 | 2 | Claude (Sonnet) | - | 待機 | - |
-| Worker 3 | 3 | Claude (Sonnet) | - | 待機 | - |
+$WORKER3_ROW
 $WORKER4_ROW
 DASHEOF
 fi
@@ -236,6 +259,55 @@ else
 fi
 DISPATCHER_CODEX_NOTE_ARG_Q="$(printf '%q' "SQUAD_ENABLE_CODEX_NOTE=$DISPATCHER_CODEX_NOTE")"
 
+# worker.md の {WORKER_AGENT} / {WORKER_AGENT_NOTE} プレースホルダ用。
+# Claude worker は従来通り (note は空)。Opencode worker は Skill ツールや
+# verifier サブエージェントが無いため、その差分だけを note で上書きする。
+WORKER_AGENT_ARG_CLAUDE_Q="$(printf '%q' 'WORKER_AGENT=claude') $(printf '%q' 'WORKER_AGENT_NOTE=')"
+OPENCODE_WORKER_NOTE="あなたは Opencode (ローカル LLM $OPENCODE_MODEL) で動く worker です。\
+Skill は ~/.claude/skills を skills.paths 経由で共有しているので通常どおり使えます。\
+ただし verifier サブエージェントは無いため、verify: があれば委譲せず自分で \
+verify.commands を実行し、コマンドと出力を report にそのまま貼ってください \
+(実行していないものを pass と書かないこと)。\
+手に負えない・仕様が読み切れないと判断したら、無理に進めず report に blocked \
+として理由を書いて返してください。途中まででも状況を残すほうが価値があります。\
+report は日本語で書くこと (中国語の字が混ざりやすいので注意: 無を无、書を书と \
+書かない)。completed_at は推測で書かず、date -Iseconds を実行した結果を使うこと。"
+WORKER_AGENT_ARG_OPENCODE_Q="$(printf '%q' 'WORKER_AGENT=opencode') $(printf '%q' "WORKER_AGENT_NOTE=$OPENCODE_WORKER_NOTE")"
+
+# Opencode の --prompt は system prompt ではなく「最初のユーザ発言」として届くため、
+# worker.md をそのまま渡すと起動直後に 1 ターン走る。実測では queue/ を勝手に漁って
+# 過去タスクの手順 (git push / gh pr) まで読み込みにいったため、--auto と組み合わせると
+# 誤発火の危険がある。そこで指示本文は事前レンダリングしたファイルに置き、--prompt には
+# 「読んで待機しろ」という短い bootstrap だけを渡す。
+W3_PROMPT_FILE="$SCRIPT_DIR/squad/state/worker3-opencode-instructions.md"
+W3_BOOTSTRAP="あなたは squad の Worker 3 です。まず $W3_PROMPT_FILE を Read して運用ルールを頭に入れてください。\
+読み終えたら「W3 待機中」とだけ出力して停止すること。\
+起動直後のこのターンでは、それ以外を一切しないこと: queue/ や他プロジェクトを探索しない、\
+既存の task YAML / report を読まない、ファイルを変更しない、git / gh コマンドを打たない。\
+Dispatcher が tmux 経由で task YAML の絶対パスを通知してくるまで待機します。"
+W3_BOOTSTRAP_Q="$(printf '%q' "$W3_BOOTSTRAP")"
+
+# dispatcher.md の W3 用プレースホルダ。W3 が Opencode のときだけ、routing を
+# local-coder 相当の条件 (仕様確定 + verify: あり + 1-2 ファイル) に絞るよう指示する。
+if [ "$W3_AGENT" = "opencode" ]; then
+    W3_AGENT_LABEL="Opencode ($OPENCODE_MODEL)"
+    W3_AGENT_ROLE="ローカル LLM。仕様確定 + verify: ありの小タスク限定"
+    W3_AGENT_NOTE="**Worker 3 は今 Opencode (ローカル LLM $OPENCODE_MODEL) で動いている試験運用中**。\
+task YAML には \`agent: opencode\` を書く。W3 に振ってよいのは「ローカル LLM への委譲」節の条件\
+(仕様が確定・1〜2 ファイル・機械検証できる \`verify:\` がある) を満たすタスクだけ。\
+設計判断・多ファイル横断・cross-review は W1/W2/W4 に振ること。\
+W3 の成果物は必ず verify の実走結果で裏取りしてから merge 判断する \
+(自己申告の pass を信用しない)。recommended_skills は通常どおり書いてよい \
+(~/.claude/skills を skills.paths で共有済み)。"
+else
+    W3_AGENT_LABEL="Claude"
+    W3_AGENT_ROLE="汎用"
+    W3_AGENT_NOTE=""
+fi
+W3_LABEL_ARG_Q="$(printf '%q' "SQUAD_W3_AGENT_LABEL=$W3_AGENT_LABEL")"
+W3_ROLE_ARG_Q="$(printf '%q' "SQUAD_W3_AGENT_ROLE=$W3_AGENT_ROLE")"
+W3_NOTE_ARG_Q="$(printf '%q' "SQUAD_W3_AGENT_NOTE=$W3_AGENT_NOTE")"
+
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "既存のセッション '$SESSION_NAME' を終了します..."
@@ -273,7 +345,11 @@ done
 tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
 tmux select-pane -t "$SESSION_NAME:0.1" -T "Worker1 (Claude)"
 tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
-tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
+if [ "$W3_AGENT" = "opencode" ]; then
+    tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Opencode)"
+else
+    tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
+fi
 if [ "$ENABLE_OPENCODE" = "1" ]; then
     tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Flash-Next)"
 else
@@ -303,16 +379,29 @@ tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 #   Dispatcher は YAML 管理のみでコードを書かないため off、Worker 1-3 は実装担当のため
 #   full。プラグイン未導入なら無視されるだけで無害。レベルを変えたい場合はここを編集
 #   (lite/full/ultra)。導入手順は README の「Ponytail 連携 (任意)」参照。
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $W3_LABEL_ARG_Q $W3_ROLE_ARG_Q $W3_NOTE_ARG_Q)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
 # 無指定でも $TMUX_PANE → config.json 逆引きで動くが、明示する方が確実。
 # --settings: worker の cwd が任意の WORKSPACE のため、project hooks が読まれない。
 #   SCRIPT_DIR/.claude/settings.local.json を明示ロードして squad の hook を有効化。
-tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w1 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w2 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w1 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w2 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+if [ "$W3_AGENT" = "opencode" ]; then
+    # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
+    # (理由は W3_BOOTSTRAP 定義箇所のコメント参照)。
+    mkdir -p "$(dirname "$W3_PROMPT_FILE")"
+    python3 "$SCRIPT_DIR/scripts/render_prompt.py" "$SCRIPT_DIR/instructions/worker.md" \
+        N=3 "SQUAD_ROOT=$SCRIPT_DIR" "SQUAD_SESSION=$SESSION_NAME" \
+        WORKER_AGENT=opencode "WORKER_AGENT_NOTE=$OPENCODE_WORKER_NOTE" >"$W3_PROMPT_FILE"
+    # --auto は tmux 越しで承認プロンプトに応答できないため必須
+    # (Claude worker の permission-mode 相当)。external_directory が既定 ask のため、
+    # これが無いと $SQUAD_ROOT 配下の task YAML すら読めない。
+    tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --prompt $W3_BOOTSTRAP_Q $WORKSPACE_Q" Enter
+else
+    tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+fi
 
 # Pane 6: Worker 4 (Codex, ワークスペースで起動)
 # Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
@@ -345,7 +434,11 @@ echo "Pane構成:"
 echo "  Pane 0: Dispatcher (Claude, タスク分配)"
 echo "  Pane 1: Worker 1 (Claude)"
 echo "  Pane 2: Worker 2 (Claude)"
-echo "  Pane 3: Worker 3 (Claude)"
+if [ "$W3_AGENT" = "opencode" ]; then
+    echo "  Pane 3: Worker 3 (Opencode, $OPENCODE_MODEL) ← SQUAD_W3_AGENT=opencode"
+else
+    echo "  Pane 3: Worker 3 (Claude)"
+fi
 if [ "$ENABLE_OPENCODE" = "1" ]; then
     echo "  Pane 4: Opencode (Flash-Next, デフォルトモデル local/qwen38-flash-next)"
 else

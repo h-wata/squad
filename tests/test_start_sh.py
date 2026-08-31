@@ -11,6 +11,7 @@ SQUAD_DRY_RUN=1 で settings/scaffold の pre-flight だけを実行させ、tmu
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -68,8 +69,11 @@ def _run_start(
     tmux_alive: bool | None = None,
     strip_tmux_from_path: bool = False,
     tmp_path: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, 'SQUAD_SESSION': session, 'SQUAD_DRY_RUN': '1'}
+    if extra_env:
+        env.update(extra_env)
     if owned is not None:
         env['SQUAD_OWNED_PROJECTS'] = owned
     else:
@@ -216,3 +220,57 @@ def test_owned_projects_same_value_marker_is_harmless(tmp_path: Path) -> None:
 
     assert r.returncode == 0, r.stderr
     assert (pj / '.squad_session').read_text().strip() == 'testsess'
+
+
+# --- SQUAD_W3_AGENT (Worker 3 を Opencode で動かす試験運用) ---
+
+
+def test_w3_agent_opencode_marks_dashboard_row(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_W3_AGENT': 'opencode'})
+
+    assert r.returncode == 0, r.stderr
+    row = [ln for ln in (root / 'dashboard.md').read_text().splitlines() if 'Worker 3' in ln]
+    assert row and 'Opencode' in row[0], row
+
+
+def test_w3_agent_defaults_to_claude(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess')
+
+    assert r.returncode == 0, r.stderr
+    row = [ln for ln in (root / 'dashboard.md').read_text().splitlines() if 'Worker 3' in ln]
+    assert row and 'Claude' in row[0], row
+
+
+def test_w3_agent_rejects_unknown_value(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_W3_AGENT': 'gemini'})
+
+    assert r.returncode != 0
+    assert 'SQUAD_W3_AGENT' in r.stderr
+
+
+def test_every_instruction_placeholder_is_rendered_by_start_sh() -> None:
+    """instructions/*.md の {PLACEHOLDER} が start.sh の render 引数に揃っているか.
+
+    プレースホルダを足して render_prompt.py への KEY= 引数を足し忘れると、
+    system prompt に "{WORKER_AGENT}" が literal で残るが誰も気付かない。
+    """
+    start_sh = (REPO / 'start.sh').read_text()
+    # worker.md の {N} / {X} は N=1 等で個別に渡す・本文中の例示なので対象外。
+    exempt = {'N', 'X'}
+    for md in ('worker.md', 'dispatcher.md'):
+        text = (REPO / 'instructions' / md).read_text()
+        keys = set(re.findall(r'\{([A-Z_][A-Z0-9_]*)\}', text)) - exempt
+        for key in sorted(keys):
+            assert f'{key}=' in start_sh, f'{md} の {{{key}}} を渡す render 引数が start.sh に無い'

@@ -1,4 +1,5 @@
 .ruff_cache/
 state/*.json
+state/worker*-opencode-instructions.md
 __pycache__/
 *.pyc

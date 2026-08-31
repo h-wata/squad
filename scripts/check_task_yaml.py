@@ -38,7 +38,7 @@ REQUIRED_FIELDS = (
     'acceptance_criteria',
     'created_at',
 )
-VALID_AGENTS = ('claude', 'codex')
+VALID_AGENTS = ('claude', 'codex', 'opencode')
 VALID_MODELS = ('opus', 'sonnet', 'haiku', 'fable')
 EVIDENCE_CARD_FIELDS = (
     'claim',

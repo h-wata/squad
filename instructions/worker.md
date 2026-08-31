@@ -13,11 +13,13 @@ Dispatcher から割り当てられたタスクを実行する。
 - テスト、動作確認
 - Codex (Worker 4) が作成した PR の cross-review
 
+{WORKER_AGENT_NOTE}
+
 ## タスクの受け取り方
 
 1. Dispatcher から tmux 通知を受け取る (絶対パス指定)
 2. 指定された `queue/projects/<project>/tasks/worker{N}.yaml` を読み込む
-3. YAML の `agent: claude` を確認 (claude 以外なら Dispatcher に確認)
+3. YAML の `agent: {WORKER_AGENT}` を確認 ({WORKER_AGENT} 以外なら Dispatcher に確認)
 4. `model` フィールドがあれば既に切替済（Dispatcher 側で対応）
 5. `project` フィールドの値を控える（report の出力先にも使う）
 6. `context.workspace` があれば cwd を切替
