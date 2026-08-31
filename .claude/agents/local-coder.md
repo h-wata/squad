@@ -18,6 +18,9 @@ Qwen3.8-Flash-Next に pi ハーネス経由で実装させ、結果を機械検
 - モデル: `qwen38-flash-next` (Qwen3.8-Flash-Next NVFP4)
 - 文脈: 262,144。**渡すのは 200k トークン以内に収める** (生成ぶんの余裕)
 - 接続設定: `~/.pi/agent/models.json` の provider `local-vllm`。
+  リポジトリ側は `config/pi/models.json.template` で、`scripts/link-pi-config.sh`
+  が `LLM_HOST` (既定 `dell-server01.cs.local`) を埋めて配置する。
+  **接続先はこのファイルから読む。手順やコードに直書きしない。**
   接続先は litellm (4000) 経由。GPU は 1 枚でモデルを替えるとポートが動くため、
   baseUrl を固定してモデル名だけで切り替える
 - **トークンコストはゼロ**。自前 GPU なので、失敗しても金銭的な損は無い
@@ -38,8 +41,10 @@ Qwen3.8-Flash-Next に pi ハーネス経由で実装させ、結果を機械検
 `qwen3.6-35b-a3b` を指したまま、サーバは別モデルに入れ替わっていた)。
 
 ```bash
+# baseUrl は ~/.pi/agent/models.json に入っている。ここに IP を書かない。
+BASE=$(python3 -c 'import json;print(json.load(open("'"$HOME"'/.pi/agent/models.json"))["providers"]["local-vllm"]["baseUrl"])')
 curl -fsS -m 5 -H 'Authorization: Bearer sk-local-dummy' \
-  http://192.168.129.35:4000/v1/models | grep -q qwen38-flash-next
+  "$BASE/models" | grep -q qwen38-flash-next
 ```
 
 落ちたら**「利用不可」と返す**。復旧は試みない。

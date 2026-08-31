@@ -1,7 +1,7 @@
 {
   "providers": {
     "local-vllm": {
-      "baseUrl": "http://192.168.129.35:4000/v1",
+      "baseUrl": "http://__LLM_HOST__:4000/v1",
       "api": "openai-completions",
       "apiKey": "sk-local-dummy",
       "compat": {
