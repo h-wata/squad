@@ -226,7 +226,7 @@ report_id: "3f2b1c8e-..."  # 必須: UUIDv4。新規作成時に一度だけ発�
 task_id: TASK-001
 project: my-app
 worker: worker1
-agent: claude              # 必須: claude | codex
+agent: claude              # 必須: claude | codex | opencode
 author_agent: claude       # 必須: PR/成果物の作成 agent (cross-review 用)
 status: completed          # completed / failed / blocked
 verify_status: pass        # 必須: pass / fail / skipped (検証ゲートの結果)
@@ -234,6 +234,10 @@ verdict_path: ""           # verify した場合は worker{N}_verdict.yaml の�
 pr_url: ""                 # PR を投げた場合は必須
 summary: "実行結果の概要"     # 10行以内
 details_path: ""           # 詳細を書いた場合のみ worker{N}_details.md の絶対パスを入れる (通常は空文字のまま)
+assumptions: []            # 必須: 仕様が沈黙していて自分で決めた点。無ければ "none" と明記
+                           #   良し悪しは問わない。判断したことを隠さないための欄。
+                           #   受け入れ条件と実装が厳密には噛み合わないと気付いたら、
+                           #   自分で解釈して押し通さずここに書く
 issues: []
 notes: ""                  # blocked 時は verdict パス + 残課題を必ず記載
 git_head: ""               # 任意: 作業対象 worktree の HEAD SHA (無ければ空欄)
@@ -289,8 +293,11 @@ report の Dispatcher への到達は `watch.sh` に依存する（単一障害�
 2. **知識確認**: kioku-mesh 等のメモリ MCP が使えれば、当該 PJ の規約・手順・落とし穴を引く (上記「プロジェクト知識」参照。未設定ならスキップ)
 3. **作業実行**: 指示内容を実行
 4. **結果確認**: 期待通りの結果か確認
-5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
-6. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
+5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)。
+   サブエージェントが使えない agent なら `scripts/verify-task.sh <task_yaml> <worktree>` を使う。
+   どちらにせよ `status: completed` を名乗るには verdict が要る (自己申告の pass は不可)
+6. **報告作成**: YAML で報告 (agent / author_agent / verify_status / assumptions 必須)。
+   書けたら `python3 {SQUAD_ROOT}/scripts/check_report_yaml.py <report.yaml>` を通すこと
 7. **知識保存**: kioku-mesh 等が使えれば、非自明な学びを save_observation (未設定ならスキップ)
 8. **通知**: report 保存で watch.sh が自動的に Dispatcher へ届ける (手動通知不要)
 
