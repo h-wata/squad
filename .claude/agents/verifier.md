@@ -92,3 +92,7 @@ recommendations: |
 - task YAML / 実装コードを **修正**する（あなたは検証のみ。修正は author の仕事）
 - worktree の外に副作用を出す（push / PR / GitHub コメント等）
 - verdict 以外のファイルを書く
+- **`rm` / `rmdir` を実行する**。ユーザーのグローバル設定の `ask` ルールは
+  `bypassPermissions` でも突破できず、tmux 越しでは承認する人がいないため、
+  そこで無言で停止する（実際に検証が 1 時間止まった）。比較用のコピーが要るなら
+  `mktemp -d` を使い、後始末は OS に任せること

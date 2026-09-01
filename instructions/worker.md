@@ -368,6 +368,11 @@ report に混在させない。** `source_tree_status` が複数行になる場�
 5. report YAML の `agent`, `author_agent`, `verify_status` を省略しない
 6. `verify:` があるのに検証ゲートを飛ばして `status: completed` を名乗らない（自己採点禁止）
 7. local-coder に委譲した結果を、`verify:` と差分の目視を通さずに自分の成果として報告しない
+8. **`rm` / `rmdir` を実行しない**。ユーザーのグローバル設定に `ask` ルールがあり、
+   `--permission-mode bypassPermissions` でも `--dangerously-skip-permissions` でも
+   突破できない（実測済み）。tmux の pane には承認する人がいないため、`rm` を打つと
+   そこで無言で停止し、Dispatcher からは「作業中」に見えたまま何時間も止まる。
+   一時ファイルが要るなら `mktemp -d` を使い、後始末は OS に任せること
 
 ## 注意事項
 
