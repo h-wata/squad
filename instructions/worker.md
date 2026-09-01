@@ -13,11 +13,13 @@ Dispatcher から割り当てられたタスクを実行する。
 - テスト、動作確認
 - Codex (Worker 4) が作成した PR の cross-review
 
+{WORKER_AGENT_NOTE}
+
 ## タスクの受け取り方
 
 1. Dispatcher から tmux 通知を受け取る (絶対パス指定)
 2. 指定された `queue/projects/<project>/tasks/worker{N}.yaml` を読み込む
-3. YAML の `agent: claude` を確認 (claude 以外なら Dispatcher に確認)
+3. YAML の `agent: {WORKER_AGENT}` を確認 ({WORKER_AGENT} 以外なら Dispatcher に確認)
 4. `model` フィールドがあれば既に切替済（Dispatcher 側で対応）
 5. `project` フィールドの値を控える（report の出力先にも使う）
 6. `context.workspace` があれば cwd を切替
@@ -95,64 +97,6 @@ sleep 0.3
 tmux send-keys -t {SQUAD_SESSION}:0.{N} Enter
 ```
 
-## ローカル LLM (local-coder) への委譲
-
-LAN の vLLM で **Qwen3.8-Flash-Next NVFP4** (`qwen38-flash-next`、文脈 262,144、
-pi ハーネス) が動いている。**トークンコストがゼロ**なので、条件に合うコード変更は
-自分で書かずに委譲する。判断は Dispatcher ではなく**あなたが行う**。
-
-### 委譲する (すべて満たすとき)
-
-1. task YAML に **`verify:` があり、コマンドが機械検証できる**
-2. **仕様が task YAML に書き出されている**（自分で仕様を決める必要がない）
-3. **単一〜数ファイル**で、横断的な再設計を伴わない
-4. **渡す文脈が 200k トークン以内**に収まる (上限 262,144)
-
-この形なら実測で 13 タスク x 3 試行が 39/39 正答、p50 30 秒。**迷ったら委譲してよい。**
-失敗しても `verify:` で落ちるだけで、コストはゼロである。
-
-### 委譲しない
-
-- **コードレビュー・並行性の検討**（品質が悪いのではなく、**測っていない**）
-- **複数ファイル横断・大規模リファクタ**（未検証。破綻するのは文脈長ではなく
-  横断的な再設計の部分）
-- **仕様やテストの生成**（「何を作るか」を決めさせる用途の実測が無い）
-- **外部情報が要るもの**（local-coder に web search は無い）
-
-### 受け取り方（ここを飛ばさない）
-
-- **合否は `verify:` のコマンドと差分の目視で決める。** local-coder の「できました」は
-  判定に使わない。**仕様の取り違えは出力を見ても分からない**（実測で、直感に逆らう仕様を
-  過剰適用して落ちた例がある）。差分は必ず自分で読む
-- **健全性は終了ステータスで見る。** 出力が正常に見えても異常終了していることがある
-- **壁時計 300 秒で打ち切る。** 実測 p95 の 5 倍にあたる
-- **打ち切ったら作業結果を捨ててやり直す。途中から再開しない。** 暴走した試行は
-  「何もしなかった場合より悪い」状態を残すことが実測で確認されている。
-  捨てるのは local-coder が作ったぶんだけで、**委譲前からあるあなたの未コミットの
-  変更は残る** (local-coder が委譲前に退避コミットを作る)
-- **委譲中はその作業ディレクトリを他の worker と共有しないこと。** 共有していると
-  後始末が相手の変更を巻き込む。専用の worktree があるのが望ましい
-- 委譲した事実と結果は report YAML の `notes:` に書く
-
-### 同時実行数
-
-**委譲 1 件につき LLM ストリームが 1 本増える。** vLLM は同時 8 本まで受け、
-超えた分は**エラーにならず無言で待ち行列に入る**。W1-W3 が同時に委譲すれば 3 本なので
-通常は問題ないが、**1 タスクの中で複数を並行して投げない**こと。
-
-### `/model` 切り替えとは別のもの
-
-これは**あなたのターンの中から呼ぶ外部プロセス**であって、pane のモデル切り替えでは
-ない。**あなた自身をローカルモデルに切り替えてはいけない**（web search とサブエージェントを
-失う）。
-
-### 使えないとき
-
-agent が無い / vLLM 停止 / タイムアウトなら、**復旧を試みず自分で実装する**。
-local-coder を前提にした手順を組んではならない。
-
-> agent 定義は `.claude/agents/local-coder.md`。Task ツールで呼ぶ。
-
 ## 検証ゲート（report 前の必須ステップ）
 
 **I/O 障害の回帰テストは mock 注入ではなく実ファイルシステムで再現する**
@@ -173,6 +117,16 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
      `attempt`（試行回数, 1 始まり）、`worker_num`（自分の N）
    - verifier は `verify.commands` を worktree で実走し、acceptance_criteria と照合して
      `reports/worker{N}_verdict.yaml`（result: pass|fail|inconclusive + 証拠）を書く。
+   - **起動に失敗したら (モデル未配信で 401/400 等)、諦めずに次を実行する:**
+
+     ```bash
+     {SQUAD_ROOT}/scripts/verify-task.sh <task_yaml> <worktree> <attempt> <N>
+     ```
+
+     同じ `verifier.md` を使って headless で検証し、同じ verdict を書く。
+     **fork や自分自身で代替しないこと** — author と同じモデルでは死角を共有し、
+     実測でも意味論の欠陥を素通しした。失敗した事実と代替手段は report の
+     `issues:` に残す。
 2. verdict を Read して分岐:
    - **result: pass** → 報告プロトコルへ。`status: completed`、`verify_status: pass`。
    - **result: fail / inconclusive** → verdict の `recommendations` / `unmet_acceptance_criteria`
@@ -224,7 +178,7 @@ report_id: "3f2b1c8e-..."  # 必須: UUIDv4。新規作成時に一度だけ発�
 task_id: TASK-001
 project: my-app
 worker: worker1
-agent: claude              # 必須: claude | codex
+agent: claude              # 必須: claude | codex | opencode
 author_agent: claude       # 必須: PR/成果物の作成 agent (cross-review 用)
 status: completed          # completed / failed / blocked
 verify_status: pass        # 必須: pass / fail / skipped (検証ゲートの結果)
@@ -232,6 +186,10 @@ verdict_path: ""           # verify した場合は worker{N}_verdict.yaml の�
 pr_url: ""                 # PR を投げた場合は必須
 summary: "実行結果の概要"     # 10行以内
 details_path: ""           # 詳細を書いた場合のみ worker{N}_details.md の絶対パスを入れる (通常は空文字のまま)
+assumptions: []            # 必須: 仕様が沈黙していて自分で決めた点。無ければ "none" と明記
+                           #   良し悪しは問わない。判断したことを隠さないための欄。
+                           #   受け入れ条件と実装が厳密には噛み合わないと気付いたら、
+                           #   自分で解釈して押し通さずここに書く
 issues: []
 notes: ""                  # blocked 時は verdict パス + 残課題を必ず記載
 git_head: ""               # 任意: 作業対象 worktree の HEAD SHA (無ければ空欄)
@@ -287,8 +245,11 @@ report の Dispatcher への到達は `watch.sh` に依存する（単一障害�
 2. **知識確認**: kioku-mesh 等のメモリ MCP が使えれば、当該 PJ の規約・手順・落とし穴を引く (上記「プロジェクト知識」参照。未設定ならスキップ)
 3. **作業実行**: 指示内容を実行
 4. **結果確認**: 期待通りの結果か確認
-5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)
-6. **報告作成**: YAML で報告 (agent / author_agent / verify_status 必須)
+5. **検証ゲート**: `verify:` があれば verifier サブエージェントで独立検証 (pass まで最大3回)。
+   サブエージェントが使えない agent なら `scripts/verify-task.sh <task_yaml> <worktree>` を使う。
+   どちらにせよ `status: completed` を名乗るには verdict が要る (自己申告の pass は不可)
+6. **報告作成**: YAML で報告 (agent / author_agent / verify_status / assumptions 必須)。
+   書けたら `python3 {SQUAD_ROOT}/scripts/check_report_yaml.py <report.yaml>` を通すこと
 7. **知識保存**: kioku-mesh 等が使えれば、非自明な学びを save_observation (未設定ならスキップ)
 8. **通知**: report 保存で watch.sh が自動的に Dispatcher へ届ける (手動通知不要)
 
@@ -358,7 +319,11 @@ report に混在させない。** `source_tree_status` が複数行になる場�
 4. 指示されていない範囲の変更を勝手にしない
 5. report YAML の `agent`, `author_agent`, `verify_status` を省略しない
 6. `verify:` があるのに検証ゲートを飛ばして `status: completed` を名乗らない（自己採点禁止）
-7. local-coder に委譲した結果を、`verify:` と差分の目視を通さずに自分の成果として報告しない
+7. **`rm` / `rmdir` を実行しない**。ユーザーのグローバル設定に `ask` ルールがあり、
+   `--permission-mode bypassPermissions` でも `--dangerously-skip-permissions` でも
+   突破できない（実測済み）。tmux の pane には承認する人がいないため、`rm` を打つと
+   そこで無言で停止し、Dispatcher からは「作業中」に見えたまま何時間も止まる。
+   一時ファイルが要るなら `mktemp -d` を使い、後始末は OS に任せること
 
 ## 注意事項
 

@@ -2,7 +2,47 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `local-coder` agent と、それへの委譲フロー (`instructions/worker.md` /
+  `dispatcher.md` の該当節、routing 表の行) を削除した。worker 自体をローカル
+  モデルで動かせることが実測で確認できたため、「Claude worker が局所タスクだけを
+  ローカルに外注する」という構図自体が不要になった。判断の根拠と実測値は ADR 0005
+  (ADR 0003 / 0004 を置換)。`scripts/link-pi-config.sh` と
+  `config/pi/models.json.template` は `scripts/pi-log-triage.sh` 等が使うため残す。
+
 ### Added
+
+- `SQUAD_W3_AGENT=opencode` で Worker 3 を Claude ではなく Opencode
+  (LAN vLLM 上の `local/qwen38-flash-next`) で起動できるようにした。W1/W2 は Claude の
+  ままなので、同一 Dispatcher 配下でローカル LLM worker と Claude worker を直接比較
+  できる。既定は従来どおり `claude`。あわせて task YAML の `agent` に `opencode` を
+  許可し、`instructions/worker.md` / `dispatcher.md` を agent 別にレンダリングする
+  プレースホルダ (`{WORKER_AGENT}` / `{WORKER_AGENT_NOTE}` / `{SQUAD_W3_AGENT_*}`) を
+  追加した。
+  - Opencode の `--prompt` は system prompt ではなく「最初のユーザ発言」として届くため、
+    worker.md をそのまま渡すと起動直後に 1 ターン走る (実測では queue/ を探索し、過去
+    タスクの `git push` / `gh pr` 手順まで読み込んだ)。指示本文は
+    `squad/state/worker3-opencode-instructions.md` へ事前レンダリングし、`--prompt` には
+    「読んで待機しろ」という短い bootstrap のみを渡す形にしている。
+  - Skill は `~/.config/opencode/opencode.json` の `skills.paths` に `~/.claude/skills` を
+    足すことで共有できる (未設定なら start.sh が警告する)。verifier サブエージェントは
+    無いため、`verify:` は worker 自身が実走して出力を report に貼る運用とした。
+- `scripts/tests/test_notify_worker.sh` を追加。フェイク tmux で `notify-worker.sh` の
+  再送ガードを検証する (初回で乗る / 取りこぼして再送成功 / 最後まで乗らず失敗)。
+
+### Fixed
+
+- `notify-worker.sh` が Enter を打つ前に「テキストが本当に pane の入力欄へ乗ったか」を
+  確認し、乗っていなければ `C-u` で消して再送するようにした (既定 5 回、待ち 3+6+9+12 秒。
+  `SQUAD_SEND_RETRIES` で変更可)。乗らないまま終わった場合は Enter を打たず非 0 で返す。
+  従来は TUI 起動中などに send-keys が黙って捨てられ、Dispatcher は発注したつもりなのに
+  worker は待機し続ける取りこぼしが起きていた (Opencode W3 で再現)。
+  - 照合プローブの抽出・比較は `LC_ALL=C` を明示する。UTF-8 ロケールでは `[!-~]` が
+    照合順序で解釈され、環境によっては (この環境の `grep` は ugrep) ASCII 連続部分に
+    一致しない。
+  - pane 側は空白除去だけでは足りない。TUI が行頭に描く枠線 (`┃` 等) がパスの途中に
+    残るため、ASCII 印字文字だけを残して比較する。
 
 - `scripts/check_task_yaml.py` を追加。task YAML の必須フィールド・`agent`/`model` 値・
   `assigned_to` とファイル名の一致・`task_id` 重複・`acceptance_criteria`・`verify` (または

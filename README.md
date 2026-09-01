@@ -28,8 +28,8 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
    自動生成される（`{SQUAD_ROOT}` プレースホルダは実パスに置換される）。カスタマイズ
    したい場合（例: 追加で参照したい他リポジトリのパスを `additionalDirectories` に
    足したい場合）は生成後の `.claude/settings.local.json` を直接編集すればよい。
-3. (任意) `./scripts/link-pi-config.sh` を実行する。ローカル LLM への委譲
-   (`local-coder` agent) を使う場合のみ必要。`config/pi/models.json.template` の
+3. (任意) `./scripts/link-pi-config.sh` を実行する。pi 経由でローカル LLM を叩く
+   スクリプト (`scripts/pi-log-triage.sh` 等) を使う場合のみ必要。`config/pi/models.json.template` の
    `__LLM_HOST__` を埋めて `~/.pi/agent/models.json` に配置する。接続先は
    `LLM_HOST` で渡す (既定 `dell-server01.cs.local`)。
 

@@ -25,6 +25,8 @@
 set -euo pipefail
 
 SESSION="${SQUAD_SESSION:-ros-agents}"
+# send_line の再送回数。既定 5 回 (待ち 3+6+9+12=30 秒) で Opencode の起動を待ちきれる。
+SEND_RETRIES="${SQUAD_SEND_RETRIES:-5}"
 
 # 誤爆ガード: SQUAD_SESSION 未設定のまま複数 Squad (watcher) が動いている場合、
 # 既定 ros-agents への送信は他 Squad の worker を壊す事故になるため中断する。
@@ -85,12 +87,81 @@ if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_in
   exit 1
 fi
 
-# 1行ずつ送る小関数: テキスト → sleep → Enter (同一 send-keys にまとめない)
-send_line() {
-  local text="$1"; local pre_enter_sleep="${2:-0.6}"
-  tmux send-keys -t "$TARGET" "$text"
-  sleep "$pre_enter_sleep"
+# Enter を打った後、worker が実際に走り出したかを確認する。
+#
+# 入力欄にテキストが乗ったことを確かめても、それは「送信された」ことを意味しない。
+# 実測で、テキストは乗り Enter も打ったのに worker が待機したままという取りこぼしが
+# 起きた (2 時間半、Dispatcher からは作業中に見えていた)。
+#
+# 走り出した合図は TUI の中断案内。Opencode は "esc interrupt"、Claude Code は
+# "esc to interrupt" なので "interrupt" で拾える。見えなければ Enter を打ち直す。
+# 応答が速すぎて中断案内を見逃す偽陰性はありうるが、その場合に余分な Enter が
+# 空の入力欄へ行くだけで無害なので、見逃すより打ち直すほうに倒す。
+confirm_submitted() {
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    if tmux capture-pane -pt "$TARGET" | grep -q 'interrupt'; then
+      return 0
+    fi
+  done
+  echo "[notify-worker] Enter 後に worker が動き出した形跡がありません。Enter を打ち直します" >&2
   tmux send-keys -t "$TARGET" Enter
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    if tmux capture-pane -pt "$TARGET" | grep -q 'interrupt'; then
+      return 0
+    fi
+  done
+  echo "[notify-worker] worker が反応しません: $TARGET" >&2
+  echo "[notify-worker] 発注できたと見なさないこと。pane を確認してください (tmux attach -t $SESSION)。" >&2
+  return 1
+}
+
+# 1行ずつ送る小関数: テキスト → sleep → Enter (同一 send-keys にまとめない)
+#
+# Enter を打つ前に「本当に入力欄へ乗ったか」を pane から確認して、乗っていなければ
+# 打ち直す。TUI が起動直後・描画中だと send-keys のテキストが黙って捨てられ、
+# Dispatcher は送ったつもりなのに worker は待機し続ける、という取りこぼしが起きる
+# (Opencode W3 で再現。Claude でも /model 直後に同種の drop があり sleep で凌いでいた)。
+#
+# 照合はプローブ (テキスト内の最後の ASCII 連続部分。タスク通知なら YAML の絶対パス) を
+# pane と突き合わせる。pane 側は折り返しで改行が入るうえ、TUI が行頭に枠線 (┃ 等) を
+# 描くため、空白を消すだけではパスの途中に枠線が残って一致しない。ASCII 印字文字だけを
+# 残せば折り返しも枠線もまとめて落ちる。ASCII 連続部分が無いテキストは素通しする。
+#
+# $3 に 1 を渡したときだけ送信確認まで行う (/clear や /model は即応答で
+# 中断案内が出ないため、確認すると毎回偽陰性で待たされる)。
+send_line() {
+  local text="$1"; local pre_enter_sleep="${2:-0.6}"; local confirm="${3:-0}"
+  local probe attempt
+  # LC_ALL=C は必須。UTF-8 ロケールだと [!-~] が照合順序で解釈され、環境によっては
+  # (この環境の grep は ugrep) ASCII 連続部分に一致しない。C ロケールならバイト単位に
+  # なり、マルチバイト文字は 0x80 以上なので自然に除外される。
+  probe="$(printf '%s' "$text" | LC_ALL=C grep -oE '[!-~]{8,}' | tail -1 || true)"
+  for attempt in $(seq 1 "$SEND_RETRIES"); do
+    tmux send-keys -t "$TARGET" "$text"
+    sleep "$pre_enter_sleep"
+    if [ -z "$probe" ] \
+      || tmux capture-pane -pt "$TARGET" | LC_ALL=C tr -cd '!-~' | LC_ALL=C grep -qF "$probe"; then
+      tmux send-keys -t "$TARGET" Enter
+      [ "$confirm" = "1" ] || return 0
+      confirm_submitted
+      return $?
+    fi
+    if [ "$attempt" -eq "$SEND_RETRIES" ]; then
+      break
+    fi
+    # 待ち時間を伸ばしながら再送する。worker の CLI 起動中 (Opencode は 30 秒前後)
+    # は入力を受け付けないため、固定間隔だと起動を待ちきれない。
+    echo "[notify-worker] 入力欄にテキストが乗っていません。${attempt}/${SEND_RETRIES} 回目、再送します" >&2
+    # 部分的に乗っていた場合の重複入力を避けるため、行を消してから打ち直す
+    tmux send-keys -t "$TARGET" C-u
+    sleep "$((attempt * 3))"
+  done
+  echo "[notify-worker] $SEND_RETRIES 回試しても入力欄に乗りませんでした: $TARGET" >&2
+  echo "[notify-worker] worker がまだ起動中か、pane が応答していません。" >&2
+  echo "[notify-worker] pane を直接確認してください (tmux attach -t $SESSION)。" >&2
+  return 1
 }
 
 # --clear (Claude のみ。Codex には /clear 概念が無いのでスキップ)
@@ -123,7 +194,7 @@ if [ "$IS_CODEX" -eq 1 ] && [ "$NO_NEW" -eq 0 ]; then
 fi
 
 # 本文通知
-send_line "$MESSAGE" 0.8
+send_line "$MESSAGE" 0.8 1
 
 # 着手確認のため少し待って pane 末尾を表示
 sleep 3

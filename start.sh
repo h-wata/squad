@@ -49,6 +49,83 @@ ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-1}"
 # 切り替えの根拠は ADR 0004。
 OPENCODE_MODEL="local/qwen38-flash-next"
 OPENCODE_MODEL_Q="$(printf '%q' "$OPENCODE_MODEL")"
+# SQUAD_W1_AGENT / SQUAD_W2_AGENT / SQUAD_W3_AGENT で worker ごとに claude か opencode を
+# 選ぶ。既定は claude。判断 (Dispatcher=Opus) と最終レビュー (Codex W4) は Claude 系に
+# 残したまま、実装 worker だけをローカル LLM に倒せるようにするための口。
+# 全台を opencode にすると死角が揃うので、検証は必ず別系統のモデルで行うこと
+# (scripts/verify-task.sh の既定は sonnet)。
+# 取りうる値:
+#   claude       … Claude Code + Claude モデル (従来)
+#   opencode     … Opencode + ローカル LLM
+#   claude-local … Claude Code + ローカル LLM。サブエージェント / hook / Skill が
+#                  そのまま効くうえ課金 0。実測ではこれが最も成果が良かった
+#                  (三つ巴比較: 301 tests、受け入れ条件の矛盾を自分から報告)。
+#                  ただし Anthropic 公式は非 Claude モデルへの routing を
+#                  サポートしないので、更新で壊れうる前提で使うこと。
+LOCAL_BASE_URL="${SQUAD_LOCAL_BASE_URL:-http://dell-server01.cs.local:4000}"
+LOCAL_MODEL="${SQUAD_LOCAL_MODEL:-qwen38-flash-next}"
+LOCAL_AUTH_TOKEN="${SQUAD_LOCAL_AUTH_TOKEN:-sk-local-dummy}"
+LOCAL_CONTEXT_TOKENS="${SQUAD_LOCAL_CONTEXT_TOKENS:-262144}"
+WORKER_AGENTS=('' claude claude claude)   # index 1-3 を使う (0 は捨て)
+ANY_OPENCODE=0
+ANY_CLAUDE_LOCAL=0
+for n in 1 2 3; do
+    _var="SQUAD_W${n}_AGENT"
+    _val="${!_var:-claude}"
+    case "$_val" in
+        claude) ;;
+        opencode) ANY_OPENCODE=1 ;;
+        claude-local) ANY_CLAUDE_LOCAL=1 ;;
+        *)
+            echo "$_var は claude / opencode / claude-local のいずれかを指定してください (指定値: $_val)" >&2
+            exit 1
+            ;;
+    esac
+    WORKER_AGENTS[n]="$_val"
+done
+# claude-local worker 用の CLAUDE_CONFIG_DIR。~/.claude/settings.json の
+# permissions.ask (Bash(git commit*) / Bash(rm *) 等) は project 側 allow でも
+# bypassPermissions でも突破できず、tmux 越しの worker を無言で止める。
+# user 設定の出所ごと差し替えて、手元の対話設定に触れずに ask を外す。
+# 詳細は config/claude-worker/README.md。
+WORKER_CONFIG_DIR="$SCRIPT_DIR/config/claude-worker"
+if [ "$ANY_CLAUDE_LOCAL" = "1" ]; then
+    if [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
+        echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker に必須)" >&2
+        exit 1
+    fi
+    # 新しい CLAUDE_CONFIG_DIR は初回オンボーディング (テーマ選択 / セキュリティ注意 /
+    # フォルダ信頼 / bypass 確認) を出す。tmux の pane には答える人がいないので、
+    # 起動前に「済んだこと」にしておく。workspace ごとの信頼も先に入れる。
+    WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
+import json, os, pathlib
+
+cfg_dir = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
+state = cfg_dir / '.claude.json'
+try:
+    data = json.loads(state.read_text())
+except (OSError, ValueError):
+    data = {}
+data['hasCompletedOnboarding'] = True
+projects = data.setdefault('projects', {})
+for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
+    projects.setdefault(d, {})['hasTrustDialogAccepted'] = True
+state.write_text(json.dumps(data, indent=2))
+" || {
+        echo "エラー: $WORKER_CONFIG_DIR の初期化に失敗しました" >&2
+        exit 1
+    }
+fi
+# Opencode worker は Skill を ~/.claude/skills から skills.paths 経由で読む。
+# 未設定だと recommended_skills が黙って無視されるだけで失敗が見えないため、警告する。
+if [ "$ANY_OPENCODE" = "1" ]; then
+    OC_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+    if ! grep -q '"skills"' "$OC_CONFIG" 2>/dev/null; then
+        echo "警告: $OC_CONFIG に skills.paths がありません。" >&2
+        echo "      Opencode worker が Skill を読めません。以下を追記してください:" >&2
+        echo '      "skills": { "paths": ["'"$HOME"'/.claude/skills"] }' >&2
+    fi
+fi
 
 # --- fresh clone 対応: settings.local.json の自動生成 ---
 # .claude/settings.local.json は個人パス・MCP allow リストを含むため gitignore 対象。
@@ -110,6 +187,19 @@ if [ "$ENABLE_CODEX" = "1" ]; then
 else
     WORKER4_ROW="| Worker 4 | 6 | Codex | - | 無効 (SQUAD_ENABLE_CODEX=0) | - |"
 fi
+# worker ごとの Agent 表記 (dashboard / dispatcher.md の両方で使う)
+worker_agent_label() {
+    case "${WORKER_AGENTS[$1]}" in
+        opencode) echo "Opencode ($OPENCODE_MODEL)" ;;
+        claude-local) echo "Claude Code ($LOCAL_MODEL)" ;;
+        *) echo "Claude (Sonnet)" ;;
+    esac
+}
+WORKER_ROWS=""
+for n in 1 2 3; do
+    WORKER_ROWS="${WORKER_ROWS}| Worker $n | $n | $(worker_agent_label "$n") | - | 待機 | - |
+"
+done
 if [ ! -f "$SCRIPT_DIR/dashboard.md" ]; then
     cat > "$SCRIPT_DIR/dashboard.md" <<DASHEOF
 # マルチPJ ダッシュボード (Index)
@@ -121,10 +211,7 @@ squad 起動時に自動生成された初期ファイルです。Dispatcher が
 
 | Worker | Pane | Agent | 現在のPJ | 状態 | 直近の完了タスク |
 |--------|------|-------|----------|------|------------|
-| Worker 1 | 1 | Claude (Sonnet) | - | 待機 | - |
-| Worker 2 | 2 | Claude (Sonnet) | - | 待機 | - |
-| Worker 3 | 3 | Claude (Sonnet) | - | 待機 | - |
-$WORKER4_ROW
+${WORKER_ROWS}$WORKER4_ROW
 DASHEOF
 fi
 
@@ -236,6 +323,63 @@ else
 fi
 DISPATCHER_CODEX_NOTE_ARG_Q="$(printf '%q' "SQUAD_ENABLE_CODEX_NOTE=$DISPATCHER_CODEX_NOTE")"
 
+# worker.md の {WORKER_AGENT} / {WORKER_AGENT_NOTE} プレースホルダ用。
+# Claude worker は従来通り (note は空)。Opencode worker は Skill ツールや
+# verifier サブエージェントが無いため、その差分だけを note で上書きする。
+WORKER_AGENT_ARG_CLAUDE_Q="$(printf '%q' 'WORKER_AGENT=claude') $(printf '%q' 'WORKER_AGENT_NOTE=')"
+# Opencode worker への追加指示は instructions/worker-qwen.md に置く。
+# start.sh に長い日本語文字列を埋めると差分が読めず、実測で分かった振る舞いを
+# 足すたびに shell のエスケープを気にすることになるため、ファイルに分けた。
+# 中身は worker.md の {WORKER_AGENT_NOTE} 位置に差し込まれる。
+WORKER_QWEN_MD="$SCRIPT_DIR/instructions/worker-qwen.md"
+if [ "$ANY_OPENCODE" = "1" ] && [ ! -f "$WORKER_QWEN_MD" ]; then
+    echo "エラー: $WORKER_QWEN_MD がありません (opencode worker に必須)" >&2
+    exit 1
+fi
+if [ -f "$WORKER_QWEN_MD" ]; then
+    OPENCODE_WORKER_NOTE="$(python3 "$SCRIPT_DIR/scripts/render_prompt.py" "$WORKER_QWEN_MD" \
+        "LOCAL_MODEL=$OPENCODE_MODEL" "SQUAD_ROOT=$SCRIPT_DIR")"
+else
+    OPENCODE_WORKER_NOTE=""
+fi
+
+# Opencode の --prompt は system prompt ではなく「最初のユーザ発言」として届くため、
+# worker.md をそのまま渡すと起動直後に 1 ターン走る。実測では queue/ を勝手に漁って
+# 過去タスクの手順 (git push / gh pr) まで読み込みにいったため、--auto と組み合わせると
+# 誤発火の危険がある。そこで指示本文は事前レンダリングしたファイルに置き、--prompt には
+# 「読んで待機しろ」という短い bootstrap だけを渡す。
+opencode_prompt_file() { echo "$SCRIPT_DIR/squad/state/worker$1-opencode-instructions.md"; }
+opencode_bootstrap() {
+    local n="$1"
+    echo "あなたは squad の Worker $n です。まず $(opencode_prompt_file "$n") を Read して運用ルールを頭に入れてください。\
+読み終えたら「W$n 待機中」とだけ出力して停止すること。\
+起動直後のこのターンでは、それ以外を一切しないこと: queue/ や他プロジェクトを探索しない、\
+既存の task YAML / report を読まない、ファイルを変更しない、git / gh コマンドを打たない。\
+Dispatcher が tmux 経由で task YAML の絶対パスを通知してくるまで待機します。"
+}
+
+# dispatcher.md 用。Opencode で動いている worker がいるときだけ routing の注意を足す。
+OPENCODE_WORKERS=""
+for n in 1 2 3; do
+    case "${WORKER_AGENTS[$n]}" in
+        opencode | claude-local) OPENCODE_WORKERS="${OPENCODE_WORKERS}W$n " ;;
+    esac
+done
+if [ -n "$OPENCODE_WORKERS" ]; then
+    DISPATCHER_OPENCODE_NOTE="**${OPENCODE_WORKERS%% }はローカル LLM で動いている**。\
+task YAML の \`agent\` は worker 表の Agent 欄に合わせる (Opencode なら \`opencode\`、\
+Claude Code + ローカルモデルなら \`claude\`)。振ってよいのは仕様が確定していて \
+機械検証できる \`verify:\` があるタスク。設計判断そのものや、仕様が固まっていない調査は \
+Claude worker か W4 に振ること。成果物は自己申告の pass を信用せず、必ず verify の実走結果で \
+裏取りしてから merge 判断する (scripts/verify-task.sh を使う。**検証は author と別系統の \
+モデルで行うこと**。ローカル LLM の成果をローカル LLM で検証すると死角を共有する)。\
+recommended_skills は通常どおり書いてよい (~/.claude/skills を skills.paths で共有済み)。"
+else
+    DISPATCHER_OPENCODE_NOTE=""
+fi
+WORKER_ROWS_ARG_Q="$(printf '%q' "SQUAD_WORKER_ROWS=$WORKER_ROWS")"
+OPENCODE_NOTE_ARG_Q="$(printf '%q' "SQUAD_OPENCODE_WORKER_NOTE=$DISPATCHER_OPENCODE_NOTE")"
+
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "既存のセッション '$SESSION_NAME' を終了します..."
@@ -271,9 +415,14 @@ done
 
 # Pane タイトル
 tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
-tmux select-pane -t "$SESSION_NAME:0.1" -T "Worker1 (Claude)"
-tmux select-pane -t "$SESSION_NAME:0.2" -T "Worker2 (Claude)"
-tmux select-pane -t "$SESSION_NAME:0.3" -T "Worker3 (Claude)"
+for n in 1 2 3; do
+    case "${WORKER_AGENTS[$n]}" in
+        opencode) _t="Worker$n (Opencode)" ;;
+        claude-local) _t="Worker$n (CC+local)" ;;
+        *) _t="Worker$n (Claude)" ;;
+    esac
+    tmux select-pane -t "$SESSION_NAME:0.$n" -T "$_t"
+done
 if [ "$ENABLE_OPENCODE" = "1" ]; then
     tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Flash-Next)"
 else
@@ -303,16 +452,36 @@ tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 #   Dispatcher は YAML 管理のみでコードを書かないため off、Worker 1-3 は実装担当のため
 #   full。プラグイン未導入なら無視されるだけで無害。レベルを変えたい場合はここを編集
 #   (lite/full/ultra)。導入手順は README の「Ponytail 連携 (任意)」参照。
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\"" Enter
 
 # Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
 # 無指定でも $TMUX_PANE → config.json 逆引きで動くが、明示する方が確実。
 # --settings: worker の cwd が任意の WORKSPACE のため、project hooks が読まれない。
 #   SCRIPT_DIR/.claude/settings.local.json を明示ロードして squad の hook を有効化。
-tmux send-keys -t "$SESSION_NAME:0.1" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w1 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=1 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.2" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w2 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=2 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
-tmux send-keys -t "$SESSION_NAME:0.3" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w3 SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=3 $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+for n in 1 2 3; do
+    if [ "${WORKER_AGENTS[$n]}" = "claude-local" ]; then
+        # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
+        # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
+        # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+    elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
+        # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
+        # (理由は opencode_bootstrap 定義箇所のコメント参照)。
+        _pf="$(opencode_prompt_file "$n")"
+        mkdir -p "$(dirname "$_pf")"
+        python3 "$SCRIPT_DIR/scripts/render_prompt.py" "$SCRIPT_DIR/instructions/worker.md" \
+            "N=$n" "SQUAD_ROOT=$SCRIPT_DIR" "SQUAD_SESSION=$SESSION_NAME" \
+            WORKER_AGENT=opencode "WORKER_AGENT_NOTE=$OPENCODE_WORKER_NOTE" >"$_pf"
+        # --auto は tmux 越しで承認プロンプトに応答できないため必須
+        # (Claude worker の permission-mode 相当)。external_directory が既定 ask のため、
+        # これが無いと $SQUAD_ROOT 配下の task YAML すら読めない。
+        _bs_q="$(printf '%q' "$(opencode_bootstrap "$n")")"
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --prompt $_bs_q $WORKSPACE_Q" Enter
+    else
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+    fi
+done
 
 # Pane 6: Worker 4 (Codex, ワークスペースで起動)
 # Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
@@ -342,10 +511,14 @@ echo "セッション名: $SESSION_NAME"
 echo "ワークスペース: $WORKSPACE"
 echo ""
 echo "Pane構成:"
-echo "  Pane 0: Dispatcher (Claude, タスク分配)"
-echo "  Pane 1: Worker 1 (Claude)"
-echo "  Pane 2: Worker 2 (Claude)"
-echo "  Pane 3: Worker 3 (Claude)"
+echo "  Pane 0: Dispatcher (Claude $DISPATCHER_MODEL, タスク分配)"
+for n in 1 2 3; do
+    case "${WORKER_AGENTS[$n]}" in
+        opencode) echo "  Pane $n: Worker $n (Opencode, $OPENCODE_MODEL) ← SQUAD_W${n}_AGENT=opencode" ;;
+        claude-local) echo "  Pane $n: Worker $n (Claude Code + $LOCAL_MODEL) ← SQUAD_W${n}_AGENT=claude-local" ;;
+        *) echo "  Pane $n: Worker $n (Claude)" ;;
+    esac
+done
 if [ "$ENABLE_OPENCODE" = "1" ]; then
     echo "  Pane 4: Opencode (Flash-Next, デフォルトモデル local/qwen38-flash-next)"
 else

@@ -230,7 +230,12 @@ def test_main_checks_multiple_files_and_returns_1_on_ng(tmp_path: Path, capsys: 
     assert '合計: 2 ファイル' in out
 
 
-def test_main_all_files_pass_returns_0(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+def test_main_all_files_pass_returns_0(
+    tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SQUAD_ROOT を tmp に向ける。向けないと task_id 重複検査が開発者の実 queue を
+    # 走査し、そこに TASK-001 があるかどうかでテストの合否が変わる。
+    monkeypatch.setenv('SQUAD_ROOT', str(tmp_path))
     good_path = _write(tmp_path, GOOD, name='worker1.yaml')
 
     rc = main([str(good_path)])

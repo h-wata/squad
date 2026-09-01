@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# local-coder が使う pi の接続設定を ~/.pi/agent/models.json に配置する。
+# pi (scripts/pi-log-triage.sh 等) が使う接続設定を ~/.pi/agent/models.json に配置する。
 #
-# agent 定義 (.claude/agents/local-coder.md) はリポジトリで追跡されるが、pi の
-# provider 設定はホーム配下にあり追跡されない。片方だけ持っていくと、agent は
-# あるのに接続先が無いという状態になる (旧 vllm-consultant がこの壊れ方をした)。
+# pi を使うスクリプトはリポジトリで追跡されるが、pi の provider 設定はホーム配下に
+# あり追跡されない。片方だけ持っていくと、スクリプトはあるのに接続先が無いという
+# 状態になる (旧 vllm-consultant がこの壊れ方をした)。
 #
 # 以前は symlink を張っていたが、リポジトリ側に LAN の IP を直書きすることに
 # なっていた。テンプレートを展開する方式に変え、ホストを LLM_HOST で渡す。

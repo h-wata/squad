@@ -2,7 +2,7 @@
 # ruff: noqa: CPY001
 """task 単位でモデル別の token / usage quota を集計する (SQUAD-258 Phase 0 / SQUAD-261 / SQUAD-265).
 
-下位モデル / local-coder への委譲判断を「勘」ではなく実測に基づかせるための計測基盤。
+下位モデルへの委譲判断を「勘」ではなく実測に基づかせるための計測基盤。
 task YAML の mtime (発注時刻) 〜 report YAML の `completed_at` (完了時刻) を区間として、
 その区間に含まれる `~/.claude/projects/<encoded-cwd>/*.jsonl` 内の assistant message の
 usage を合算し、`metrics/task_costs.jsonl` に追記する。

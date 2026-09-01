@@ -1,6 +1,6 @@
 # ADR 0004: local-coder のバックエンドを Qwen3.8-Flash-Next に移し、委譲条件を実測で引き直す
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR 0005](0005-worker-runs-the-local-model-directly.md)
 - **Date**: 2026-08-30
 - **Supersedes**: [ADR 0003](0003-local-llm-as-default-executor.md)
 - **Related**: [ADR 0001](0001-multi-session-isolation-by-project-ownership.md),

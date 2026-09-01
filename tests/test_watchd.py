@@ -102,7 +102,10 @@ def queued(w: Watcher, marker: str = '[REPORT ') -> list[str]:
 
 
 @pytest.fixture
-def watcher(tmp_path: Path) -> tuple[Watcher, Path]:
+def watcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Watcher, Path]:
+    # hook state を tmp に隔離する。しないと開発機の squad/state/w*.json を読み、
+    # 直近に hook が動いたかどうかで stall 判定の合否が変わる。
+    monkeypatch.setenv('SQUAD_STATE_DIR', str(tmp_path / 'state'))
     queue = tmp_path / 'queue'
     # SQUAD-226: queue 経路は opt-in。queue の振る舞いを見るテストは明示的に有効化する。
     cfg = Config(

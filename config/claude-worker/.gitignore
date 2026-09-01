@@ -1,0 +1,5 @@
+# CLAUDE_CONFIG_DIR として使うため実行時ファイルが増える。settings.json だけ追跡する。
+*
+!.gitignore
+!settings.json
+!README.md
