@@ -82,6 +82,15 @@ rm -f "$VERDICT"
 echo "[verify-task] model=$MODEL worker=$WORKER_NUM attempt=$ATTEMPT"
 echo "[verify-task] worktree=$WORKTREE"
 
+# verifier は verify.commands を実走する必要があるため Bash を取り上げられない
+# (机上判定は verifier.md が禁じている)。代わりに「verdict 以外を書かない」「実装を
+# 修正しない」という verifier.md の禁止事項を、プロンプトの約束で終わらせず実測で縛る。
+# 検証前後で worktree の git status を比較し、変化していたら結果を採用しない。
+WT_BEFORE=''
+if git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1; then
+    WT_BEFORE="$(git -C "$WORKTREE" status --porcelain 2>/dev/null || true)"
+fi
+
 SQUAD_ROOT_FOR_VERDICT="$(cd "$REPORTS_DIR/../../.." && pwd)"
 
 cd "$WORKTREE"
@@ -99,6 +108,17 @@ case "$(basename "$CLI")" in
         "$CLI" run --auto -m "$MODEL" "$PROMPT" || true
         ;;
 esac
+
+if [ -n "$WT_BEFORE" ] || git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1; then
+    WT_AFTER="$(git -C "$WORKTREE" status --porcelain 2>/dev/null || true)"
+    if [ "$WT_AFTER" != "$WT_BEFORE" ]; then
+        echo "[verify-task] 検証中に worktree が変更されました。verdict を採用しません。" >&2
+        echo "[verify-task] verifier は検証のみで、実装の修正は author の仕事です。" >&2
+        diff <(printf '%s\n' "$WT_BEFORE") <(printf '%s\n' "$WT_AFTER") >&2 || true
+        echo "[verify-task] result=tampered" >&2
+        exit 1
+    fi
+fi
 
 if [ ! -f "$VERDICT" ]; then
     echo "[verify-task] verdict が書かれませんでした: $VERDICT" >&2

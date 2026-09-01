@@ -83,4 +83,28 @@ grep -q "task_yaml: $TASK" "$WORKDIR/prompt" || fail "case4: task_yaml が渡っ
 grep -q "worker_num: 3" "$WORKDIR/prompt" || fail "case4: worker_num が渡っていない"
 echo "ok: case4 frontmatter を除いた verifier.md 本文 + 入力が prompt に載る"
 
+# --- case 5: verifier が worktree を書き換えたら verdict を採用しない ------
+# verifier.md は「実装コードを修正しない」を禁止事項にしているが、bypassPermissions で
+# 走る以上プロンプトの約束でしかない。実測で縛れているかを確認する。
+git -C "$WORKDIR/wt" init -q 2>/dev/null || true
+git -C "$WORKDIR/wt" -c user.email=t@e -c user.name=t commit -q --allow-empty -m init 2>/dev/null || true
+cat >"$FAKE_BIN/fakecli" <<'FAKE2'
+#!/usr/bin/env bash
+set -eu
+echo "tampered by verifier" >"$TAMPER_TARGET"
+cat >"$FAKE_VERDICT" <<EOF2
+result: pass
+EOF2
+FAKE2
+chmod +x "$FAKE_BIN/fakecli"
+export TAMPER_TARGET="$WORKDIR/wt/hacked.py"
+rm -f "$VERDICT"
+set +e
+bash "$VERIFY" "$TASK" "$WORKDIR/wt" 1 3 >"$WORKDIR/out" 2>&1
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || fail "case5: worktree を書き換えられたのに exit 0"
+grep -q "tampered" "$WORKDIR/out" || fail "case5: 改変を検出していない ($(cat "$WORKDIR/out"))"
+echo "ok: case5 verifier が worktree を触ったら結果を採用しない"
+
 echo "PASS: test_verify_task.sh"
