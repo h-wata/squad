@@ -327,15 +327,21 @@ DISPATCHER_CODEX_NOTE_ARG_Q="$(printf '%q' "SQUAD_ENABLE_CODEX_NOTE=$DISPATCHER_
 # Claude worker は従来通り (note は空)。Opencode worker は Skill ツールや
 # verifier サブエージェントが無いため、その差分だけを note で上書きする。
 WORKER_AGENT_ARG_CLAUDE_Q="$(printf '%q' 'WORKER_AGENT=claude') $(printf '%q' 'WORKER_AGENT_NOTE=')"
-OPENCODE_WORKER_NOTE="あなたは Opencode (ローカル LLM $OPENCODE_MODEL) で動く worker です。\
-Skill は ~/.claude/skills を skills.paths 経由で共有しているので通常どおり使えます。\
-ただし verifier サブエージェントは無いため、verify: があれば委譲せず自分で \
-verify.commands を実行し、コマンドと出力を report にそのまま貼ってください \
-(実行していないものを pass と書かないこと)。\
-手に負えない・仕様が読み切れないと判断したら、無理に進めず report に blocked \
-として理由を書いて返してください。途中まででも状況を残すほうが価値があります。\
-report は日本語で書くこと (中国語の字が混ざりやすいので注意: 無を无、書を书と \
-書かない)。completed_at は推測で書かず、date -Iseconds を実行した結果を使うこと。"
+# Opencode worker への追加指示は instructions/worker-qwen.md に置く。
+# start.sh に長い日本語文字列を埋めると差分が読めず、実測で分かった振る舞いを
+# 足すたびに shell のエスケープを気にすることになるため、ファイルに分けた。
+# 中身は worker.md の {WORKER_AGENT_NOTE} 位置に差し込まれる。
+WORKER_QWEN_MD="$SCRIPT_DIR/instructions/worker-qwen.md"
+if [ "$ANY_OPENCODE" = "1" ] && [ ! -f "$WORKER_QWEN_MD" ]; then
+    echo "エラー: $WORKER_QWEN_MD がありません (opencode worker に必須)" >&2
+    exit 1
+fi
+if [ -f "$WORKER_QWEN_MD" ]; then
+    OPENCODE_WORKER_NOTE="$(python3 "$SCRIPT_DIR/scripts/render_prompt.py" "$WORKER_QWEN_MD" \
+        "LOCAL_MODEL=$OPENCODE_MODEL" "SQUAD_ROOT=$SCRIPT_DIR")"
+else
+    OPENCODE_WORKER_NOTE=""
+fi
 WORKER_AGENT_ARG_OPENCODE_Q="$(printf '%q' 'WORKER_AGENT=opencode') $(printf '%q' "WORKER_AGENT_NOTE=$OPENCODE_WORKER_NOTE")"
 
 # Opencode の --prompt は system prompt ではなく「最初のユーザ発言」として届くため、

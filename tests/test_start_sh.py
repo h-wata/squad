@@ -269,7 +269,7 @@ def test_every_instruction_placeholder_is_rendered_by_start_sh() -> None:
     start_sh = (REPO / 'start.sh').read_text()
     # worker.md の {N} / {X} は N=1 等で個別に渡す・本文中の例示なので対象外。
     exempt = {'N', 'X'}
-    for md in ('worker.md', 'dispatcher.md'):
+    for md in ('worker.md', 'dispatcher.md', 'worker-qwen.md'):
         text = (REPO / 'instructions' / md).read_text()
         keys = set(re.findall(r'\{([A-Z_][A-Z0-9_]*)\}', text)) - exempt
         for key in sorted(keys):
