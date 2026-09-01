@@ -10,6 +10,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NOTIFY="$REPO_ROOT/scripts/notify-worker.sh"
+VERIFY_NOTIFY="$NOTIFY"
 
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
@@ -36,8 +37,13 @@ case "${1:-}" in
     # send-keys -t <target> <arg>
     text="${4:-}"
     echo "send-keys:$text" >>"$CALLS"
-    if [ "$text" = "Enter" ] || [ "$text" = "C-u" ]; then
-      [ "$text" = "C-u" ] && : >"$PANE"
+    if [ "$text" = "Enter" ]; then
+      # FAKE_NO_SUBMIT=1 なら Enter を打っても走り出さない (取りこぼしの再現)
+      [ -n "${FAKE_NO_SUBMIT:-}" ] || echo "esc interrupt" >>"$PANE"
+      exit 0
+    fi
+    if [ "$text" = "C-u" ]; then
+      : >"$PANE"
       exit 0
     fi
     remaining="$(cat "$DROPS")"
@@ -108,5 +114,18 @@ run_case 99
 grep -q "send-keys:Enter" "$WORKDIR/calls" && fail "case3: 乗っていないのに Enter を打った"
 grep -qE "[0-9]+ 回試しても" "$WORKDIR/out" || fail "case3: 失敗メッセージが出ていない"
 echo "ok: case3 乗らなければ Enter を打たず失敗させる"
+
+# --- case 4: Enter を打っても走り出さなければ発注失敗にする ---------------
+# 入力欄に乗ったことと送信されたことは別。実測でここを見ておらず 2 時間半
+# 取りこぼした (Dispatcher からは作業中に見えていた)。
+: >"$WORKDIR/calls"; : >"$WORKDIR/pane"; echo 0 >"$WORKDIR/drops"
+set +e
+FAKE_RESULT=x FAKE_NO_SUBMIT=1 bash "$VERIFY_NOTIFY" W2 "$MSG" >"$WORKDIR/out" 2>&1
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || fail "case4: 走り出していないのに exit 0 (発注できたことにしてしまう)"
+grep -q "反応しません" "$WORKDIR/out" || fail "case4: 未反応を報告していない"
+[ "$(grep -c 'send-keys:Enter' "$WORKDIR/calls")" -eq 2 ] || fail "case4: Enter を打ち直していない"
+echo "ok: case4 Enter 後に走り出さなければ失敗させる"
 
 echo "PASS: test_notify_worker.sh"

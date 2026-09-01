@@ -87,6 +87,37 @@ if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_in
   exit 1
 fi
 
+# Enter を打った後、worker が実際に走り出したかを確認する。
+#
+# 入力欄にテキストが乗ったことを確かめても、それは「送信された」ことを意味しない。
+# 実測で、テキストは乗り Enter も打ったのに worker が待機したままという取りこぼしが
+# 起きた (2 時間半、Dispatcher からは作業中に見えていた)。
+#
+# 走り出した合図は TUI の中断案内。Opencode は "esc interrupt"、Claude Code は
+# "esc to interrupt" なので "interrupt" で拾える。見えなければ Enter を打ち直す。
+# 応答が速すぎて中断案内を見逃す偽陰性はありうるが、その場合に余分な Enter が
+# 空の入力欄へ行くだけで無害なので、見逃すより打ち直すほうに倒す。
+confirm_submitted() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    if tmux capture-pane -pt "$TARGET" | grep -q 'interrupt'; then
+      return 0
+    fi
+  done
+  echo "[notify-worker] Enter 後に worker が動き出した形跡がありません。Enter を打ち直します" >&2
+  tmux send-keys -t "$TARGET" Enter
+  for i in 1 2 3 4 5; do
+    sleep 1
+    if tmux capture-pane -pt "$TARGET" | grep -q 'interrupt'; then
+      return 0
+    fi
+  done
+  echo "[notify-worker] worker が反応しません: $TARGET" >&2
+  echo "[notify-worker] 発注できたと見なさないこと。pane を確認してください (tmux attach -t $SESSION)。" >&2
+  return 1
+}
+
 # 1行ずつ送る小関数: テキスト → sleep → Enter (同一 send-keys にまとめない)
 #
 # Enter を打つ前に「本当に入力欄へ乗ったか」を pane から確認して、乗っていなければ
@@ -98,8 +129,11 @@ fi
 # pane と突き合わせる。pane 側は折り返しで改行が入るうえ、TUI が行頭に枠線 (┃ 等) を
 # 描くため、空白を消すだけではパスの途中に枠線が残って一致しない。ASCII 印字文字だけを
 # 残せば折り返しも枠線もまとめて落ちる。ASCII 連続部分が無いテキストは素通しする。
+#
+# $3 に 1 を渡したときだけ送信確認まで行う (/clear や /model は即応答で
+# 中断案内が出ないため、確認すると毎回偽陰性で待たされる)。
 send_line() {
-  local text="$1"; local pre_enter_sleep="${2:-0.6}"
+  local text="$1"; local pre_enter_sleep="${2:-0.6}"; local confirm="${3:-0}"
   local probe attempt
   # LC_ALL=C は必須。UTF-8 ロケールだと [!-~] が照合順序で解釈され、環境によっては
   # (この環境の grep は ugrep) ASCII 連続部分に一致しない。C ロケールならバイト単位に
@@ -111,7 +145,9 @@ send_line() {
     if [ -z "$probe" ] \
       || tmux capture-pane -pt "$TARGET" | LC_ALL=C tr -cd '!-~' | LC_ALL=C grep -qF "$probe"; then
       tmux send-keys -t "$TARGET" Enter
-      return 0
+      [ "$confirm" = "1" ] || return 0
+      confirm_submitted
+      return $?
     fi
     if [ "$attempt" -eq "$SEND_RETRIES" ]; then
       break
@@ -159,7 +195,7 @@ if [ "$IS_CODEX" -eq 1 ] && [ "$NO_NEW" -eq 0 ]; then
 fi
 
 # 本文通知
-send_line "$MESSAGE" 0.8
+send_line "$MESSAGE" 0.8 1
 
 # 着手確認のため少し待って pane 末尾を表示
 sleep 3
