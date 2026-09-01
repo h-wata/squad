@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `local-coder` agent と、それへの委譲フロー (`instructions/worker.md` /
+  `dispatcher.md` の該当節、routing 表の行) を削除した。worker 自体をローカル
+  モデルで動かせることが実測で確認できたため、「Claude worker が局所タスクだけを
+  ローカルに外注する」という構図自体が不要になった。判断の根拠と実測値は ADR 0005
+  (ADR 0003 / 0004 を置換)。`scripts/link-pi-config.sh` と
+  `config/pi/models.json.template` は `scripts/pi-log-triage.sh` 等が使うため残す。
+
 ### Added
 
 - `SQUAD_W3_AGENT=opencode` で Worker 3 を Claude ではなく Opencode

@@ -2,7 +2,7 @@
 # ruff: noqa: CPY001
 """task YAML のスキーマ検証スクリプト (SQUAD-260).
 
-task-yaml-author (現状 Sonnet) の生成物を下位モデル (Haiku / local-coder) に委譲する
+task-yaml-author (現状 Sonnet) の生成物を下位モデルに委譲する
 前提として、成果物の妥当性を機械的に判定できるようにする。判定できないと下位モデルの
 誤った task YAML が静かに通過してしまうため。
 
