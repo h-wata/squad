@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [],
-    "ask": [],
-    "deny": []
-  }
+    "deny": [],
+    "ask": []
+  },
+  "theme": "dark",
+  "skipDangerousModePermissionPrompt": true
 }

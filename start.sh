@@ -89,9 +89,32 @@ done
 # user 設定の出所ごと差し替えて、手元の対話設定に触れずに ask を外す。
 # 詳細は config/claude-worker/README.md。
 WORKER_CONFIG_DIR="$SCRIPT_DIR/config/claude-worker"
-if [ "$ANY_CLAUDE_LOCAL" = "1" ] && [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
-    echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker に必須)" >&2
-    exit 1
+if [ "$ANY_CLAUDE_LOCAL" = "1" ]; then
+    if [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
+        echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker に必須)" >&2
+        exit 1
+    fi
+    # 新しい CLAUDE_CONFIG_DIR は初回オンボーディング (テーマ選択 / セキュリティ注意 /
+    # フォルダ信頼 / bypass 確認) を出す。tmux の pane には答える人がいないので、
+    # 起動前に「済んだこと」にしておく。workspace ごとの信頼も先に入れる。
+    WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
+import json, os, pathlib
+
+cfg_dir = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
+state = cfg_dir / '.claude.json'
+try:
+    data = json.loads(state.read_text())
+except (OSError, ValueError):
+    data = {}
+data['hasCompletedOnboarding'] = True
+projects = data.setdefault('projects', {})
+for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
+    projects.setdefault(d, {})['hasTrustDialogAccepted'] = True
+state.write_text(json.dumps(data, indent=2))
+" || {
+        echo "エラー: $WORKER_CONFIG_DIR の初期化に失敗しました" >&2
+        exit 1
+    }
 fi
 # Opencode worker は Skill を ~/.claude/skills から skills.paths 経由で読む。
 # 未設定だと recommended_skills が黙って無視されるだけで失敗が見えないため、警告する。
