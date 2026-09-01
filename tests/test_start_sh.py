@@ -308,3 +308,32 @@ def test_w1_agent_rejects_unknown_value(tmp_path: Path) -> None:
 
     assert r.returncode != 0
     assert 'SQUAD_W1_AGENT' in r.stderr
+
+
+def test_claude_local_agent_is_accepted(tmp_path: Path) -> None:
+    """Claude Code ハーネス + ローカルモデルの worker を選べる."""
+    root = _fake_root(tmp_path)
+    shutil.copytree(REPO / 'config', root / 'config')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_W2_AGENT': 'claude-local'})
+
+    assert r.returncode == 0, r.stderr
+    row = next(ln for ln in (root / 'dashboard.md').read_text().splitlines() if 'Worker 2 ' in ln)
+    assert 'Claude Code' in row, row
+
+
+def test_claude_local_requires_worker_config_dir(tmp_path: Path) -> None:
+    """config/claude-worker/settings.json が無ければ起動を止める.
+
+    無いまま起動すると user 設定の ask ルールを拾い、worker が無言で止まる。
+    """
+    root = _fake_root(tmp_path)  # config/ をコピーしない
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_W3_AGENT': 'claude-local'})
+
+    assert r.returncode != 0
+    assert 'claude-worker' in r.stderr

@@ -54,18 +54,45 @@ OPENCODE_MODEL_Q="$(printf '%q' "$OPENCODE_MODEL")"
 # 残したまま、実装 worker だけをローカル LLM に倒せるようにするための口。
 # 全台を opencode にすると死角が揃うので、検証は必ず別系統のモデルで行うこと
 # (scripts/verify-task.sh の既定は sonnet)。
+# 取りうる値:
+#   claude       … Claude Code + Claude モデル (従来)
+#   opencode     … Opencode + ローカル LLM
+#   claude-local … Claude Code + ローカル LLM。サブエージェント / hook / Skill が
+#                  そのまま効くうえ課金 0。実測ではこれが最も成果が良かった
+#                  (三つ巴比較: 301 tests、受け入れ条件の矛盾を自分から報告)。
+#                  ただし Anthropic 公式は非 Claude モデルへの routing を
+#                  サポートしないので、更新で壊れうる前提で使うこと。
+LOCAL_BASE_URL="${SQUAD_LOCAL_BASE_URL:-http://dell-server01.cs.local:4000}"
+LOCAL_MODEL="${SQUAD_LOCAL_MODEL:-qwen38-flash-next}"
+LOCAL_AUTH_TOKEN="${SQUAD_LOCAL_AUTH_TOKEN:-sk-local-dummy}"
+LOCAL_CONTEXT_TOKENS="${SQUAD_LOCAL_CONTEXT_TOKENS:-262144}"
 WORKER_AGENTS=('' claude claude claude)   # index 1-3 を使う (0 は捨て)
 ANY_OPENCODE=0
+ANY_CLAUDE_LOCAL=0
 for n in 1 2 3; do
     _var="SQUAD_W${n}_AGENT"
     _val="${!_var:-claude}"
-    if [ "$_val" != "claude" ] && [ "$_val" != "opencode" ]; then
-        echo "$_var は claude か opencode を指定してください (指定値: $_val)" >&2
-        exit 1
-    fi
+    case "$_val" in
+        claude) ;;
+        opencode) ANY_OPENCODE=1 ;;
+        claude-local) ANY_CLAUDE_LOCAL=1 ;;
+        *)
+            echo "$_var は claude / opencode / claude-local のいずれかを指定してください (指定値: $_val)" >&2
+            exit 1
+            ;;
+    esac
     WORKER_AGENTS[n]="$_val"
-    [ "$_val" = "opencode" ] && ANY_OPENCODE=1
 done
+# claude-local worker 用の CLAUDE_CONFIG_DIR。~/.claude/settings.json の
+# permissions.ask (Bash(git commit*) / Bash(rm *) 等) は project 側 allow でも
+# bypassPermissions でも突破できず、tmux 越しの worker を無言で止める。
+# user 設定の出所ごと差し替えて、手元の対話設定に触れずに ask を外す。
+# 詳細は config/claude-worker/README.md。
+WORKER_CONFIG_DIR="$SCRIPT_DIR/config/claude-worker"
+if [ "$ANY_CLAUDE_LOCAL" = "1" ] && [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
+    echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker に必須)" >&2
+    exit 1
+fi
 # Opencode worker は Skill を ~/.claude/skills から skills.paths 経由で読む。
 # 未設定だと recommended_skills が黙って無視されるだけで失敗が見えないため、警告する。
 if [ "$ANY_OPENCODE" = "1" ]; then
@@ -139,11 +166,11 @@ else
 fi
 # worker ごとの Agent 表記 (dashboard / dispatcher.md の両方で使う)
 worker_agent_label() {
-    if [ "${WORKER_AGENTS[$1]}" = "opencode" ]; then
-        echo "Opencode ($OPENCODE_MODEL)"
-    else
-        echo "Claude (Sonnet)"
-    fi
+    case "${WORKER_AGENTS[$1]}" in
+        opencode) echo "Opencode ($OPENCODE_MODEL)" ;;
+        claude-local) echo "Claude Code ($LOCAL_MODEL)" ;;
+        *) echo "Claude (Sonnet)" ;;
+    esac
 }
 WORKER_ROWS=""
 for n in 1 2 3; do
@@ -306,11 +333,14 @@ Dispatcher が tmux 経由で task YAML の絶対パスを通知してくるま�
 # dispatcher.md 用。Opencode で動いている worker がいるときだけ routing の注意を足す。
 OPENCODE_WORKERS=""
 for n in 1 2 3; do
-    [ "${WORKER_AGENTS[$n]}" = "opencode" ] && OPENCODE_WORKERS="${OPENCODE_WORKERS}W$n "
+    case "${WORKER_AGENTS[$n]}" in
+        opencode | claude-local) OPENCODE_WORKERS="${OPENCODE_WORKERS}W$n " ;;
+    esac
 done
 if [ -n "$OPENCODE_WORKERS" ]; then
-    DISPATCHER_OPENCODE_NOTE="**${OPENCODE_WORKERS%% }は Opencode (ローカル LLM $OPENCODE_MODEL) で動いている**。\
-これらへの task YAML には \`agent: opencode\` を書く。振ってよいのは仕様が確定していて \
+    DISPATCHER_OPENCODE_NOTE="**${OPENCODE_WORKERS%% }はローカル LLM で動いている**。\
+task YAML の \`agent\` は worker 表の Agent 欄に合わせる (Opencode なら \`opencode\`、\
+Claude Code + ローカルモデルなら \`claude\`)。振ってよいのは仕様が確定していて \
 機械検証できる \`verify:\` があるタスク。設計判断そのものや、仕様が固まっていない調査は \
 Claude worker か W4 に振ること。成果物は自己申告の pass を信用せず、必ず verify の実走結果で \
 裏取りしてから merge 判断する (scripts/verify-task.sh を使う。**検証は author と別系統の \
@@ -358,11 +388,12 @@ done
 # Pane タイトル
 tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
 for n in 1 2 3; do
-    if [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
-        tmux select-pane -t "$SESSION_NAME:0.$n" -T "Worker$n (Opencode)"
-    else
-        tmux select-pane -t "$SESSION_NAME:0.$n" -T "Worker$n (Claude)"
-    fi
+    case "${WORKER_AGENTS[$n]}" in
+        opencode) _t="Worker$n (Opencode)" ;;
+        claude-local) _t="Worker$n (CC+local)" ;;
+        *) _t="Worker$n (Claude)" ;;
+    esac
+    tmux select-pane -t "$SESSION_NAME:0.$n" -T "$_t"
 done
 if [ "$ENABLE_OPENCODE" = "1" ]; then
     tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Flash-Next)"
@@ -401,7 +432,12 @@ tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSIO
 # --settings: worker の cwd が任意の WORKSPACE のため、project hooks が読まれない。
 #   SCRIPT_DIR/.claude/settings.local.json を明示ロードして squad の hook を有効化。
 for n in 1 2 3; do
-    if [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
+    if [ "${WORKER_AGENTS[$n]}" = "claude-local" ]; then
+        # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
+        # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
+        # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+    elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
         _pf="$(opencode_prompt_file "$n")"
@@ -449,11 +485,11 @@ echo ""
 echo "Pane構成:"
 echo "  Pane 0: Dispatcher (Claude $DISPATCHER_MODEL, タスク分配)"
 for n in 1 2 3; do
-    if [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
-        echo "  Pane $n: Worker $n (Opencode, $OPENCODE_MODEL) ← SQUAD_W${n}_AGENT=opencode"
-    else
-        echo "  Pane $n: Worker $n (Claude)"
-    fi
+    case "${WORKER_AGENTS[$n]}" in
+        opencode) echo "  Pane $n: Worker $n (Opencode, $OPENCODE_MODEL) ← SQUAD_W${n}_AGENT=opencode" ;;
+        claude-local) echo "  Pane $n: Worker $n (Claude Code + $LOCAL_MODEL) ← SQUAD_W${n}_AGENT=claude-local" ;;
+        *) echo "  Pane $n: Worker $n (Claude)" ;;
+    esac
 done
 if [ "$ENABLE_OPENCODE" = "1" ]; then
     echo "  Pane 4: Opencode (Flash-Next, デフォルトモデル local/qwen38-flash-next)"
