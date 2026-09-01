@@ -9,10 +9,20 @@
 # 使い方:
 #   scripts/verify-task.sh <task_yaml> <worktree> [attempt] [worker_num]
 #
+# 既定は Claude (sonnet)。同一 Issue で 3 モデルを実測した結果:
+#   local/qwen38-flash-next … 機械検証は最も厳密 (独自 9 ケース + HEAD~1 との実走バイト比較)
+#                             だが author と死角を共有し、意味論の欠陥は素通しした。無料。
+#   haiku                  … pytest 1 回 + チェックリスト読みのみ。ローカルより弱く、
+#                             課金する意味が無かった。
+#   sonnet                 … Issue 本文とスコープを照合し、受け入れ条件の曖昧さ
+#                             (「1 バイトも変わらない」) を指摘できた唯一のモデル。
+# 判断の検証まで求めるなら sonnet。機械検証だけで足りる (最終ゲートが Codex cross-review)
+# なら SQUAD_VERIFIER_CMD=opencode SQUAD_VERIFIER_MODEL=local/qwen38-flash-next で無料。
+#
 # env:
-#   SQUAD_VERIFIER_MODEL  検証に使うモデル (既定: local/ornith-15-35b-a3b)
+#   SQUAD_VERIFIER_MODEL  検証に使うモデル (既定: sonnet)
 #                         author と別モデルであること。同じにすると自己採点に戻る。
-#   SQUAD_VERIFIER_CMD    実行する CLI (既定: opencode)
+#   SQUAD_VERIFIER_CMD    実行する CLI (claude | opencode。既定: claude)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,8 +33,8 @@ TASK_YAML="${1:-}"
 WORKTREE="${2:-}"
 ATTEMPT="${3:-1}"
 WORKER_NUM="${4:-}"
-MODEL="${SQUAD_VERIFIER_MODEL:-local/ornith-15-35b-a3b}"
-CLI="${SQUAD_VERIFIER_CMD:-opencode}"
+MODEL="${SQUAD_VERIFIER_MODEL:-sonnet}"
+CLI="${SQUAD_VERIFIER_CMD:-claude}"
 
 if [ -z "$TASK_YAML" ] || [ -z "$WORKTREE" ]; then
     echo "usage: verify-task.sh <task_yaml> <worktree> [attempt] [worker_num]" >&2
@@ -72,8 +82,23 @@ rm -f "$VERDICT"
 echo "[verify-task] model=$MODEL worker=$WORKER_NUM attempt=$ATTEMPT"
 echo "[verify-task] worktree=$WORKTREE"
 
+SQUAD_ROOT_FOR_VERDICT="$(cd "$REPORTS_DIR/../../.." && pwd)"
+
 cd "$WORKTREE"
-"$CLI" run --auto -m "$MODEL" "$PROMPT" || true
+case "$(basename "$CLI")" in
+    claude)
+        # headless (-p) では承認プロンプトに答える人がいないため bypassPermissions。
+        # verdict は worktree の外 (queue 配下) に書くので --add-dir が要る。
+        # prompt は stdin から渡す (位置引数だと長文・先頭文字で拾われないことがある)
+        printf '%s' "$PROMPT" | "$CLI" -p --model "$MODEL" \
+            --permission-mode bypassPermissions \
+            --allowedTools 'Bash Read Write Grep Glob' \
+            --add-dir "$SQUAD_ROOT_FOR_VERDICT" || true
+        ;;
+    *)
+        "$CLI" run --auto -m "$MODEL" "$PROMPT" || true
+        ;;
+esac
 
 if [ ! -f "$VERDICT" ]; then
     echo "[verify-task] verdict が書かれませんでした: $VERDICT" >&2

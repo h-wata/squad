@@ -61,7 +61,7 @@ worker: worker<N>
 verifier_agent: verifier      # 独立検証者（author とは別）
 attempt: <attempt>
 result: pass | fail | inconclusive
-checked_at: "YYYY-MM-DDTHH:MM:SS+09:00"
+checked_at: "YYYY-MM-DDTHH:MM:SS+09:00"   # 推測で書かない。date -Iseconds の実行結果を使う
 commands:
   - cmd: "pytest tests/ -q"
     exit_code: 0
