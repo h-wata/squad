@@ -98,8 +98,7 @@ fi
 # 応答が速すぎて中断案内を見逃す偽陰性はありうるが、その場合に余分な Enter が
 # 空の入力欄へ行くだけで無害なので、見逃すより打ち直すほうに倒す。
 confirm_submitted() {
-  local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 1
     if tmux capture-pane -pt "$TARGET" | grep -q 'interrupt'; then
       return 0
@@ -107,7 +106,7 @@ confirm_submitted() {
   done
   echo "[notify-worker] Enter 後に worker が動き出した形跡がありません。Enter を打ち直します" >&2
   tmux send-keys -t "$TARGET" Enter
-  for i in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     sleep 1
     if tmux capture-pane -pt "$TARGET" | grep -q 'interrupt'; then
       return 0

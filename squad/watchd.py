@@ -235,6 +235,16 @@ class Tmux:
         return self._run(['send-keys', '-t', pane, keys]).returncode == 0
 
 
+def _state_dir() -> Path:
+    """Squad hook が worker の状態を書くディレクトリ (呼び出しのたびに環境変数を見る).
+
+    ROOT 固定にすると、テストが開発機の実 state/w*.json を読んでしまい、直近に
+    hook が動いたかどうかで stall 判定テストの合否が変わる (実際に 3 件が flaky
+    だった)。SQUAD_STATE_DIR があればそちらを見る。
+    """
+    return Path(os.environ.get('SQUAD_STATE_DIR') or (ROOT / 'state'))
+
+
 class Watcher:
     """監視ループ本体."""
 
@@ -651,7 +661,7 @@ class Watcher:
         event 種別には依存しない (Claude Code バージョン間で field 名が揺れるため、
         鮮度ベースで判定する)。
         """
-        state_file = ROOT / 'state' / f'w{n}.json'
+        state_file = _state_dir() / f'w{n}.json'
         try:
             d = json.loads(state_file.read_text())
             ev, ts = d.get('last_event', ''), d.get('last_event_at', '')

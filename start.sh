@@ -342,7 +342,6 @@ if [ -f "$WORKER_QWEN_MD" ]; then
 else
     OPENCODE_WORKER_NOTE=""
 fi
-WORKER_AGENT_ARG_OPENCODE_Q="$(printf '%q' 'WORKER_AGENT=opencode') $(printf '%q' "WORKER_AGENT_NOTE=$OPENCODE_WORKER_NOTE")"
 
 # Opencode の --prompt は system prompt ではなく「最初のユーザ発言」として届くため、
 # worker.md をそのまま渡すと起動直後に 1 ターン走る。実測では queue/ を勝手に漁って
