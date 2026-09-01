@@ -26,12 +26,15 @@ exit code は NG が 1 件でもあれば 1。WARN では落とさない (fail-s
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# 走査対象の squad root は _repo_root() で解決する。スクリプト位置に固定すると、
+# 別の squad root (検証用のコピー等) に対して実行しても本物の queue を走査してしまい、
+# task_id 重複を誤検出する。テストが開発者の queue の中身に依存する原因でもあった。
 REPORT_GLOB_PATTERNS = ('queue/projects/*/reports/*.yaml',)
 # 「未記入」とみなす値。assumptions に "none" と明記するのは有効な回答なので含めない。
 PLACEHOLDER_VALUES = ('-', 'n/a', 'tbd', '')
@@ -171,10 +174,18 @@ def check_report_yaml(path: Path) -> list[Result]:
     return results
 
 
+def _repo_root() -> Path:
+    """走査対象の squad root を返す (呼び出しのたびに環境変数を見る).
+
+    import 時に固定すると、テストや別 root からの実行で差し替えられない。
+    """
+    return Path(os.environ.get('SQUAD_ROOT') or Path(__file__).resolve().parent.parent)
+
+
 def find_repo_report_yaml_files() -> list[Path]:
     files: list[Path] = []
     for pattern in REPORT_GLOB_PATTERNS:
-        files.extend(sorted(REPO_ROOT.glob(pattern)))
+        files.extend(sorted(_repo_root().glob(pattern)))
     return files
 
 

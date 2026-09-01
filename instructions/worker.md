@@ -117,6 +117,16 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
      `attempt`（試行回数, 1 始まり）、`worker_num`（自分の N）
    - verifier は `verify.commands` を worktree で実走し、acceptance_criteria と照合して
      `reports/worker{N}_verdict.yaml`（result: pass|fail|inconclusive + 証拠）を書く。
+   - **起動に失敗したら (モデル未配信で 401/400 等)、諦めずに次を実行する:**
+
+     ```bash
+     {SQUAD_ROOT}/scripts/verify-task.sh <task_yaml> <worktree> <attempt> <N>
+     ```
+
+     同じ `verifier.md` を使って headless で検証し、同じ verdict を書く。
+     **fork や自分自身で代替しないこと** — author と同じモデルでは死角を共有し、
+     実測でも意味論の欠陥を素通しした。失敗した事実と代替手段は report の
+     `issues:` に残す。
 2. verdict を Read して分岐:
    - **result: pass** → 報告プロトコルへ。`status: completed`、`verify_status: pass`。
    - **result: fail / inconclusive** → verdict の `recommendations` / `unmet_acceptance_criteria`

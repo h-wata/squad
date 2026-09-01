@@ -18,12 +18,15 @@ task_id 重複検査 (項目6) は、位置引数のみの実行でも常にリ�
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 import sys
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# 走査対象の squad root は _repo_root() で解決する。スクリプト位置に固定すると、
+# 別の squad root (検証用のコピー等) に対して実行しても本物の queue を走査してしまい、
+# task_id 重複を誤検出する。テストが開発者の queue の中身に依存する原因でもあった。
 TASK_GLOB_PATTERNS = ('queue/projects/*/tasks/*.yaml', 'queue/projects/*/archive/*.yaml')
 
 REQUIRED_FIELDS = (
@@ -68,11 +71,19 @@ def is_placeholder(value: object) -> bool:
     return value.strip().lower() in PLACEHOLDER_VALUES
 
 
+def _repo_root() -> Path:
+    """走査対象の squad root を返す (呼び出しのたびに環境変数を見る).
+
+    import 時に固定すると、テストや別 root からの実行で差し替えられない。
+    """
+    return Path(os.environ.get('SQUAD_ROOT') or Path(__file__).resolve().parent.parent)
+
+
 def find_repo_task_yaml_files() -> list[Path]:
     """リポジトリ全体の task YAML (tasks/ + archive/) を集める."""
     files: list[Path] = []
     for pattern in TASK_GLOB_PATTERNS:
-        files.extend(sorted(REPO_ROOT.glob(pattern)))
+        files.extend(sorted(_repo_root().glob(pattern)))
     return files
 
 
