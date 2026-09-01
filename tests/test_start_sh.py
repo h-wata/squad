@@ -274,3 +274,37 @@ def test_every_instruction_placeholder_is_rendered_by_start_sh() -> None:
         keys = set(re.findall(r'\{([A-Z_][A-Z0-9_]*)\}', text)) - exempt
         for key in sorted(keys):
             assert f'{key}=' in start_sh, f'{md} の {{{key}}} を渡す render 引数が start.sh に無い'
+
+
+def test_per_worker_agent_flags_are_independent(tmp_path: Path) -> None:
+    """W1/W2/W3 を個別に切り替えられる (W2+W3 だけ Opencode にする等)."""
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(
+        root,
+        workspace,
+        'testsess',
+        extra_env={'SQUAD_W2_AGENT': 'opencode', 'SQUAD_W3_AGENT': 'opencode'},
+    )
+
+    assert r.returncode == 0, r.stderr
+    rows = {
+        n: next(ln for ln in (root / 'dashboard.md').read_text().splitlines() if f'Worker {n} ' in ln)
+        for n in (1, 2, 3)
+    }
+    assert 'Claude' in rows[1], rows[1]
+    assert 'Opencode' in rows[2], rows[2]
+    assert 'Opencode' in rows[3], rows[3]
+
+
+def test_w1_agent_rejects_unknown_value(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_W1_AGENT': 'gpt'})
+
+    assert r.returncode != 0
+    assert 'SQUAD_W1_AGENT' in r.stderr

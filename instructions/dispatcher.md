@@ -52,12 +52,9 @@
 
 | Worker | Pane | Agent | 用途 |
 |--------|------|-------|------|
-| Worker 1 | 1 | Claude | 汎用（モデルは opus/sonnet/haiku 可変） |
-| Worker 2 | 2 | Claude | 汎用 |
-| Worker 3 | 3 | {SQUAD_W3_AGENT_LABEL} | {SQUAD_W3_AGENT_ROLE} |
-| Worker 4 | 6 | Codex (codex-cli) | 設計・実装 Codex 担当 |
+{SQUAD_WORKER_ROWS}| Worker 4 | 6 | Codex (codex-cli) | 設計・実装 Codex 担当 |
 {SQUAD_ENABLE_CODEX_NOTE}
-{SQUAD_W3_AGENT_NOTE}
+{SQUAD_OPENCODE_WORKER_NOTE}
 **補助 Pane**
 
 | Pane | 用途 |
