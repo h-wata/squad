@@ -122,6 +122,13 @@
 
 ### Fixed
 
+- `notify-worker.sh` / `watchd.py` の pane 存在確認が、別 session に squad と同名の
+  window があると失敗する問題を修正。`tmux list-panes -t` は target-window なので、
+  素の session 名は「現在の session 内の同名 window」に解決されうる。`-s -t "=<session>:"`
+  で session 指定を強制するようにした。実際に、利用者の手動 tmux session に `pochi` と
+  いう window があったため、`SQUAD_SESSION=pochi` からの Dispatcher / Worker 宛て通知が
+  すべて `pane not found` で落ちていた。
+
 - `squad/notify_queue.py`: `_load_strict()` が `path.exists()` の bool 判定に頼っていた
   ため、dangling symlink（リンク先が無い symlink）や ENOTDIR（親パスが非ディレクトリ）
   のケースで `exists()` が例外を出さず `False` を返し「空 queue」と誤判定されていた。

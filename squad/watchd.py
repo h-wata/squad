@@ -220,7 +220,11 @@ class Tmux:
         return self._run(['has-session', '-t', self.session]).returncode == 0
 
     def pane_exists(self, pane: str) -> bool:
-        r = self._run(['list-panes', '-t', self.session, '-F', '#{session_name}:#{window_index}.#{pane_index}'])
+        # list-panes の -t は target-window。素の session 名は「現在の session 内の同名
+        # window」に解決されうるため、末尾コロンで session 指定を強制し -s で全 pane を見る
+        r = self._run(
+            ['list-panes', '-s', '-t', f'={self.session}:', '-F', '#{session_name}:#{window_index}.#{pane_index}']
+        )
         if r.returncode != 0:
             return False
         return pane in r.stdout.split()

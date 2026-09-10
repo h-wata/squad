@@ -78,7 +78,11 @@ esac
 TARGET="${SESSION}:${PANE}"
 
 # pane の存在確認
-if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -qx "$TARGET"; then
+# list-panes の -t は target-window なので、素の "$SESSION" は「現在の session 内の
+# 同名 window」に解決されうる (別 session に squad と同名の window があると誤爆する)。
+# 末尾のコロンで session 指定を強制し、-s で session 内の全 pane を対象にする。
+if ! tmux list-panes -s -t "=${SESSION}:" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
+  | grep -qx "$TARGET"; then
   if [ "$IS_CODEX" -eq 1 ]; then
     echo "W4 は無効化されています (SQUAD_ENABLE_CODEX=0 で起動された可能性があります)。設計レビュー / cross-review は Claude W1-W3 に振ってください。" >&2
   else
