@@ -237,6 +237,34 @@ squad dashboard              # worker 状態表を Markdown で出力
 daemon 系（report 検知・停止検知・自動承認）は `watch.sh` が担当し、`squad` は
 インタラクティブな単発操作（状態確認・割当・dashboard 生成）に専念する。
 
+## 中隊 (複数 Squad の横断操作)
+
+Squad を複数並行させると「どの Squad が何を抱えているか」が見えなくなる。中隊レベルの
+操作は 3 コマンドで、いずれも ADR 0001 の分離モデル（project ownership マーカー）を
+変えない。
+
+```bash
+squad muster                          # 全 squad session を 1 画面に (status の別名)
+squad order -s pochi,rmf "<指示>"      # 選んだ session の Dispatcher に同じ指示を送る
+squad hq                              # squad を tmux tab に束ねた HQ session を作る
+```
+
+- **`muster`** — session ごとに tmux / watcher の生死、W1-W4 の状態、担当 project 数、
+  未配達 report 数を並べる。read-only で、`squad/state/*.json`（session 非依存なので
+  横断コマンドから書くと壊れる）には触らない。worker 状態は tmux から直接読む。
+  担当 project があるのに session が起動していない場合は「その PJ の report は誰も
+  見ていない」と明示する。
+- **`order`** — 各 session の Dispatcher (pane 0.0) に `notify-worker.sh` 経由で送る。
+  送信先は `-s` で明示するのが既定で、起動中の全 squad に送る場合だけ `--all` を
+  明示的に付ける（暗黙のブロードキャストはしない）。`--dry-run` で送信先だけ確認できる。
+- **`hq`** — HQ session を作り、各 squad session の window 0 を `tmux link-window` で
+  tab として貼る。window 0 が中隊長のコンソール（shell）、window 1.. が各 squad。
+  link なので実体は同じ window で、squad 側の session / watcher / hook は無傷。HQ を
+  kill しても squad は生き残る。再実行すると貼り直す（冪等）。tab 名を session 名に
+  rename するため squad 側の window 名も変わるが、squad session は window 1 枚なので
+  実害はない。watcher も log も担当 project も無い tmux session（利用者の手動セッション）
+  は tab に含めない。
+
 ## CI 監視 (`scripts/ci-watch.sh`)
 
 ```bash

@@ -10,7 +10,10 @@
 #                                            # 起動。-s 省略時は対話で聞く (既定 ros-agents)
 #                                            # -p は担当 project (カンマ区切り)
 #   squad stop [<session>]                   # 停止 (並行運用時は明示必須)
-#   squad status                             # セッション / watcher 一覧
+#   squad muster                             # 全 squad を横断表示 (中隊ビュー)
+#   squad order -s <s1,s2> "<指示>"          # 選んだ Dispatcher に同じ指示を送る
+#   squad hq [-s <hq-session>]               # squad を tmux tab に束ねた HQ を作る
+#   squad status                             # muster の別名
 #   squad attach [<session>]                 # tmux attach
 #   squad log [<session>] [-f]               # watcher ログ表示 (-f で follow)
 #   squad root                               # SQUAD_ROOT を表示
@@ -22,24 +25,6 @@ DEFAULT_SESSION="${SQUAD_SESSION:-ros-agents}"
 
 usage() {
     sed -n '/^# 使い方:/,/^# *squad root/{s/^# \{0,3\}//p}' "$SELF"
-}
-
-# squad session 判定: watcher pidfile があるか、watcher プロセスの environ に
-# SQUAD_SESSION が一致するものがあるか
-watcher_pid_for() {
-    local session="$1" pid
-    if [ -f "/tmp/${session}-watch.pid" ]; then
-        pid=$(cat "/tmp/${session}-watch.pid")
-        kill -0 "$pid" 2>/dev/null && { echo "$pid"; return 0; }
-    fi
-    for pid in $(pgrep -f "$SQUAD_ROOT/watch.sh" 2>/dev/null); do
-        local env_session
-        env_session=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
-            | grep -m1 '^SQUAD_SESSION=' | cut -d= -f2)
-        [ -z "$env_session" ] && env_session="ros-agents"
-        [ "$env_session" = "$session" ] && { echo "$pid"; return 0; }
-    done
-    return 1
 }
 
 cmd="${1:-}"
@@ -71,29 +56,8 @@ case "$cmd" in
     stop)
         exec "$SQUAD_ROOT/stop.sh" "$@"
         ;;
-    status)
-        echo "SQUAD_ROOT: $SQUAD_ROOT"
-        echo ""
-        printf '%-20s %-10s %-12s %s\n' "SESSION" "TMUX" "WATCHER" "LOG"
-        # 候補: tmux セッション + watcher pidfile の和集合
-        {
-            tmux list-sessions -F '#{session_name}' 2>/dev/null
-            for f in /tmp/*-watch.pid; do
-                [ -f "$f" ] || continue
-                basename "$f" | sed 's/-watch\.pid$//'
-            done
-        } | sort -u | while read -r s; do
-            [ -z "$s" ] && continue
-            tmux_state="-"
-            tmux has-session -t "$s" 2>/dev/null && tmux_state="alive"
-            watcher_state="-"
-            if pid=$(watcher_pid_for "$s"); then
-                watcher_state="pid:$pid"
-            fi
-            # squad と無関係な tmux セッションは watcher も pidfile も無ければ省く
-            [ "$watcher_state" = "-" ] && [ ! -f "/tmp/${s}-watch.log" ] && continue
-            printf '%-20s %-10s %-12s %s\n' "$s" "$tmux_state" "$watcher_state" "/tmp/${s}-watch.log"
-        done
+    status|muster)
+        exec python3 "$SQUAD_ROOT/squad/squad.py" muster
         ;;
     attach)
         exec tmux attach -t "${1:-$DEFAULT_SESSION}"
@@ -122,8 +86,7 @@ case "$cmd" in
         usage
         ;;
     *)
-        echo "不明なコマンド: $cmd" >&2
-        usage >&2
-        exit 1
+        # squad.py 側のサブコマンド (ls / assign / order / hq / dashboard / ledger / notify) に流す
+        exec python3 "$SQUAD_ROOT/squad/squad.py" "$cmd" "$@"
         ;;
 esac

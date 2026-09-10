@@ -43,6 +43,20 @@
     一致しない。
   - pane 側は空白除去だけでは足りない。TUI が行頭に描く枠線 (`┃` 等) がパスの途中に
     残るため、ASCII 印字文字だけを残して比較する。
+- 中隊 (複数 Squad の横断操作) 用に `squad muster` / `squad order` / `squad hq` を追加。
+  `muster` は全 squad session の tmux / watcher の生死・W1-W4 の状態・担当 project 数・
+  未配達 report 数を read-only で 1 画面に出す (`squad status` はこの別名になった)。
+  `order` は選んだ session の Dispatcher (pane 0.0) に `notify-worker.sh` 経由で同じ
+  指示を送る (`-s` 明示が既定。全 squad へは `--all` を明示したときだけ)。`hq` は各
+  squad session の window 0 を `tmux link-window` で tab として貼った HQ session を作る
+  (window 0 が横断コンソール、window 1.. が各 squad)。link なので squad 側の session /
+  watcher / hook は無傷で、HQ を kill しても squad は生き残る。ADR 0001 の project
+  ownership による分離モデルには手を入れていない (ADR 0006)。
+- `bin/squad` が未知のサブコマンドを `squad/squad.py` に転送するようにした。これまで
+  `ls` / `assign` / `dashboard` / `ledger` / `notify` は README に記載がありながら
+  `bin/squad` 経由では「不明なコマンド」になっていた。あわせて `status` の実装を
+  `squad.py muster` に一本化し、bash 側の重複した watcher 検出 (`watcher_pid_for`) を
+  削除した (`stop.sh` の独立した検出は誤爆防止のため対象外)。
 
 - `scripts/check_task_yaml.py` を追加。task YAML の必須フィールド・`agent`/`model` 値・
   `assigned_to` とファイル名の一致・`task_id` 重複・`acceptance_criteria`・`verify` (または

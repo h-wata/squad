@@ -10,6 +10,9 @@
 Subcommands:
   ls / status               全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
+  muster                    全 squad session を横断表示 (中隊ビュー・read-only)
+  order -s <s1,s2> "..."    選んだ session の Dispatcher に同じ指示を送る
+  hq                        squad session を tab として束ねる HQ session を作る
   dashboard                 Worker ステータス表を生成して stdout
   ledger claim/commit/fail
                              report 配達 ledger (squad/ledger.py, sqlite3) を手動操作する
@@ -31,6 +34,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ledger import delivery_key  # noqa: E402
+from ledger import find_reports  # noqa: E402
+from ledger import report_identity  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
 from notify_queue import NotificationQueue  # noqa: E402
@@ -440,6 +446,235 @@ def cmd_notify_ack(args: argparse.Namespace, cfg: dict) -> int:
     return 0 if ok else 1
 
 
+# ---------- 中隊 (cross-session) ----------
+
+WORKER_SHORT = {'busy': 'busy', 'idle': 'idle', 'permission_wait': 'PERM'}
+
+
+def default_owner() -> str:
+    """マーカーの無い project を担当する既定 session を返す (watchd.py と同じ既定値)."""
+    return os.environ.get('SQUAD_DEFAULT_OWNER') or 'ros-agents'
+
+
+def project_owner(pj_dir: Path) -> str:
+    """`.squad_session` マーカーを読む (無い / 空なら既定 owner)."""
+    try:
+        first = pj_dir.joinpath('.squad_session').read_text().strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return default_owner()
+    return first or default_owner()
+
+
+def owner_map() -> dict[str, list[str]]:
+    """Session 名 -> 担当 project 名リストを返す."""
+    out: dict[str, list[str]] = {}
+    if QUEUE_DIR.is_dir():
+        for d in sorted(QUEUE_DIR.iterdir()):
+            if d.is_dir() and not d.name.startswith('.'):
+                out.setdefault(project_owner(d), []).append(d.name)
+    return out
+
+
+def tmux_sessions() -> set[str]:
+    r = subprocess.run(['tmux', 'list-sessions', '-F', '#{session_name}'], capture_output=True, text=True)
+    return set(r.stdout.split()) if r.returncode == 0 else set()
+
+
+def watcher_pid(session: str) -> int | None:
+    """Watcher の生存確認: pidfile → /proc environ 照合 (bin/squad status と同じ順序)."""
+    try:
+        pid = int(Path(f'/tmp/{session}-watch.pid').read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        pass
+    # watch.sh は watchd.py を exec するため、移行期の両方の名前を拾う
+    r = subprocess.run(['pgrep', '-f', rf'{REPO_ROOT}/(watch\.sh|squad/watchd\.py)'], capture_output=True, text=True)
+    for pid_s in r.stdout.split():
+        try:
+            environ = Path(f'/proc/{pid_s}/environ').read_bytes().decode('utf-8', 'replace')
+        except OSError:
+            continue
+        got = next((v.split('=', 1)[1] for v in environ.split('\0') if v.startswith('SQUAD_SESSION=')), 'ros-agents')
+        if got == session:
+            return int(pid_s)
+    return None
+
+
+def is_squad_session(session: str, owners: dict[str, list[str]]) -> bool:
+    """Squad と無関係な tmux session を弾く (bin/squad status と同じ判定)."""
+    return session in owners or watcher_pid(session) is not None or Path(f'/tmp/{session}-watch.log').exists()
+
+
+def pending_reports(pj_dir: Path, ledger: ReportLedger) -> int:
+    """Dispatcher にまだ配達されていない report 数を数える.
+
+    配達キーの導出は watchd.py と同じく ledger 側の delivery_key に任せる。
+    worker*_review.yaml は schema 上 report_id を持たず `review:<path>:<sha>` を
+    キーにするため、ここで report_id を直接読むと配達済み review を永久に
+    未配達として数えてしまう。
+    """
+    n = 0
+    for project, path in find_reports([pj_dir]):
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            continue  # 走査中に消えた / 読めない
+        sha, meta, parse_error = report_identity(data)
+        report_id, _invalid = delivery_key(meta, sha, parse_error, path)
+        if not ledger.is_delivered(project, report_id):
+            n += 1
+    return n
+
+
+def session_workers(session: str, cfg: dict, alive: bool) -> dict[str, str]:
+    """Session 内の worker 状態を tmux から直接読む (state/*.json は session 非依存なので使わない)."""
+    out: dict[str, str] = {}
+    for name, meta in sorted(cfg.get('workers', {}).items()):
+        if not alive:
+            out[name] = '-'
+            continue
+        pane = meta.get('pane', '').rsplit(':', 1)[-1]
+        reachable, tail = tmux_capture(f'{session}:{pane}')
+        out[name] = WORKER_SHORT.get(detect_status(tail)['status'], '?') if reachable else '-'
+    return out
+
+
+def cmd_muster(_: argparse.Namespace, cfg: dict) -> int:
+    """全 squad session を 1 画面に並べる (read-only)."""
+    owners = owner_map()
+    live = tmux_sessions()
+    sessions = sorted(set(owners) | {s for s in live if is_squad_session(s, owners)})
+    if not sessions:
+        print('squad session が見つかりません (queue/projects/*/.squad_session と tmux を確認してください)')
+        return 1
+
+    ledger = ReportLedger(DEFAULT_LEDGER_PATH)
+    has_ledger = ledger.exists() and ledger.is_sqlite()
+    worker_names = sorted(cfg.get('workers', {}))
+
+    head = ['SESSION', 'TMUX', 'WATCH', *(w.upper() for w in worker_names), 'PJ', 'PEND']
+    rows = []
+    for s in sessions:
+        alive = s in live
+        pid = watcher_pid(s)
+        pjs = owners.get(s, [])
+        pend = sum(pending_reports(QUEUE_DIR / p, ledger) for p in pjs) if has_ledger else -1
+        ws = session_workers(s, cfg, alive)
+        rows.append(
+            (
+                [
+                    s,
+                    'alive' if alive else 'DOWN',
+                    f'pid:{pid}' if pid else '-',
+                    *(ws[w] for w in worker_names),
+                    str(len(pjs)),
+                    '?' if pend < 0 else str(pend),
+                ],
+                s,
+                alive,
+                pjs,
+                pend,
+            )
+        )
+
+    widths = [max(len(h), *(len(r[0][i]) for r in rows)) for i, h in enumerate(head)]
+    print('  '.join(h.ljust(w) for h, w in zip(head, widths)))
+    for cells, *_ in rows:
+        print('  '.join(c.ljust(w) for c, w in zip(cells, widths)))
+
+    print()
+    for _cells, s, alive, pjs, pend in rows:
+        if not pjs:
+            continue
+        flag = '' if alive else '  ← session 未起動 (この PJ の report は誰も見ていない)'
+        print(f'{s}: {", ".join(pjs)}{flag}')
+        if alive and pend > 0:
+            print(f'{" " * len(s)}  未配達 report {pend} 件')
+    return 0
+
+
+def cmd_order(args: argparse.Namespace, _cfg: dict) -> int:
+    """選んだ session の Dispatcher (pane 0.0) に同じ指示を送る."""
+    owners = owner_map()
+    live = tmux_sessions()
+    if args.all:
+        targets = sorted(s for s in live if is_squad_session(s, owners))
+    else:
+        targets = [s.strip() for s in args.sessions.split(',') if s.strip()]
+    if not targets:
+        print('送信先がありません', file=sys.stderr)
+        return 1
+
+    print(f'送信先: {", ".join(targets)}')
+    if args.dry_run:
+        return 0
+
+    failed = 0
+    for s in targets:
+        if s not in live:
+            print(f'  {s}: セッション未起動 (skip)')
+            failed += 1
+            continue
+        env = {**os.environ, 'SQUAD_SESSION': s}
+        # Dispatcher は pane 0.0。notify-worker.sh が pane 直指定と timing 制御を持っている
+        r = subprocess.run([str(NOTIFY_WORKER), '0.0', args.message], env=env, capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f'  {s}: Dispatcher 送信 OK')
+        else:
+            print(f'  {s}: 送信失敗 — {r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "unknown"}')
+            failed += 1
+    return 1 if failed else 0
+
+
+def _tmux(*argv: str) -> subprocess.CompletedProcess:
+    return subprocess.run(['tmux', *argv], capture_output=True, text=True)
+
+
+def cmd_hq(args: argparse.Namespace, _cfg: dict) -> int:
+    """Squad session を tab として束ねる HQ session を作る / 貼り直す.
+
+    window 0 が中隊長のコンソール (shell)、window 1.. は各 squad session の
+    window 0 への link。link なので squad 側の session / watcher / hook は無傷で、
+    HQ を kill しても squad は生き残る。
+    """
+    hq = args.session
+    owners = owner_map()
+    live = tmux_sessions()
+    targets = sorted(s for s in live if s != hq and is_squad_session(s, owners))
+    if not targets:
+        print('起動中の squad session がありません。先に squad start してください', file=sys.stderr)
+        return 1
+
+    if hq not in live:
+        _tmux('new-session', '-d', '-s', hq, '-n', 'HQ')
+        _tmux('send-keys', '-t', f'{hq}:0', f'{sys.argv[0]} muster', 'Enter')
+        print(f'HQ session を作成: {hq}')
+
+    # 既存の link を外す。unlink なので squad 側の window は消えない。
+    # link されていない window (利用者が HQ session に自分で作ったもの) は触らない
+    rows = _tmux('list-windows', '-t', hq, '-F', '#{window_index} #{window_linked}').stdout.splitlines()
+    linked = [r.split()[0] for r in rows if r.split()[1:2] == ['1']]
+    for w in sorted(linked, key=int, reverse=True):
+        _tmux('unlink-window', '-t', f'{hq}:{w}')
+
+    for s in targets:
+        used = [int(w) for w in _tmux('list-windows', '-t', hq, '-F', '#{window_index}').stdout.split()]
+        nxt = max(used, default=0) + 1
+        r = _tmux('link-window', '-s', f'{s}:0', '-t', f'{hq}:{nxt}')
+        if r.returncode != 0:
+            print(f'  {s}: link 失敗 — {r.stderr.strip()}', file=sys.stderr)
+            continue
+        # tab 名を session 名に。link された window は実体が同じなので squad 側の
+        # window 名も変わるが、squad session は window 1 枚なので実害はない
+        _tmux('set-window-option', '-t', f'{hq}:{nxt}', 'automatic-rename', 'off')
+        _tmux('rename-window', '-t', f'{hq}:{nxt}', s)
+        print(f'  {hq}:{nxt} <- {s}')
+
+    print(f'\ntmux attach -t {hq}   (window 0 = HQ, 1.. = 各 squad)')
+    return 0
+
+
 # ---------- entry ----------
 
 
@@ -458,6 +693,20 @@ def main(argv: list[str] | None = None) -> int:
     p_as.add_argument('--no-new', action='store_true', help='skip /new (Codex/W4 only)')
     p_as.add_argument('--dry-run', action='store_true', help='print the cmd without executing')
     p_as.set_defaults(func=cmd_assign)
+
+    p_mu = sub.add_parser('muster', help='全 squad session を横断表示 (中隊ビュー・read-only)')
+    p_mu.set_defaults(func=cmd_muster)
+
+    p_or = sub.add_parser('order', help='選んだ session の Dispatcher に同じ指示を送る')
+    p_or.add_argument('message', help='Dispatcher に送る指示')
+    p_or.add_argument('-s', '--sessions', default='', help='送信先 session (カンマ区切り)')
+    p_or.add_argument('--all', action='store_true', help='起動中の全 squad session に送る (-s の代わりに明示指定)')
+    p_or.add_argument('--dry-run', action='store_true', help='送信先を表示するだけ')
+    p_or.set_defaults(func=cmd_order)
+
+    p_hq = sub.add_parser('hq', help='squad session を tab として束ねる HQ session を作る / 貼り直す')
+    p_hq.add_argument('-s', '--session', default='hq', help='HQ session 名 (既定: hq)')
+    p_hq.set_defaults(func=cmd_hq)
 
     p_db = sub.add_parser('dashboard', help='print worker status table (Markdown)')
     p_db.set_defaults(func=cmd_dashboard)
