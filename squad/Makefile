@@ -2,7 +2,7 @@ SHELL := /bin/bash
 PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 TARGET := $(BINDIR)/squad
-SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))squad.py)
+SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))../bin/squad)
 
 .PHONY: install uninstall check
 
@@ -19,4 +19,4 @@ uninstall:
 
 check:
 	@command -v squad >/dev/null && echo "squad: $$(command -v squad)" || echo "squad not in PATH"
-	@python3 -c "import ast; ast.parse(open('$(SOURCE)').read())" && echo "syntax OK"
+	@bash -n '$(SOURCE)' && echo "syntax OK"

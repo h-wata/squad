@@ -57,6 +57,11 @@
   `bin/squad` 経由では「不明なコマンド」になっていた。あわせて `status` の実装を
   `squad.py muster` に一本化し、bash 側の重複した watcher 検出 (`watcher_pid_for`) を
   削除した (`stop.sh` の独立した検出は誤爆防止のため対象外)。
+- `squad/Makefile` の `make install` が `squad.py` ではなく `bin/squad` を
+  `~/.local/bin/squad` に貼るようにした。従来は install 経由だと `bin/squad` を迂回し、
+  `start` / `stop` / `attach` / `hq` が使えず `status` も横断表示にならなかった。
+  あわせて `squad.py` 側の `status` も `muster` の別名に揃えた (どちらの入口から
+  呼んでも同じ出力になる)。
 
 - `scripts/check_task_yaml.py` を追加。task YAML の必須フィールド・`agent`/`model` 値・
   `assigned_to` とファイル名の一致・`task_id` 重複・`acceptance_criteria`・`verify` (または

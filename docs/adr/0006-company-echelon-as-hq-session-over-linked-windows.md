@@ -92,6 +92,7 @@ ADR 0001 で複数 Squad の並行運用（小隊の連立）は成立した。�
     pane 構成が変わると追従が要る（worker 側の `notify-worker.sh` と同じ性質の依存）
   - 未知のサブコマンドを `bin/squad` から `squad.py` へ転送するようにしたことで、
     `bin/squad` が唯一の正しい入口になった。`squad/Makefile` の `make install` は
-    `squad.py` を直接 `~/.local/bin/squad` に貼るため `bin/squad` を迂回し、
-    `start` / `stop` / `attach` / `hq` が消える。README はこの手順を載せたままで、
-    別途の修正が要る
+    `squad.py` を直接 `~/.local/bin/squad` に貼っていたため `bin/squad` を迂回し、
+    `start` / `stop` / `attach` / `hq` が消えていた。`make install` の貼り先を
+    `bin/squad` に変えて解消したが、二重の入口を作れてしまう構造自体は残っている
+    (`squad.py` を直接叩けば依然として start/stop は無い)

@@ -8,9 +8,9 @@
   - インタラクティブ単発: 状態確認 / 指示 / dashboard 生成 → このスクリプト
 
 Subcommands:
-  ls / status               全 worker の状態一覧 + state/<w>.json 保存
+  ls                        全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
-  muster                    全 squad session を横断表示 (中隊ビュー・read-only)
+  muster / status           全 squad session を横断表示 (中隊ビュー・read-only)
   order -s <s1,s2> "..."    選んだ session の Dispatcher に同じ指示を送る
   hq                        squad session を tab として束ねる HQ session を作る
   dashboard                 Worker ステータス表を生成して stdout
@@ -481,7 +481,7 @@ def tmux_sessions() -> set[str]:
 
 
 def watcher_pid(session: str) -> int | None:
-    """Watcher の生存確認: pidfile → /proc environ 照合 (bin/squad status と同じ順序)."""
+    """Watcher の生存確認: pidfile → /proc environ 照合の順で見る."""
     try:
         pid = int(Path(f'/tmp/{session}-watch.pid').read_text().strip())
         os.kill(pid, 0)
@@ -502,7 +502,7 @@ def watcher_pid(session: str) -> int | None:
 
 
 def is_squad_session(session: str, owners: dict[str, list[str]]) -> bool:
-    """Squad と無関係な tmux session を弾く (bin/squad status と同じ判定)."""
+    """Squad と無関係な tmux session を弾く (旧 bash 実装と同じ判定)."""
     return session in owners or watcher_pid(session) is not None or Path(f'/tmp/{session}-watch.log').exists()
 
 
@@ -684,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_ls = sub.add_parser('ls', help='list worker status')
     p_ls.set_defaults(func=cmd_ls)
-    sub.add_parser('status', help='alias of ls').set_defaults(func=cmd_ls)
+    sub.add_parser('status', help='alias of muster').set_defaults(func=cmd_muster)
 
     p_as = sub.add_parser('assign', help='dispatch a task YAML to a worker via notify-worker.sh')
     p_as.add_argument('worker', help='w1 / w2 / w3 / w4')
