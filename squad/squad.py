@@ -639,6 +639,11 @@ def cmd_hq(args: argparse.Namespace, _cfg: dict) -> int:
     HQ を kill しても squad は生き残る。
     """
     hq = args.session
+    # tmux は session 名の "." と ":" を "_" に置き換える。以降の target 指定は
+    # 置換前の名前を使うため、許すと send-keys / link-window が全て外れる
+    if set('.:') & set(hq):
+        print(f'HQ session 名に "." / ":" は使えません (tmux が "_" に置換する): {hq}', file=sys.stderr)
+        return 1
     owners = owner_map()
     live = tmux_sessions()
     targets = sorted(s for s in live if s != hq and is_squad_session(s, owners))

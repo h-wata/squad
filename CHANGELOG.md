@@ -62,6 +62,13 @@
   `start` / `stop` / `attach` / `hq` が使えず `status` も横断表示にならなかった。
   あわせて `squad.py` 側の `status` も `muster` の別名に揃えた (どちらの入口から
   呼んでも同じ出力になる)。
+- `notify-worker.sh` の `send-keys` に `-l --` を付け、テキストを常に literal として
+  送るようにした。従来は `Enter` / `C-c` 単体がキー送信として解釈され、`-R` のような
+  ハイフン始まりは `send-keys` のオプションとして食われていた。`squad order` は任意の
+  自由記述を通すため実際に踏める経路だった。
+- `squad hq -s <name>` で `.` / `:` を含む名前を拒否するようにした。tmux が session 名の
+  これらを `_` に置換する一方、実装は置換前の名前を target に使い続けるため、
+  send-keys / link-window が全て外れたまま成功終了していた。
 
 - `scripts/check_task_yaml.py` を追加。task YAML の必須フィールド・`agent`/`model` 値・
   `assigned_to` とファイル名の一致・`task_id` 重複・`acceptance_criteria`・`verify` (または

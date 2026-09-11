@@ -143,7 +143,10 @@ send_line() {
   # なり、マルチバイト文字は 0x80 以上なので自然に除外される。
   probe="$(printf '%s' "$text" | LC_ALL=C grep -oE '[!-~]{8,}' | tail -1 || true)"
   for attempt in $(seq 1 "$SEND_RETRIES"); do
-    tmux send-keys -t "$TARGET" "$text"
+    # -l -- は必須。付けないと tmux が text をキー名 / オプションとして解釈し、
+    # "Enter" や "C-c" 単体は文字列でなくキー送信に、"-R" 等は send-keys の
+    # オプションになる (squad order は任意の自由記述を通すため実際に踏める)
+    tmux send-keys -l -t "$TARGET" -- "$text"
     sleep "$pre_enter_sleep"
     if [ -z "$probe" ] \
       || tmux capture-pane -pt "$TARGET" | LC_ALL=C tr -cd '!-~' | LC_ALL=C grep -qF "$probe"; then

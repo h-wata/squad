@@ -9,7 +9,9 @@ tmux session の除外。
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -87,3 +89,53 @@ def test_is_squad_session_excludes_unrelated_tmux(tmp_path: Path, monkeypatch: p
     assert squad_cli.is_squad_session('rmf', owners)
     # 担当 project も watcher も log も無い tmux session (利用者の手動セッション) は出さない
     assert not squad_cli.is_squad_session('1', owners)
+
+
+# --- order / hq: 他 session を触る破壊的コマンドのガード ---
+
+
+def _order_args(**kw) -> argparse.Namespace:
+    base = {'message': 'やあ', 'sessions': '', 'all': False, 'dry_run': True}
+    return argparse.Namespace(**{**base, **kw})
+
+
+def _live(monkeypatch: pytest.MonkeyPatch, sessions: list[str], squad: list[str]) -> None:
+    monkeypatch.setattr(squad_cli, 'owner_map', dict)
+    monkeypatch.setattr(squad_cli, 'tmux_sessions', lambda: set(sessions))
+    monkeypatch.setattr(squad_cli, 'is_squad_session', lambda s, _o: s in squad)
+
+
+def test_order_without_target_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _live(monkeypatch, ['rmf', 'pochi'], ['rmf', 'pochi'])
+    # 宛先を書き忘れた / -s が空 → 全 squad へのブロードキャストに落ちてはいけない
+    assert squad_cli.cmd_order(_order_args(), {}) == 1
+    assert squad_cli.cmd_order(_order_args(sessions='  ,  '), {}) == 1
+
+
+def test_order_all_is_limited_to_squad_sessions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _live(monkeypatch, ['rmf', 'pochi', 'mytmux'], ['rmf', 'pochi'])
+    assert squad_cli.cmd_order(_order_args(all=True), {}) == 0
+    # 利用者の手動 session (mytmux) には撃たない
+    assert '送信先: pochi, rmf' in capsys.readouterr().out
+
+
+def test_order_skips_dead_session_and_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    _live(monkeypatch, ['rmf'], ['rmf'])
+    sent = []
+    monkeypatch.setattr(
+        squad_cli.subprocess, 'run', lambda cmd, **kw: sent.append(cmd) or subprocess.CompletedProcess(cmd, 0, '', '')
+    )
+    # 停止中の session は skip するが、成功と報告してはいけない
+    assert squad_cli.cmd_order(_order_args(sessions='rmf,gone', dry_run=False), {}) == 1
+    assert len(sent) == 1 and sent[0][1:] == ['0.0', 'やあ']
+
+
+def test_hq_rejects_names_tmux_would_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+    monkeypatch.setattr(squad_cli, '_tmux', lambda *a: called.append(a))
+    # tmux は "." / ":" を "_" にするので、以降の target 指定が全部外れる
+    assert squad_cli.cmd_hq(argparse.Namespace(session='my.hq'), {}) == 1
+    assert squad_cli.cmd_hq(argparse.Namespace(session='my:hq'), {}) == 1
+    assert called == []
