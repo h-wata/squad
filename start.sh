@@ -306,6 +306,32 @@ SCRIPT_DIR_Q="$(printf '%q' "$SCRIPT_DIR")"
 WORKSPACE_Q="$(printf '%q' "$WORKSPACE")"
 SETTINGS_FILE_Q="$(printf '%q' "$SETTINGS_FILE")"
 
+# --- worker (claude / claude-local) の Remote Control (RC) を既定 off にする (SQUAD-279) ---
+# RC セッションが増殖する問題への対応。claude CLI の disableRemoteControl 設定
+# (公式: https://code.claude.com/docs/en/settings-reference#disableremotecontrol) を
+# settings.local.json に足した JSON を worker 起動専用に --settings へ渡す。
+# Dispatcher (SETTINGS_FILE_Q) はこの対象外 — ユーザーが外部 (claude.ai/code や
+# モバイルアプリ) から Dispatcher に直接繋ぎたい場合があるため据え置き。
+# SQUAD_ENABLE_RC=1 で worker も含めて RC を有効化できる (既定は 0 = off)。
+ENABLE_RC="${SQUAD_ENABLE_RC:-0}"
+if [ "$ENABLE_RC" = "1" ]; then
+    WORKER_SETTINGS_FILE_Q="$SETTINGS_FILE_Q"
+else
+    WORKER_SETTINGS_JSON="$(SETTINGS_FILE_PATH="$SETTINGS_FILE" python3 -c "
+import json
+import os
+
+with open(os.environ['SETTINGS_FILE_PATH'], encoding='utf-8') as f:
+    data = json.load(f)
+data['disableRemoteControl'] = True
+print(json.dumps(data))
+")" || {
+        echo "エラー: worker 用 settings JSON (disableRemoteControl 付き) の生成に失敗しました" >&2
+        exit 1
+    }
+    WORKER_SETTINGS_FILE_Q="$(printf '%q' "$WORKER_SETTINGS_JSON")"
+fi
+
 # Dispatcher 起動モデルも同様に client (start.sh 実行時) 側で解決してから %q で埋め込む。
 # 既存 tmux server では新規 pane に client の環境変数が継承されないため、
 # pane 側 shell に ${SQUAD_DISPATCHER_MODEL:-sonnet} をリテラルのまま渡すと
@@ -464,7 +490,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
@@ -479,7 +505,7 @@ for n in 1 2 3; do
         _bs_q="$(printf '%q' "$(opencode_bootstrap "$n")")"
         tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --prompt $_bs_q $WORKSPACE_Q" Enter
     else
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     fi
 done
 
