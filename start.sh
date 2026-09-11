@@ -41,10 +41,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # SQUAD_ENABLE_CODEX=0 で Pane 6 (Worker 4 / Codex) の起動を丸ごとスキップできる
 # (codex CLI を使わない環境向け)。既定は 1 (従来通り Codex を起動)。
 ENABLE_CODEX="${SQUAD_ENABLE_CODEX:-1}"
-# SQUAD_ENABLE_OPENCODE=0 で Pane 4 (Opencode) の起動を丸ごとスキップできる
-# (汎用ターミナルとして使い続けたい環境向け)。既定は 1 (Opencode を起動)。
-# Pane 4 を Opencode に置換するため、純粋な汎用-shell は Pane 5 (Aux-Shell) が担当。
-ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-1}"
+# SQUAD_ENABLE_OPENCODE=1 で Pane 4 (Opencode) を起動できる。既定は 0 (汎用ターミナル)。
+# narrow pane で opentui キャンバス描画が SIGILL クラッシュする不具合があり、
+# 常用の必要性も薄いため既定オフに変更。
+ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-0}"
 # Opencode の既定モデル。常用は Flash-Next (LAN vLLM 上の local/qwen38-flash-next)。
 # 切り替えの根拠は ADR 0004。
 OPENCODE_MODEL="local/qwen38-flash-next"
@@ -464,7 +464,7 @@ fi
 # ワークスペースを渡し、カレントディレクトリもワークスペースに合わせる。system prompt
 # 注入は不要 (対話 / send-keys での指示受け取り方式)。
 if [ "$ENABLE_OPENCODE" = "1" ]; then
-    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && opencode -m $OPENCODE_MODEL_Q $WORKSPACE_Q" Enter
+    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && opencode -m $OPENCODE_MODEL_Q --mini $WORKSPACE_Q" Enter
 else
     tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
 fi
@@ -503,7 +503,10 @@ for n in 1 2 3; do
         # (Claude worker の permission-mode 相当)。external_directory が既定 ask のため、
         # これが無いと $SQUAD_ROOT 配下の task YAML すら読めない。
         _bs_q="$(printf '%q' "$(opencode_bootstrap "$n")")"
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --prompt $_bs_q $WORKSPACE_Q" Enter
+        # --mini: フルTUI (opentui キャンバス描画) が narrow pane で SIGILL クラッシュ
+        # するのを確認したため、軽量な最小インタラクティブUIに切り替えて回避。
+        # --auto --prompt での起動と send-keys での対話継続はそのまま使える。
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q" Enter
     else
         tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     fi

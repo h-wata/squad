@@ -59,7 +59,7 @@ tmux session: ros-agents
   Pane 6: Worker 4 (Codex)            — 設計・cross-review 担当
 ```
 
-`SQUAD_ENABLE_OPENCODE=0` で Pane 4 を汎用ターミナル (`Terminal`) として起動できる。
+Pane 4 は既定で汎用ターミナル (`Terminal`)。`SQUAD_ENABLE_OPENCODE=1` で Opencode (Flash-Next) として起動できる。
 
 Dispatcher はコードを書かない。ユーザー指示を受けて `queue/projects/<project>/tasks/worker{N}.yaml`
 にタスクを書き、Worker に通知し、`queue/projects/<project>/reports/worker{N}_report.yaml` の
