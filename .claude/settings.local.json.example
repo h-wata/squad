@@ -39,6 +39,17 @@
     },
     "permissions": {
         "additionalDirectories": [],
+        "ask": [
+            "Bash(gh api:*)",
+            "Bash(gh api -X POST:*)",
+            "Bash(gh api -X PATCH:*)",
+            "Bash(gh api -X PUT:*)",
+            "Bash(gh api -X DELETE:*)",
+            "Bash(gh api --method POST:*)",
+            "Bash(gh api --method PATCH:*)",
+            "Bash(gh api --method PUT:*)",
+            "Bash(gh api --method DELETE:*)"
+        ],
         "allow": [
             "Bash(chmod:*)",
             "Bash(tmux list-sessions:*)",

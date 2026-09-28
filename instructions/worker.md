@@ -324,6 +324,10 @@ report に混在させない。** `source_tree_status` が複数行になる場�
    突破できない（実測済み）。tmux の pane には承認する人がいないため、`rm` を打つと
    そこで無言で停止し、Dispatcher からは「作業中」に見えたまま何時間も止まる。
    一時ファイルが要るなら `mktemp -d` を使い、後始末は OS に任せること
+8. **permission rule / auto mode classifier に拒否されたコマンドを、別の経路
+   （`gh api` の直叩き、`curl`、別のツール）で言い換えて実行しない**。拒否は障害では
+   なく安全機構。拒否されたら `status: blocked` で report を書き、**拒否されたコマンドを
+   そのまま notes に書いて** Dispatcher に差し戻すこと
 
 ## 注意事項
 

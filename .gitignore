@@ -16,3 +16,7 @@ docs/poc-reports/
 
 # CodeGraph local index (ローカル生成物、commit 不要)
 .codegraph/
+
+# ローカル実行時に生成されるログ (commit 不要)
+watch.log
+even-terminal-*.log

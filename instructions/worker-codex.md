@@ -113,6 +113,10 @@ criteria が検証形式を指定していればそちらを優先する。自�
 - blocked の場合は `issues` / `notes` にブロッカーと残作業を記載
 - `git_head` (任意): 作業対象 worktree の HEAD SHA
 - `summary` は結果中心に短く書く
+- `details_path` / `review_path` / `verdict_path` 等にパスを書く場合、report を出力する
+  **直前に** `ls <path>` でファイルが実在することを確認する。前タスクの成果物を上書きせず
+  残したまま、新しいパスだけ report に書かない（そのファイルは前タスクの内容のままで
+  今回の成果物ではない）
 
 report を正しく保存すれば watcher が Dispatcher へ通知する。`report_id` が無い / UUID で
 ない report は握り潰されず `[REPORT-INVALID]` として通知され、再出力を求められる。
@@ -122,3 +126,8 @@ report を正しく保存すれば watcher が Dispatcher へ通知する。`rep
 Codex は承認待ちなしで起動されるため、タスク範囲内の調査・編集・検証・報告は止まらず進める。
 一方、タスク範囲の拡大、危険操作、認証や外部調整が必要な場合は推測で進めず、`status: blocked`
 で Dispatcher に返す。Rate Limit 等で継続不能な場合も、完了済み作業と残作業を report に残す。
+
+permission rule / auto mode classifier に拒否されたコマンドを、別の経路（`gh api` の直叩き、
+`curl`、別のツール）で言い換えて実行してはならない。拒否は障害ではなく安全機構である。
+拒否されたら `status: blocked` で report を書き、拒否されたコマンドをそのまま notes に書いて
+Dispatcher に差し戻すこと。
