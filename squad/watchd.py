@@ -8,7 +8,7 @@
   2. 承認オートアンサー: 残存する承認/権限プロンプトを自動受理 (bypass の保険)。
   3. 停止検知: タスク未報告かつ pane 無変化が続いたら Dispatcher へ通報。
   4. discovery / sweep: Issue/PR/CI/TODO を低頻度で発見して triage inbox + Dispatcher nudge。
-  5. worktree GC: merged かつ clean な専用 worktree だけ掛除。
+  5. worktree GC: merged かつ clean な専用 worktree だけ削除。
 
 起動: start.sh が nohup で `watch.sh` (このスクリプトの薄いラッパ) を叩く。手動: ./watch.sh &
 設定 (env): WATCH_INTERVAL(s) / WATCH_STALL_CYCLES / WATCH_STALL_RESUME_CYCLES / WATCH_BOOT_DELAY(s)
@@ -260,8 +260,13 @@ class Watcher:
         self.resume_count: dict[int, int] = {}
         self.last_discovery = 0.0
         self.last_sweep = 0.0
+        # last_gc は「直近 GC 実行時刻」。0 のままだと起動直後の初サイクルで無条件に GC が
+        # 走り、worktree が 20 件を超えると fetch/判定 (git 1 操作 ≈ 2s) がループを数十秒
+        # ブロックする (実測: 30 件で ≈50s)。run() が boot_delay 経路で起動時刻を seed する。
+        # (0 のままなので run() を通さない運用では従来どおり初サイクルで GC が走る。)
         self.last_gc = 0.0
         self._queue_write_ok = True
+        self._queue_readable = True
 
     # ---- ログ / 通知 ----
 
@@ -329,6 +334,10 @@ class Watcher:
             due = self.nq.due_fallback(int(now), thresholds)
         except QueueUnreadableError as e:
             self._queue_write_ok = False
+            # events/ack が読めない = 未 ack の実態が一切見えない。write_health 側にも
+            # 伝わらず queue_write_ok: true の健全な health が残り続けるため、
+            # 「読取り健全性」をこちらのフラグで持つ (unacked_* の欠落と整合させる)。
+            self._queue_readable = False
             self._send_queue_alert(
                 now,
                 f'[QUEUE-ERROR] 通知 queue を読めません ({e})。未 ack 通知が見えない状態です。'
@@ -890,7 +899,7 @@ class Watcher:
         return subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True, check=False)
 
     def gc_worktrees(self) -> None:
-        """Merge 済みかつ clean な専用 worktree だけ自動掛除する.
+        """Merge 済みかつ clean な専用 worktree だけ自動削除する.
 
         dirty (未コミット変更) / 未 merge / 判定不能 (fetch 失敗) は絶対に触らない。
         """
@@ -926,7 +935,7 @@ class Watcher:
                 skipped += 1
                 self.log(f'gc skip (remove failed): {wt}')
         if removed:
-            self.log(f'gc: {removed} worktree を掛除 (skip {skipped})')
+            self.log(f'gc: {removed} worktree を削除 (skip {skipped})')
 
     # ---- ループ ----
 
@@ -987,10 +996,14 @@ class Watcher:
         # 通知は失われない。
         try:
             if self.cfg.notify_queue_enabled or self.nq.dir.exists():
-                self.nq.write_health(owned_projects=len(self.owned), write_ok=self._queue_write_ok)
+                self.nq.write_health(
+                    owned_projects=len(self.owned),
+                    write_ok=self._queue_write_ok and self._queue_readable,
+                )
         except OSError as e:
             self.log(f'[WARN] health.json 更新に失敗 (次サイクルで再試行): {e}')
         self._queue_write_ok = True
+        self._queue_readable = True
 
     def run(self) -> int:
         c = self.cfg
@@ -1004,6 +1017,12 @@ class Watcher:
         self.prepare_ledger()
         self.warn_missing_markers()
         self.sleep(c.boot_delay)
+        # GC を起動直後に走らせない。last_gc=0 初期化だと最初の cycle() で無条件に
+        # gc_worktrees() に入り、worktree が 20 件を超えると fetch/判定 (git 1 操作 ≈ 2s)
+        # がループを数十秒ブロックする (実測: 30 件で ≈50s)。report-bridge の応答性を
+        # 優先し、初回は gc_interval 分待ってから実行する。boot_delay の sleep を
+        # monkeypatch する時間テストがあるため sleep 後の現在時刻を基にする。
+        self.last_gc = time.time()
         while True:
             if not self.tmux.has_session():
                 self.log(f"session '{c.session}' が無いので終了")

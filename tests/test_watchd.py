@@ -967,7 +967,12 @@ class TestCorruptQueueViaCycle:
 
         assert w.nq.events_path.read_text() == '{corrupt'  # 上書きして既存 event を消していない
         assert any('[QUEUE-ERROR]' in m for _, m in w.tmux.sent)  # 別経路で必ず可視化
-        assert w.nq.read_health()['queue_readable'] is False
+        health = w.nq.read_health()
+        assert health['queue_readable'] is False
+        # 破損サイクルの health が queue_write_ok: true のまま健全に見えないこと
+        # (unacked_* が欠落するのに write_ok が true だと `squad notify pull` の
+        # health 表示だけが異常、という混線を防ぐ)。
+        assert health['queue_write_ok'] is False
 
         # 破損ファイルを復旧すれば元の critical はそのまま生きている
         w.nq.events_path.write_text(before)
@@ -990,6 +995,40 @@ class TestCorruptQueueViaCycle:
         monkeypatch.setattr(time, 'time', lambda: later)
         w.report_bridge()
         assert len(queued(w)) == 1
+
+
+class TestRunSeedsGcTimer:
+    """run() 起動時に last_gc を起動時刻で seed し、初サイクルの無条件 GC を防ぐ.
+
+    worktree が 30 件ほどある環境で初 cycle() が git fetch/判定を数十回連続実行し
+    ループを ≈50s ブロックした実測 (squad 実環境) の回帰。boot_delay は
+    monkeypatch する既存テストがあるため sleep 後の現在時刻を基にすること。
+    """
+
+    def test_run_seeds_last_gc_and_delays_first_gc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        queue = tmp_path / 'queue'
+        cfg = Config(
+            session='testsess',
+            default_owner='testsess',
+            queue_dir=queue,
+            interval=1,
+            boot_delay=0,
+            gc_interval=1800,
+            discovery_interval=10**9,
+        )
+        w = Watcher(cfg=cfg, tmux=FakeTmux('testsess'))
+        w.sleep = lambda _s: None
+        gc_calls: list[int] = []
+        monkeypatch.setattr(w, 'gc_worktrees', lambda: gc_calls.append(1))
+        loops = iter(range(3))
+
+        def has_session() -> bool:
+            return next(loops, -1) >= 0
+
+        w.tmux.has_session = has_session
+        w.run()
+        assert gc_calls == []  # 初サイクル (gc_interval 未到来) で GC は走らない
+        assert w.last_gc > 0
 
 
 class TestRolloutFlag:
