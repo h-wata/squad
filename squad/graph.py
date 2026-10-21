@@ -112,11 +112,20 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
     edges: set[tuple[str, str, str]] = set()
 
     def add(
-        node_id: str, kind: str, project: str, state: str, title: str, ref: str, updated_at: float, **payload: object
+        node_id: str,
+        kind: str,
+        project: str,
+        state: str,
+        title: str,
+        ref: str,
+        updated_at: float,
+        current: bool = False,
+        **payload: object,
     ) -> None:
-        # 同じ node_id が複数ファイルにある (task の差し戻しで再発行等) ときは新しい方を採る
+        # 同じ node_id が複数ファイルにある (task の差し戻しで再発行等) ときは tasks/ 直下を優先し、
+        # 次に新しい方を採る (archive への cp で archive 側の mtime が進むことがある)
         old = nodes.get(node_id)
-        if old and old['_mtime'] > updated_at:
+        if old and old['_rank'] > (current, updated_at):
             return
         nodes[node_id] = {
             'node_id': node_id,
@@ -127,11 +136,12 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
             'ref': ref,
             'payload': payload,
             '_mtime': updated_at,
+            '_rank': (current, updated_at),
         }
 
     for pj_dir in sorted((queue_dir / 'projects').glob('*/')):
         project = pj_dir.name
-        task_files: dict[str, tuple[float, bool]] = {}  # intent id -> (mtime, tasks/ 直下か)
+        task_files: dict[str, tuple[bool, float]] = {}  # intent id -> (tasks/ 直下か, mtime)
         for path in sorted((pj_dir / 'tasks').rglob('*.yaml')):
             data = _load(path)
             task_id = _s(data.get('task_id')).strip() if data else ''
@@ -140,8 +150,7 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
             mtime = path.stat().st_mtime
             intent = f'intent:{project}/{task_id}'
             current = path.parent == pj_dir / 'tasks'
-            if intent not in task_files or task_files[intent][0] <= mtime:
-                task_files[intent] = (mtime, current)
+            task_files[intent] = max(task_files.get(intent, (False, 0.0)), (current, mtime))
             add(
                 intent,
                 'intent',
@@ -150,6 +159,7 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
                 _line(data.get('title')),
                 str(path),
                 mtime,
+                current,
                 assigned_to=_s(data.get('assigned_to')),
                 created_at=_s(data.get('created_at')),
             )
@@ -221,7 +231,7 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
         # 新しければ差し戻し後の再実行中。result が無く archive にしか無い task は、報告されずに
         # 外されたか、report が上書きされて残っていない (unreported のまま。実 queue では大半が
         # 後者)。archive への cp で mtime が進むことがあるので、archive の task は mtime を比べない
-        for intent, (mtime, current) in task_files.items():
+        for intent, (current, mtime) in task_files.items():
             reported = sorted(results.get(intent, []))
             if current and (not reported or reported[-1][0] < mtime):
                 nodes[intent]['state'] = 'running'
@@ -234,10 +244,14 @@ def connect(db_path: Path) -> sqlite3.Connection:
     """DB を開く。schema が古ければ作り直す (派生索引なので消してよい)."""
     conn = sqlite3.connect(db_path, timeout=30)
     if conn.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
-        conn.executescript('DROP TABLE IF EXISTS edges; DROP TABLE IF EXISTS nodes;')
-        for stmt in SCHEMA:
-            conn.execute(stmt)
-        conn.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+        # 複数の watcher が同時に初期化しうるので、書き込みロックを取ってから version を読み直す
+        conn.execute('BEGIN IMMEDIATE')
+        if conn.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
+            conn.execute('DROP TABLE IF EXISTS edges')
+            conn.execute('DROP TABLE IF EXISTS nodes')
+            for stmt in SCHEMA:
+                conn.execute(stmt)
+            conn.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
         conn.commit()
     return conn
 

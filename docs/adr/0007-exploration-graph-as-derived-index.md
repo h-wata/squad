@@ -57,3 +57,6 @@ report も同じ名前で上書きされる。そのため、セッションを�
   約 380 件のうち 260 件余りがこれで、過去分の追跡には限界がある。
 - goal の状態は常に `unknown`（GitHub に問い合わせない）。
 - schema を変えるときは `SCHEMA_VERSION` を上げるだけでよい。古い DB は次の sync で作り直される。
+  複数の watcher が同時に作り直しても壊れないよう、`BEGIN IMMEDIATE` の中で version を読み直す。
+- 同じ task_id の task が `tasks/` 直下と archive の両方にあるときは、mtime に関係なく `tasks/` 直下を
+  正とする（archive への cp で archive 側の mtime が進むことがあるため）。

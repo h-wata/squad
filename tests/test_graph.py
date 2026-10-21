@@ -149,3 +149,36 @@ def test_parent_issue_url_in_other_repo_is_separate_goal(queue: Path) -> None:
     graph.sync(queue)
     goals = {r[0] for r in _rows(graph.default_db_path(queue), "SELECT node_id FROM nodes WHERE kind = 'goal'")}
     assert goals == {'goal:pj#42', 'goal:o/r#42'}
+
+
+def test_active_task_wins_over_newer_archive_copy(queue: Path) -> None:
+    pj = queue / 'projects' / 'pj'
+    _write(pj / 'reports' / 'worker2_report.yaml', f'report_id: "{RID2}"\ntask_id: T2\nstatus: completed\n', 350)
+    os.utime(pj / 'tasks' / 'worker2.yaml', (400, 400))  # 差し戻して再発行
+    _write(pj / 'tasks' / 'archive' / 'worker2_T2.yaml', 'task_id: T2\ntitle: "旧版"\n', 500)  # 旧版を後から cp
+    graph.sync(queue)
+    row = _rows(graph.default_db_path(queue), "SELECT state, title FROM nodes WHERE node_id = 'intent:pj/T2'")
+    assert row == [('running', '続き')]
+
+
+def test_concurrent_init_on_fresh_db(queue: Path) -> None:
+    import threading
+
+    errors: list[BaseException] = []
+    for i in range(20):
+        db = queue / f'g{i}.db'
+        barrier = threading.Barrier(4)
+
+        def run(db: Path = db, barrier: threading.Barrier = barrier) -> None:
+            barrier.wait()
+            try:
+                graph.connect(db).close()
+            except sqlite3.Error as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert errors == []
