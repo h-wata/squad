@@ -326,6 +326,11 @@ report の `details_path` は判断に必要な場合のみ読む（通常は su
 
 watch.sh は status を読み、blocked の report は `[INBOX]` 付きであなたに通知する。
 
+blocked の原因や、report に書かれなかった途中経過を確かめたいときは、worker の transcript を
+`python3 squad/squad.py trace search <語句> --project <project> --task <task_id> [--errors-only]`
+→ `trace get <trace_id> --context 2` で引ける (出力は secret をマスク済み, #56)。再割当の task
+YAML に「同じ失敗を `squad trace search --errors-only` で確認してから着手」と書いてもよい。
+
 ### 危険操作の保留 `[APPROVAL-HOLD]` と実行時間予算 `[BUDGET]` (#54)
 
 watcher は worker の承認プロンプトを自動受理するが、画面に危険操作 (`rm -r`、`git push --force`、

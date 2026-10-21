@@ -23,6 +23,11 @@
   で fact → result → task → Issue の導出経路を辿れる。YAML が正本で、DB は何度でも作り直せる
   派生索引。watchd は report を配達したサイクルで自動的に作り直す。task YAML に任意の
   `derived_from` を追加した。判断の根拠は ADR 0007 (#55)。
+- worker の Claude Code transcript を横断検索する `squad trace search / get` を追加した
+  (`squad/trace_search.py`)。report の `session_id` で transcript を特定し、無ければ
+  `measure_task_cost.py` と同じ時間窓で近似する (出力に `~` を付ける)。新しい保存先は作らない。
+  出力は `scripts/pi-log-triage.sh` と同じ規則で secret をマスクする (`squad/mask.py`)。
+  判断の根拠は ADR 0008 (#56)。
 - `SQUAD_W3_AGENT=opencode` で Worker 3 を Claude ではなく Opencode
   (LAN vLLM 上の `local/qwen38-flash-next`) で起動できるようにした。W1/W2 は Claude の
   ままなので、同一 Dispatcher 配下でローカル LLM worker と Claude worker を直接比較

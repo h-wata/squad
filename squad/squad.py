@@ -468,6 +468,25 @@ def cmd_graph(args: argparse.Namespace, _cfg: dict) -> int:
     return 0
 
 
+def cmd_trace(args: argparse.Namespace, _cfg: dict) -> int:
+    import trace_search  # noqa: PLC0415
+
+    if args.trace_cmd == 'get':
+        print('\n'.join(trace_search.get(args.trace_id, args.context)))
+        return 0
+    queue_dir = Path(args.queue_dir) if args.queue_dir else REPO_ROOT / 'queue'
+    srcs, missing = trace_search.sources(queue_dir, args.project, args.task)
+    hits = trace_search.search(srcs, args.query, args.tool, args.errors_only, args.limit)
+    for e in hits:
+        print(trace_search.fmt(e, args.query))
+    if missing:
+        shown = ', '.join(missing[:5]) + (' ...' if len(missing) > 5 else '')
+        print(f'transcript が見つからない task: {len(missing)} 件 ({shown})')
+    if any(not e.source.exact for e in hits):
+        print('~ 付きは report に session_id が無く、時間窓で近似した transcript (他 session を含みうる)')
+    return 0
+
+
 # ---------- entry ----------
 
 
@@ -530,6 +549,21 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
         p.add_argument('--db', help='graph DB path (既定: <queue-dir>/.graph.db)')
     p_graph.set_defaults(func=cmd_graph)
+
+    p_trace = sub.add_parser('trace', help='worker の Claude Code transcript を横断検索 (Issue #56)')
+    trace_sub = p_trace.add_subparsers(dest='trace_cmd', required=True)
+    p_ts = trace_sub.add_parser('search', help='tool の入力・結果と assistant の text を検索 (出力はマスク済み)')
+    p_ts.add_argument('query')
+    p_ts.add_argument('--project')
+    p_ts.add_argument('--task', help='task_id')
+    p_ts.add_argument('--tool', help='tool 名 (例: Bash)。assistant の text は text')
+    p_ts.add_argument('--errors-only', action='store_true', help='is_error の tool_result だけ')
+    p_ts.add_argument('--limit', type=int, default=20)
+    p_ts.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
+    p_tg = trace_sub.add_parser('get', help='trace_id の詳細 (出力はマスク済み)')
+    p_tg.add_argument('trace_id', help='<session_id>:<行番号>')
+    p_tg.add_argument('--context', type=int, default=0, help='前後に含める行数')
+    p_trace.set_defaults(func=cmd_trace)
 
     args = ap.parse_args(argv)
     cfg = load_config()
