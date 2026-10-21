@@ -214,6 +214,7 @@ SQUAD_DISPATCHER_MODEL=sonnet ./start.sh <workspace_path>
 | `scripts/pi-log-triage.sh` | ログ 1 本を pi (local vLLM) に読ませ、根拠付きの一次切り分け YAML を返す薄いラッパー |
 | `scripts/hooks/on-event.sh` | Claude Code hook。Stop/Notification 等のイベントを `squad/state/<worker>.json` に即時反映 |
 | `squad/squad.py` | worker 状態確認・タスク割当・dashboard 生成用の軽量 CLI (stdlib only) |
+| `squad/graph.py` | task / report YAML から探索グラフの派生索引 `queue/.graph.db` を作る (`squad graph sync / why / show`。PyYAML を使うのはここだけ) |
 | `instructions/dispatcher.md` / `worker.md` / `worker-codex.md` | 各エージェントの役割定義。Claude には `--append-system-prompt`、Codex (W4) には同等フラグが無いため初期プロンプトとして渡す |
 | `queue/projects/<project>/` | PJ 単位のタスク/報告 YAML 置き場 |
 | `dashboard.md` / `dashboards/<project>.md` | 全体 index / PJ 別の進捗ダッシュボード |

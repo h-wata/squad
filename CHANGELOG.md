@@ -18,6 +18,11 @@
   送る。パターンは `WATCH_APPROVAL_DENY` で変更できる。task YAML に任意の `max_wall_clock_min`
   を書くと、超過時に `[BUDGET]` を 1 回だけ通知する (worker は止めない)。report に任意の
   `stop_reason` を追加した。判断の根拠は ADR 0006 (#54)。
+- task / report YAML から Goal / Intent / Result / Fact の探索グラフを作る `squad graph` を追加した
+  (`squad/graph.py`)。`squad graph sync` で `queue/.graph.db` を作り直し、`squad graph why <node_id>`
+  で fact → result → task → Issue の導出経路を辿れる。YAML が正本で、DB は何度でも作り直せる
+  派生索引。watchd は report を配達したサイクルで自動的に作り直す。task YAML に任意の
+  `derived_from` を追加した。判断の根拠は ADR 0007 (#55)。
 - `SQUAD_W3_AGENT=opencode` で Worker 3 を Claude ではなく Opencode
   (LAN vLLM 上の `local/qwen38-flash-next`) で起動できるようにした。W1/W2 は Claude の
   ままなので、同一 Dispatcher 配下でローカル LLM worker と Claude worker を直接比較
