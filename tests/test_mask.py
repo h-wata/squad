@@ -100,3 +100,6 @@ def test_private_key_on_one_line_is_masked() -> None:
     unterminated = mask(f'x {begin}{body}\n{body}\n{end}\nok')
     assert body not in unterminated
     assert unterminated.endswith('\nok')
+    reopened = mask(f'{begin}x{end} {begin}{body}\n{body}\n{end}\nok')  # 閉じた後に同じ行で次の鍵が始まる
+    assert body not in reopened
+    assert reopened.endswith('\nok')

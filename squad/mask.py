@@ -36,8 +36,9 @@ def mask(text: str) -> str:
         fold = bool(_AUTH_HEADER.search(line))
         if _KEY_BEGIN.search(line):
             # shell 版より強い: 1 行に詰まった鍵も伏せる (transcript は JSON なので鍵が 1 行になる)
+            # 最後の BEGIN が END で閉じていなければ次の行も鍵 (同じ行に END...BEGIN と続く場合も)
+            in_key = not list(_KEY_INLINE.finditer(line))[-1].group(2)
             line = _KEY_INLINE.sub(r'\1[REDACTED PRIVATE KEY]\2', line)
-            in_key = not _KEY_END.search(line)
         elif _KEY_END.search(line):
             in_key = False
         elif in_key:
