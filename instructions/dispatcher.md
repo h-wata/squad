@@ -326,6 +326,21 @@ report の `details_path` は判断に必要な場合のみ読む（通常は su
 
 watch.sh は status を読み、blocked の report は `[INBOX]` 付きであなたに通知する。
 
+### 危険操作の保留 `[APPROVAL-HOLD]` と実行時間予算 `[BUDGET]` (#54)
+
+watcher は worker の承認プロンプトを自動受理するが、画面に危険操作 (`rm -r`、`git push --force`、
+`git reset --hard`、`gh pr merge/close` 等。`WATCH_APPROVAL_DENY` で変更可) が写っているときは
+**自動受理せず** critical で `[APPROVAL-HOLD ...]` を送ってくる。
+
+- pane を見て、task の範囲内で意図した操作ならユーザーに確認したうえで手で応答する
+  (外部公開・破壊的操作は人間判断に残す原則どおり)。
+- 意図しない操作なら worker を止め、report に `stop_reason: approval_denied` を書かせる。
+
+task YAML に `max_wall_clock_min` を書くと、`created_at` からその分数を過ぎても report が
+無い場合に `[BUDGET ...]` が 1 回だけ届く。watcher は worker を止めない。pane と経過を見て
+続行 / 打ち切り / 再割当を決める。打ち切った場合は report に `stop_reason: budget_exceeded`
+を書かせる。予算の目安は、同種タスクの過去の所要時間の 2 倍程度。
+
 report YAML に含まれる必須フィールド (worker 側責務):
 - `report_id:` (UUIDv4。配達の主キー。worker が新規作成時に一度だけ発番する)
 - `agent: claude | codex`

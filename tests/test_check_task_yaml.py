@@ -241,3 +241,17 @@ def test_main_all_files_pass_returns_0(
     rc = main([str(good_path)])
 
     assert rc == 0
+
+
+@pytest.mark.parametrize('budget', [0, -5, '90', True])
+def test_invalid_max_wall_clock_min_is_ng(tmp_path: Path, budget: object) -> None:
+    path = _write(tmp_path, {**GOOD, 'max_wall_clock_min': budget})
+    results = check_task_yaml(path, collect_task_id_locations([path]))
+    assert _statuses(results, 13) == 'NG'
+
+
+def test_max_wall_clock_min_is_optional(tmp_path: Path) -> None:
+    for data in (GOOD, {**GOOD, 'max_wall_clock_min': 90}):
+        path = _write(tmp_path, data)
+        results = check_task_yaml(path, collect_task_id_locations([path]))
+        assert _statuses(results, 13) == 'OK'

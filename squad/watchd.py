@@ -15,6 +15,7 @@
             WATCH_DISCOVERY_INTERVAL / WATCH_DISCOVERY_MAX / WATCH_SWEEP_INTERVAL / WATCH_GC_INTERVAL
             WATCH_QUEUE_DIR / WATCH_LEDGER_FILE / WATCH_LEDGER_LEASE / WATCH_WORKTREE_GLOB
             SQUAD_SESSION / SQUAD_DEFAULT_OWNER
+            WATCH_APPROVAL_DENY (自動承認しない操作の正規表現。既定は APPROVAL_DENY_DEFAULT)
             WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Pane 0 直送。1 で durable queue 経路)
             WATCH_CRITICAL_FALLBACK_SECONDS / WATCH_NORMAL_FALLBACK_SECONDS / WATCH_LOW_FALLBACK_SECONDS
 
@@ -65,6 +66,13 @@ APPROVAL_RE = re.compile(
     re.IGNORECASE,
 )
 YN_RE = re.compile(r'\(y/n\)|press y', re.IGNORECASE)
+# 承認プロンプトにこれが写っていたら自動受理せず Dispatcher に上げる (#54)。
+# capture は末尾 40 行なので、直前に流れた出力に一致しても止まる (安全側に倒す)。
+APPROVAL_DENY_DEFAULT = (
+    r'\brm\s+-\w*r|git\s+push\b.*\s(--force|-f)\b|git\s+reset\s+--hard|git\s+clean\s+-\w*f|'
+    r'gh\s+pr\s+(merge|close)|gh\s+repo\s+delete|gh\s+release\s+delete|\bdrop\s+(table|database)\b|'
+    r'\bmkfs\b|\bdd\s+if='
+)
 TODO_RE = re.compile(r'TODO|FIXME|XXX')
 WORKER_NUM_RE = re.compile(r'worker(\d+)')
 PANE_SUFFIX = {1: '0.1', 2: '0.2', 3: '0.3', 4: '0.6'}
@@ -170,6 +178,7 @@ class Config:
     # 段階導入 flag (SQUAD-226)。既定は従来動作 = Pane 0 へ直送。WATCH_NOTIFY_QUEUE=1 で
     # durable queue 経路を opt-in する。flag を外せば (既定に戻せば) 即座に従来動作へ rollback。
     notify_queue_enabled: bool = field(default_factory=lambda: _bool_env('WATCH_NOTIFY_QUEUE', False))
+    approval_deny: str = field(default_factory=lambda: os.environ.get('WATCH_APPROVAL_DENY') or APPROVAL_DENY_DEFAULT)
 
     @property
     def dispatcher(self) -> str:
@@ -193,6 +202,11 @@ class Config:
     def legacy_ledger_path(self) -> Path:
         """旧タブ区切り ledger (移行元)."""
         return self.queue_dir / '.report_ledger'
+
+    @property
+    def budget_notified_file(self) -> Path:
+        """予算超過を通知済みの task (再起動しても重複通知しないため永続化する)."""
+        return self.queue_dir / '.budget_notified'
 
     @property
     def seen_file(self) -> Path:
@@ -258,6 +272,8 @@ class Watcher:
         self.pane_stall: dict[int, int] = {}
         self.stall_notified: dict[int, str] = {}
         self.resume_count: dict[int, int] = {}
+        self.approval_deny_re = re.compile(self.cfg.approval_deny, re.IGNORECASE)
+        self.approval_held: dict[int, str] = {}
         self.last_discovery = 0.0
         self.last_sweep = 0.0
         # last_gc は「直近 GC 実行時刻」。0 のままだと起動直後の初サイクルで無条件に GC が
@@ -547,13 +563,14 @@ class Watcher:
                 rep_m = review_m
 
             pending = bool(task_m) and (not rep_m or mtime_gt(task_m, rep_m))
-            project, task_id = '', ''
+            project, task_meta = '', {}
             if task_path is not None:
                 project = task_path.parent.parent.name
                 try:
-                    task_id = parse_scalars(task_path.read_text(errors='replace')).get('task_id', '')
+                    task_meta = parse_scalars(task_path.read_text(errors='replace'))
                 except OSError:
-                    task_id = ''
+                    task_meta = {}
+            task_id = task_meta.get('task_id', '')
             if pending and task_id and self._archived_report_delivered(task_path, n, project, task_id):
                 self.log(f'Worker{n}: task {task_id} は archive 済み report で配達済み -> stall 対象外')
                 pending = False
@@ -563,12 +580,18 @@ class Watcher:
                 self.resume_count[n] = 0
                 continue
 
+            self._check_budget(n, task_path, task_meta, project or 'unknown', task_id)
+
             # pane が存在しない場合 (例: SQUAD_ENABLE_CODEX=0 で Pane 6/W4 が無い) は
             # capture が空を返し続けて停止通報ループに入るため、このサイクルはスキップする。
             if not self.tmux.pane_exists(pane):
                 continue
 
             cap = self.tmux.capture(pane)
+            if APPROVAL_RE.search(cap) and (deny := self.approval_deny_re.search(cap)):
+                # 自動受理せず、停止判定にも回さない (人間の応答待ちであることが分かっているため)
+                self._hold_approval(n, pane, cap, deny.group(0), project or 'unknown', task_id, task_m)
+                continue
             if APPROVAL_RE.search(cap):
                 self.log(f'Worker{n}: 承認プロンプト検知 -> 自動受理')
                 self.auto_answer(pane, cap)
@@ -601,6 +624,76 @@ class Watcher:
             self.sleep(0.3)
         self.tmux.send_keys(pane, 'Enter')
         self.sleep(0.3)
+
+    def _hold_approval(
+        self, n: int, pane: str, cap: str, matched: str, project: str, task_id: str, task_m: str
+    ) -> None:
+        """危険操作を含む承認プロンプトを critical で Dispatcher に上げる (同じ task の同じ画面には 1 回だけ).
+
+        キーに task を含める。画面だけだと、次の task が同じ危険操作で止まったときに
+        前の task の保留と見なして黙り、停止通報も抑止しているため無通知で止まり続ける。
+        """
+        h = f'{task_id}:{task_m}:{zlib.crc32(cap.encode())}'
+        if self.approval_held.get(n) == h:
+            return
+        pane_short = pane.split(':', 1)[1]
+        # 一致部分だけだと `rm -r` のように対象が分からないので、一致した行を見せる
+        line = next((ln.strip() for ln in cap.splitlines() if matched in ln), matched)[:120]
+        self.log(f'Worker{n}: 承認プロンプトに危険操作 ({line!r}) -> 自動受理せず保留')
+        msg = (
+            f'[APPROVAL-HOLD project={project} worker={n} task_id={task_id or "unknown"}] '
+            f'Worker{n} の承認プロンプトに危険操作 ({line}) が含まれるため自動受理しませんでした。'
+            f'pane {pane_short} を確認し、許可するなら手で応答してください。'
+        )
+        if self._enqueue_notification(
+            project=project, source='approval-hold', priority='critical', message=msg, dedupe_key=f'approval-hold:{h}'
+        ):
+            self.approval_held[n] = h
+
+    def _check_budget(self, n: int, task_path: Path | None, meta: dict[str, str], project: str, task_id: str) -> None:
+        """Task の max_wall_clock_min を超えたら 1 回だけ通知する (kill はしない, #54).
+
+        起点は task の created_at、読めなければ task YAML の mtime。
+        """
+        # parse_scalars は行末コメント (`30 # 目安`) を残すので、先頭の整数だけ読む
+        m = re.match(r'\d+', meta.get('max_wall_clock_min', ''))
+        limit_min = int(m.group(0)) if m else 0
+        if limit_min <= 0 or task_path is None:
+            return
+        try:
+            started = datetime.fromisoformat(meta.get('created_at', '').replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            try:
+                started = task_path.stat().st_mtime
+            except OSError:
+                return
+        elapsed_min = int((time.time() - started) // 60)
+        if elapsed_min < limit_min:
+            return
+        key = f'budget:{project}:{n}:{task_id or mtime_str(task_path)}'
+        path = self.cfg.budget_notified_file
+        try:
+            if key in path.read_text().splitlines():
+                return
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.log(f'[WARN] {path} を読めず予算超過の判定を見送り: {e}')
+            return
+        msg = (
+            f'[BUDGET project={project} worker={n} task_id={task_id or "unknown"}] '
+            f'Worker{n} が実行時間の予算 {limit_min} 分を超えました (経過 約{elapsed_min} 分)。'
+            f'続行・打ち切り・再割当を判断してください (watcher は止めません)。'
+        )
+        if not self._enqueue_notification(
+            project=project, source='budget', priority='normal', message=msg, dedupe_key=key
+        ):
+            return
+        try:
+            with path.open('a') as f:
+                f.write(key + '\n')
+        except OSError as e:
+            self.log(f'[WARN] {path} に通知済みを記録できず (再起動後に 1 回再通知され得る): {e}')
 
     def _archived_report_delivered(self, task_path: Path, n: int, project: str, task_id: str) -> bool:
         """Task と同じ task_id の archive 済み report が既に配達済みか (Step 6, 誤警報抑止).

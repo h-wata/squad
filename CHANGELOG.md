@@ -13,6 +13,11 @@
 
 ### Added
 
+- watchd が、危険操作 (`rm -r`、`git push --force`、`git reset --hard`、`gh pr merge` 等) を含む
+  承認プロンプトを自動受理しなくなった。代わりに `[APPROVAL-HOLD]` を critical で Dispatcher に
+  送る。パターンは `WATCH_APPROVAL_DENY` で変更できる。task YAML に任意の `max_wall_clock_min`
+  を書くと、超過時に `[BUDGET]` を 1 回だけ通知する (worker は止めない)。report に任意の
+  `stop_reason` を追加した。判断の根拠は ADR 0006 (#54)。
 - `SQUAD_W3_AGENT=opencode` で Worker 3 を Claude ではなく Opencode
   (LAN vLLM 上の `local/qwen38-flash-next`) で起動できるようにした。W1/W2 は Claude の
   ままなので、同一 Dispatcher 配下でローカル LLM worker と Claude worker を直接比較

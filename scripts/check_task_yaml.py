@@ -245,6 +245,15 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
     else:
         results.append(Result(12, 'OK', f'context.workspace: {workspace}'))
 
+    # 13. max_wall_clock_min (#54, 任意)
+    budget = data.get('max_wall_clock_min')
+    if budget is None:
+        results.append(Result(13, 'OK', 'max_wall_clock_min はありません (予算なし)'))
+    elif isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        results.append(Result(13, 'NG', f'max_wall_clock_min は正の整数 (分) にしてください: {budget!r}'))
+    else:
+        results.append(Result(13, 'OK', f'max_wall_clock_min: {budget}'))
+
     return results
 
 
