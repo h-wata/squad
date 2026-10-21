@@ -460,6 +460,25 @@ class TestStallDetection:
         assert 'rm -rf' in held[0]['message']
         assert not [e for e in w.nq.unacked() if '停止' in e['message']]  # 保留中は停止通報しない
 
+    def test_same_dangerous_prompt_on_next_task_is_held_again(self, watcher: tuple[Watcher, Path]) -> None:
+        """Codex review: 次の task が同じ画面で止まっても、前の task の保留と見なして黙らない."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        task = d / 'tasks' / 'worker1.yaml'
+        task.write_text('task_id: T1\n')
+        os.utime(task, (100, 100))
+        w.refresh_owned_projects()
+        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Bash(rm -rf build)\nDo you want to proceed?\n1. Yes']
+        w.check_workers()
+        report = write_report(d)
+        os.utime(report, (200, 200))
+        task.write_text('task_id: T2\n')
+        os.utime(task, (300, 300))
+        w.check_workers()
+        held = [e['message'] for e in w.nq.unacked() if '[APPROVAL-HOLD' in e['message']]
+        assert any('task_id=T1' in m for m in held)
+        assert any('task_id=T2' in m for m in held)
+
     def test_custom_deny_pattern_overrides_default(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
         d = make_project(queue, 'pj', session='testsess')
@@ -1326,6 +1345,18 @@ class TestBudget:
         assert len(events) == 1
         assert '30 分' in events[0]['message']
         assert events[0]['priority'] == 'normal'
+
+    def test_budget_with_inline_comment_is_enforced(self, watcher: tuple[Watcher, Path]) -> None:
+        """Codex review: `max_wall_clock_min: 30 # 目安` は YAML として正しいので予算として効かせる."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        created = time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(time.time() - 45 * 60))
+        (d / 'tasks' / 'worker1.yaml').write_text(
+            f'task_id: T1\ncreated_at: "{created}"\nmax_wall_clock_min: 30 # normal budget\n'
+        )
+        w.refresh_owned_projects()
+        w.check_workers()
+        assert len(self._budget_events(w)) == 1
 
     def test_not_notified_again_after_restart_and_ack(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher

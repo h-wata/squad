@@ -590,7 +590,7 @@ class Watcher:
             cap = self.tmux.capture(pane)
             if APPROVAL_RE.search(cap) and (deny := self.approval_deny_re.search(cap)):
                 # 自動受理せず、停止判定にも回さない (人間の応答待ちであることが分かっているため)
-                self._hold_approval(n, pane, cap, deny.group(0), project or 'unknown', task_id)
+                self._hold_approval(n, pane, cap, deny.group(0), project or 'unknown', task_id, task_m)
                 continue
             if APPROVAL_RE.search(cap):
                 self.log(f'Worker{n}: 承認プロンプト検知 -> 自動受理')
@@ -625,9 +625,15 @@ class Watcher:
         self.tmux.send_keys(pane, 'Enter')
         self.sleep(0.3)
 
-    def _hold_approval(self, n: int, pane: str, cap: str, matched: str, project: str, task_id: str) -> None:
-        """危険操作を含む承認プロンプトを critical で Dispatcher に上げる (同じ画面には 1 回だけ)."""
-        h = str(zlib.crc32(cap.encode()))
+    def _hold_approval(
+        self, n: int, pane: str, cap: str, matched: str, project: str, task_id: str, task_m: str
+    ) -> None:
+        """危険操作を含む承認プロンプトを critical で Dispatcher に上げる (同じ task の同じ画面には 1 回だけ).
+
+        キーに task を含める。画面だけだと、次の task が同じ危険操作で止まったときに
+        前の task の保留と見なして黙り、停止通報も抑止しているため無通知で止まり続ける。
+        """
+        h = f'{task_id}:{task_m}:{zlib.crc32(cap.encode())}'
         if self.approval_held.get(n) == h:
             return
         pane_short = pane.split(':', 1)[1]
@@ -649,10 +655,9 @@ class Watcher:
 
         起点は task の created_at、読めなければ task YAML の mtime。
         """
-        try:
-            limit_min = int(meta.get('max_wall_clock_min') or 0)
-        except ValueError:
-            return
+        # parse_scalars は行末コメント (`30 # 目安`) を残すので、先頭の整数だけ読む
+        m = re.match(r'\d+', meta.get('max_wall_clock_min', ''))
+        limit_min = int(m.group(0)) if m else 0
         if limit_min <= 0 or task_path is None:
             return
         try:
