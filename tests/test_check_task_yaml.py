@@ -255,3 +255,17 @@ def test_max_wall_clock_min_is_optional(tmp_path: Path) -> None:
         path = _write(tmp_path, data)
         results = check_task_yaml(path, collect_task_id_locations([path]))
         assert _statuses(results, 13) == 'OK'
+
+
+@pytest.mark.parametrize('derived', ['T1', [''], [1]])
+def test_invalid_derived_from_is_ng(tmp_path: Path, derived: object) -> None:
+    path = _write(tmp_path, {**GOOD, 'derived_from': derived})
+    results = check_task_yaml(path, collect_task_id_locations([path]))
+    assert _statuses(results, 14) == 'NG'
+
+
+def test_derived_from_is_optional(tmp_path: Path) -> None:
+    for data in (GOOD, {**GOOD, 'derived_from': ['TASK-000', '11111111-1111-4111-8111-111111111111']}):
+        path = _write(tmp_path, data)
+        results = check_task_yaml(path, collect_task_id_locations([path]))
+        assert _statuses(results, 14) == 'OK'

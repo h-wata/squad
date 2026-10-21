@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1390,3 +1391,37 @@ class TestBudget:
         w.refresh_owned_projects()
         w.check_workers()
         assert self._budget_events(w) == []
+
+
+class TestGraphSync:
+    """#55: report を配達したサイクルで探索グラフを作り直す。失敗しても配達は止めない."""
+
+    def test_delivery_rebuilds_graph(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+        write_report(d, task_id='T1')
+        w.cycle()
+        db = queue / '.graph.db'
+        assert db.exists()
+        conn = sqlite3.connect(db)
+        try:
+            assert conn.execute("SELECT state FROM nodes WHERE node_id = 'intent:pj/T1'").fetchone() == ('done',)
+        finally:
+            conn.close()
+
+    def test_graph_failure_does_not_block_delivery(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import graph  # noqa: PLC0415
+
+        def boom(*_a: object, **_k: object) -> None:
+            raise RuntimeError('disk on fire')
+
+        monkeypatch.setattr(graph, 'sync', boom)
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, task_id='T1')
+        w.cycle()
+        assert queued(w)  # report 通知は届いている
+        assert w.ledger.is_delivered('pj', ID1)

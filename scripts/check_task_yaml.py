@@ -254,6 +254,15 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
     else:
         results.append(Result(13, 'OK', f'max_wall_clock_min: {budget}'))
 
+    # 14. derived_from (#55, 任意。13 は #54 の max_wall_clock_min)
+    derived = data.get('derived_from')
+    if derived is None:
+        results.append(Result(14, 'OK', 'derived_from はありません (対象外)'))
+    elif not isinstance(derived, list) or not all(isinstance(d, str) and d.strip() for d in derived):
+        results.append(Result(14, 'NG', f'derived_from は空でない文字列のリストにしてください: {derived!r}'))
+    else:
+        results.append(Result(14, 'OK', f'derived_from: {derived}'))
+
     return results
 
 

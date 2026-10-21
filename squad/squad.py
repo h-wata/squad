@@ -11,6 +11,8 @@ Subcommands:
   ls / status               全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
   dashboard                 Worker ステータス表を生成して stdout
+  graph sync / why <id> / show <id>
+                             task / report YAML の探索グラフ索引 (squad/graph.py, Issue #55)
   ledger claim/commit/fail
                              report 配達 ledger (squad/ledger.py, sqlite3) を手動操作する
                              デバッグ用 CLI。watchd.py 自体は ReportLedger をプロセス内で
@@ -440,6 +442,32 @@ def cmd_notify_ack(args: argparse.Namespace, cfg: dict) -> int:
     return 0 if ok else 1
 
 
+def _graph_paths(args: argparse.Namespace) -> tuple[object, Path, Path]:
+    """Graph モジュールと (queue_dir, db_path)。PyYAML が無ければ ImportError を上げる."""
+    import graph  # noqa: PLC0415 (PyYAML 依存を graph サブコマンドに閉じ込める)
+
+    queue_dir = Path(args.queue_dir) if args.queue_dir else REPO_ROOT / 'queue'
+    return graph, queue_dir, Path(args.db) if args.db else graph.default_db_path(queue_dir)
+
+
+def cmd_graph(args: argparse.Namespace, _cfg: dict) -> int:
+    try:
+        graph, queue_dir, db = _graph_paths(args)
+    except ImportError as e:
+        print(f'squad graph には PyYAML が必要です: {e}', file=sys.stderr)
+        return 2
+    if args.graph_cmd == 'sync':
+        n_nodes, n_edges = graph.sync(queue_dir, db)
+        print(f'synced {n_nodes} nodes, {n_edges} edges -> {db}')
+        return 0
+    if not db.exists():
+        print(f'{db} がありません。先に squad graph sync を実行してください', file=sys.stderr)
+        return 1
+    lines = graph.why(db, args.node_id) if args.graph_cmd == 'why' else graph.show(db, args.node_id)
+    print('\n'.join(lines))
+    return 0
+
+
 # ---------- entry ----------
 
 
@@ -487,6 +515,21 @@ def main(argv: list[str] | None = None) -> int:
     p_ack.add_argument('--by', help='ack した主体 (省略可)')
     p_ack.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
     p_ack.set_defaults(func=cmd_notify_ack)
+
+    p_graph = sub.add_parser('graph', help='task / report YAML の探索グラフ索引 (Issue #55)')
+    graph_sub = p_graph.add_subparsers(dest='graph_cmd', required=True)
+    graph_sub.add_parser('sync', help='YAML から索引を作り直す (YAML は書き換えない)')
+    for name, help_text in (
+        ('why', 'node_id から導出元 (goal 方向) へ遡る'),
+        ('show', '1 ノードと前後のエッジを表示'),
+    ):
+        graph_sub.add_parser(name, help=help_text).add_argument(
+            'node_id', help='例: intent:<project>/<task_id>, result:<report_id>'
+        )
+    for p in graph_sub.choices.values():
+        p.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
+        p.add_argument('--db', help='graph DB path (既定: <queue-dir>/.graph.db)')
+    p_graph.set_defaults(func=cmd_graph)
 
     args = ap.parse_args(argv)
     cfg = load_config()

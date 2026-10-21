@@ -283,6 +283,8 @@ class Watcher:
         self.last_gc = 0.0
         self._queue_write_ok = True
         self._queue_readable = True
+        # report を配達したサイクルの最後に探索グラフを作り直す (#55)。起動直後に 1 回は作る
+        self._graph_dirty = True
 
     # ---- ログ / 通知 ----
 
@@ -541,6 +543,7 @@ class Watcher:
         # (ledger に記録が無い) ので、実態と逆のログを出さない。
         token = claim.token
         if enqueued and self.ledger.commit(project, report_id, token):
+            self._graph_dirty = True
             return
         if enqueued:
             self.log(f'[WARN] queue へ積んだが ledger を更新できず: {path} (再通知の可能性あり)')
@@ -549,6 +552,26 @@ class Watcher:
         wait = self.ledger.fail(project, report_id, token)
         if not wait:
             self.log(f'[WARN] ledger に再送予定を記録できませんでした: {path} (lease 期限切れ後に再 claim)')
+
+    def sync_graph(self) -> None:
+        """探索グラフ (queue/.graph.db) を作り直す (#55).
+
+        graph は PyYAML に依存するため、ここでだけ import する。PyYAML が無い・YAML が
+        壊れている等で失敗しても、report 配達には影響させない (ログだけ残して次の配達で再試行)。
+        """
+        if not self._graph_dirty:
+            return
+        self._graph_dirty = False
+        try:
+            import graph  # noqa: PLC0415
+
+            n_nodes, n_edges = graph.sync(self.cfg.queue_dir)
+        except ImportError as e:
+            self.log(f'[WARN] 探索グラフを更新できません (PyYAML が必要): {e}')
+        except Exception as e:  # noqa: BLE001 (graph の失敗で watcher を止めない)
+            self.log(f'[WARN] 探索グラフの更新に失敗 (次の配達で再試行): {e}')
+        else:
+            self.log(f'探索グラフを更新: {n_nodes} nodes, {n_edges} edges')
 
     # ---- 2 & 3. 承認オートアンサー + 停止検知 ----
 
@@ -1060,6 +1083,7 @@ class Watcher:
         """1 サイクル分の監視処理."""
         self.refresh_owned_projects()
         self.report_bridge()
+        self.sync_graph()
         self.check_workers()
 
         now = time.time()
