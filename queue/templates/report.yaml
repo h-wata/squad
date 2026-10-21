@@ -97,6 +97,10 @@ assumptions: []
 # ブロッカーや懸念点があれば記述
 issues: []
 # - "issue の説明"
+# 任意 (#54): 途中で止めた / 止められた理由。completed なら書かない。
+# budget_exceeded | verify_exhausted | blocked_by_user | approval_denied | other
+# (other のときは notes に詳細を書く)
+stop_reason: ""
 # blocked 時は verdict の絶対パスと残課題を必ず記載
 notes: ""
 # 任意: 作業対象 worktree の HEAD SHA (git を使わないタスクは unknown / 空欄でよい)

@@ -16,6 +16,9 @@ routing_reason: "実装メインのため Claude"
 model: "sonnet"
 # critical / high / medium / low
 priority: medium
+# 任意 (#54): 実行時間の予算 (分)。created_at からこの時間を超えても report が無ければ、
+# watcher が [BUDGET] を 1 回だけ Dispatcher に通知する (worker は止めない)。未記入なら予算なし。
+# max_wall_clock_min: 90
 title: "タスクのタイトル"
 description: |
   タスクの詳細説明をここに記述。

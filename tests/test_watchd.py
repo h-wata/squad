@@ -443,6 +443,35 @@ class TestStallDetection:
         assert (f'{w.cfg.session}:0.1', 'y') in w.tmux.sent
         assert (f'{w.cfg.session}:0.1', 'Enter') in w.tmux.sent
 
+    def test_dangerous_approval_is_held_not_answered(self, watcher: tuple[Watcher, Path]) -> None:
+        """#54: 危険操作の承認プロンプトには y/Enter を送らず、critical で 1 回だけ上げる."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+        w.cfg.stall_cycles = 1
+        w.refresh_owned_projects()
+        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Bash(rm -rf build)\nDo you want to proceed?\n1. Yes']
+        for _ in range(3):
+            w.check_workers()
+        assert w.tmux.sent == []
+        held = [e for e in w.nq.unacked() if '[APPROVAL-HOLD' in e['message']]
+        assert len(held) == 1
+        assert held[0]['priority'] == 'critical'
+        assert 'rm -rf' in held[0]['message']
+        assert not [e for e in w.nq.unacked() if '停止' in e['message']]  # 保留中は停止通報しない
+
+    def test_custom_deny_pattern_overrides_default(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+        w.cfg.approval_deny = r'kubectl\s+delete'
+        w2 = Watcher(cfg=w.cfg, tmux=w.tmux)
+        w2.sleep = lambda _s: None
+        w2.refresh_owned_projects()
+        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Bash(rm -rf build)\nDo you want to proceed? (y/n)']
+        w2.check_workers()
+        assert (f'{w.cfg.session}:0.1', 'y') in w.tmux.sent
+
     def test_missing_pane_skipped_without_stall(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
         d = make_project(queue, 'pj', session='testsess')
@@ -1268,3 +1297,65 @@ def test_pane_for_matches_legacy_layout() -> None:
     from watchd import PANE_SUFFIX
 
     assert PANE_SUFFIX == {1: '0.1', 2: '0.2', 3: '0.3', 4: '0.6'}
+
+
+class TestBudget:
+    """#54: task の max_wall_clock_min 超過を 1 回だけ通知する (worker は止めない)."""
+
+    @staticmethod
+    def _task(d: Path, minutes_ago: int, budget: int | None = 30) -> None:
+        created = time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(time.time() - minutes_ago * 60))
+        lines = ['task_id: T1', f'created_at: "{created}"']
+        if budget is not None:
+            lines.append(f'max_wall_clock_min: {budget}')
+        (d / 'tasks' / 'worker1.yaml').write_text('\n'.join(lines) + '\n')
+
+    @staticmethod
+    def _budget_events(w: Watcher) -> list[dict]:
+        return [e for e in w.nq.unacked() if '[BUDGET' in e['message']]
+
+    def test_over_budget_notifies_once(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        self._task(d, minutes_ago=45)
+        w.refresh_owned_projects()
+        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['working...']
+        w.check_workers()
+        w.check_workers()
+        events = self._budget_events(w)
+        assert len(events) == 1
+        assert '30 分' in events[0]['message']
+        assert events[0]['priority'] == 'normal'
+
+    def test_not_notified_again_after_restart_and_ack(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        self._task(d, minutes_ago=45)
+        w.refresh_owned_projects()
+        w.check_workers()
+        for e in self._budget_events(w):
+            w.nq.ack(e['event_id'])
+        w2 = Watcher(cfg=w.cfg, tmux=w.tmux)  # watcher 再起動相当 (メモリ状態は空)
+        w2.sleep = lambda _s: None
+        w2.refresh_owned_projects()
+        w2.check_workers()
+        assert self._budget_events(w2) == []
+
+    def test_within_budget_or_no_budget_is_silent(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        self._task(d, minutes_ago=10)
+        w.check_workers()
+        self._task(d, minutes_ago=600, budget=None)
+        w.check_workers()
+        assert self._budget_events(w) == []
+
+    def test_reported_task_is_not_checked(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        self._task(d, minutes_ago=45)
+        write_report(d)  # task より新しい report = pending ではない
+        w.refresh_owned_projects()
+        w.check_workers()
+        assert self._budget_events(w) == []

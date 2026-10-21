@@ -145,3 +145,16 @@ def test_broken_yaml_is_ng_but_does_not_raise(tmp_path: Path) -> None:
     pj = _project(tmp_path)
     p = _report(pj, 'task_id: [unclosed\n')
     assert _ng_items(check_report_yaml(p))
+
+
+def test_stop_reason_out_of_range_is_ng(tmp_path: Path) -> None:
+    pj = _project(tmp_path, TASK_NO_VERIFY)
+    p = _report(pj, 'task_id: T1\nworker: worker1\nstatus: blocked\nassumptions: none\nstop_reason: timeout\n')
+    assert 4 in _ng_items(check_report_yaml(p))
+
+
+def test_stop_reason_in_range_or_empty_is_ok(tmp_path: Path) -> None:
+    pj = _project(tmp_path, TASK_NO_VERIFY)
+    for reason in ('budget_exceeded', '""'):
+        p = _report(pj, f'task_id: T1\nworker: worker1\nstatus: blocked\nassumptions: none\nstop_reason: {reason}\n')
+        assert _statuses(check_report_yaml(p))[4] == 'OK'

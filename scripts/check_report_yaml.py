@@ -40,6 +40,8 @@ REPORT_GLOB_PATTERNS = ('queue/projects/*/reports/*.yaml',)
 PLACEHOLDER_VALUES = ('-', 'n/a', 'tbd', '')
 # 検証を要求しない report 種別 (verdict 自体 / cross-review は別 schema)
 SKIP_VERDICT_SUFFIXES = ('_verdict.yaml', '_review.yaml')
+# 途中停止の理由 (#54)。空・未記入は「止めていない」扱いで OK
+VALID_STOP_REASONS = ('budget_exceeded', 'verify_exhausted', 'blocked_by_user', 'approval_denied', 'other')
 
 
 class Result:
@@ -164,6 +166,16 @@ def check_verdict(report_path: Path, data: dict) -> list[Result]:
     return results
 
 
+def check_stop_reason(data: dict) -> Result:
+    """stop_reason は任意。書いたなら値域内であること (#54)."""
+    reason = data.get('stop_reason')
+    if is_blank(reason):
+        return Result(4, 'OK', 'stop_reason なし')
+    if reason not in VALID_STOP_REASONS:
+        return Result(4, 'NG', f'stop_reason が不正です: {reason!r} (期待: {VALID_STOP_REASONS})')
+    return Result(4, 'OK', f'stop_reason: {reason}')
+
+
 def check_report_yaml(path: Path) -> list[Result]:
     """1 ファイルの全検査項目を実行し、結果を蓄積して返す (例外は握って NG 報告)."""
     data, err = load_yaml(path)
@@ -171,6 +183,7 @@ def check_report_yaml(path: Path) -> list[Result]:
         return [Result(0, 'NG', f'parse できません: {err}')]
     results = [check_assumptions(data)]
     results.extend(check_verdict(path, data))
+    results.append(check_stop_reason(data))
     return results
 
 
