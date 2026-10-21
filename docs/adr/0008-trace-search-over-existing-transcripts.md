@@ -33,6 +33,8 @@ transcript を特定する関数（exact / 時間窓による近似）を持っ�
 3. **出力は必ずマスクする。ARTEX の平文保存は採らない。** `scripts/pi-log-triage.sh` の
    `mask_secrets()` と同じ規則を `squad/mask.py` に移し、同じ入力でテストする。検索もマスク後の
    本文に対して行うので、secret の文字列そのもので引くこともできない。
+   ただし PRIVATE KEY だけは shell 版より強くする。transcript の tool 入力は `json.dumps` で
+   改行が `\n` になり鍵が 1 行に詰まるため、BEGIN と同じ行の本文も伏せる。
 4. **transcript の特定は `measure_task_cost.py` の関数を import して使う。** `session_id` が
    無い report は時間窓の近似になり、同じ cwd の他 session が混ざりうるので、出力の行頭に `~`
    を付けて区別する。

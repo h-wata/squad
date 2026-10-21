@@ -88,3 +88,15 @@ def test_structure_is_kept() -> None:
     out = mask(text)
     assert out.count('\n') == text.count('\n')
     assert out.splitlines()[-2:] == ['FAILED tests/test_x.py::test_y', '  indented line after a normal line']
+
+
+def test_private_key_on_one_line_is_masked() -> None:
+    r"""Transcript の tool 入力は json.dumps されるので、鍵の改行が \n になり 1 行に詰まる."""
+    body = 'b3BlbnNzaC1rZXktdjEAAAAAB3NzaC1yc2EAAAADAQABAAAB000EXAMPLEBODY'  # pragma: allowlist secret
+    begin, end = '-----BEGIN OPENSSH PRIVATE KEY-----', '-----END OPENSSH PRIVATE KEY-----'  # pragma: allowlist secret
+    out = mask(f'{{"content": "{begin}\\n{body}\\n{end}\\n"}}\nnext line')
+    assert body not in out
+    assert out.endswith('\nnext line')  # END まで同じ行にあれば、次の行は伏せない
+    unterminated = mask(f'x {begin}{body}\n{body}\n{end}\nok')
+    assert body not in unterminated
+    assert unterminated.endswith('\nok')

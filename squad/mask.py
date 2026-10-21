@@ -12,6 +12,8 @@ import re
 _AUTH_HEADER = re.compile(r'authorization"?[ \t]*:', re.IGNORECASE)
 _KEY_BEGIN = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----')
 _KEY_END = re.compile(r'-----END [A-Z ]*PRIVATE KEY-----')
+# BEGIN と同じ行に続く本文 (json.dumps で改行が \n になった鍵など)。END が無ければ行末まで
+_KEY_INLINE = re.compile(r'(-----BEGIN [A-Z ]*PRIVATE KEY-----).*?(-----END [A-Z ]*PRIVATE KEY-----|$)')
 _RULES = (
     (re.compile(r'(Authorization"?\s*:\s*).*', re.IGNORECASE), r'\1<redacted>'),
     (re.compile(r'\bBearer\s+[A-Za-z0-9._~+/=-]+'), 'Bearer <redacted>'),
@@ -33,7 +35,9 @@ def mask(text: str) -> str:
             continue
         fold = bool(_AUTH_HEADER.search(line))
         if _KEY_BEGIN.search(line):
-            in_key = True
+            # shell 版より強い: 1 行に詰まった鍵も伏せる (transcript は JSON なので鍵が 1 行になる)
+            line = _KEY_INLINE.sub(r'\1[REDACTED PRIVATE KEY]\2', line)
+            in_key = not _KEY_END.search(line)
         elif _KEY_END.search(line):
             in_key = False
         elif in_key:
