@@ -28,8 +28,8 @@ transcript を特定する関数（exact / 時間窓による近似）を持っ�
    容量は Claude Code の管理に任せ、squad 側で複製しない。
 2. **ARTEX の 2 段階は採る。** `search` は 1 件 1 行（trace_id・task・worker・時刻・tool・
    ERROR・本文 120 文字）、`get <trace_id>` で tool の入力と結果を全文（4000 文字まで）返す。
-   `trace_id = <session_id>:<行番号>`。検索の単位は tool_result（入力と結果をまとめる）と
-   assistant の text。
+   `trace_id = <session_id>:<行番号>.<block 番号>`（Claude Code は複数の tool_result を 1 行に
+   まとめることがあるため）。検索の単位は tool_result（入力と結果をまとめる）と assistant の text。
 3. **出力は必ずマスクする。ARTEX の平文保存は採らない。** `scripts/pi-log-triage.sh` の
    `mask_secrets()` と同じ規則を `squad/mask.py` に移し、同じ入力でテストする。検索もマスク後の
    本文に対して行うので、secret の文字列そのもので引くこともできない。
@@ -38,6 +38,8 @@ transcript を特定する関数（exact / 時間窓による近似）を持っ�
 4. **transcript の特定は `measure_task_cost.py` の関数を import して使う。** `session_id` が
    無い report は時間窓の近似になり、同じ cwd の他 session が混ざりうるので、出力の行頭に `~`
    を付けて区別する。
+   `session_id` がある場合も、task YAML の mtime 〜 report の `completed_at` の時間窓で切る。
+   worker は `/clear` せずに次の task を受けることがあり、1 つの session に複数 task が入るため。
 5. **モジュール名は `trace_search.py`。** Python 標準ライブラリの `trace` を隠さないため
    （Issue 本文の案は `trace.py`）。
 

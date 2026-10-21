@@ -7,7 +7,7 @@
 transcript を task 発行〜report 完了の時間窓で切る) で探す (approximate)。
 
 検索の単位は tool_result (どの tool を何の入力で呼び、何が返ったか) と assistant の text。
-`trace_id = <session_id>:<行番号>`。出力は必ず mask.mask() を通す。
+`trace_id = <session_id>:<行番号>.<block 番号>` (1 行に複数の tool_result が入るため)。出力は必ず mask.mask() を通す。
 """
 
 from __future__ import annotations
@@ -76,15 +76,17 @@ def sources(queue_dir: Path, project: str | None = None, task: str | None = None
             if not tid or not meta.get('status') or (task and tid != task):
                 continue
             worker = meta.get('worker', '')
+            task_path = task_files.get(tid)
+            start = datetime.fromtimestamp(task_path.stat().st_mtime, tz=timezone.utc) if task_path else None
+            end = mtc.parse_iso8601(meta.get('completed_at', ''))
+            # 1 session で複数 task をこなすことがあるので、exact でも時間窓で切る
+            # (窓が作れなければ session 全体。他 task の分が混ざりうる)
             exact = mtc.find_session_transcript(meta.get('session_id', ''))
             if exact:
-                found.append(Source(pj_dir.name, tid, worker, exact, exact=True))
+                found.append(Source(pj_dir.name, tid, worker, exact, exact=True, start=start, end=end))
                 continue
-            task_path = task_files.get(tid)
-            end = mtc.parse_iso8601(meta.get('completed_at', ''))
             hits = []
-            if task_path and end:
-                start = datetime.fromtimestamp(task_path.stat().st_mtime, tz=timezone.utc)
+            if task_path and start and end:
                 task_text = task_path.read_text(encoding='utf-8', errors='replace')
                 for d in mtc.session_dirs_for(task_text):
                     for jsonl in sorted(d.glob('*.jsonl')):
@@ -125,10 +127,11 @@ def entries(src: Source) -> Iterator[Entry]:
         if not isinstance(content, list):
             continue
         ts = str(d.get('timestamp', ''))
-        if not src.exact:
+        in_window = True
+        if src.start and src.end:
             t = mtc.parse_iso8601(ts)
             in_window = t is not None and src.start <= t <= src.end
-        for block in content:
+        for i, block in enumerate(content):
             if not isinstance(block, dict):
                 continue
             kind = block.get('type')
@@ -138,9 +141,10 @@ def entries(src: Source) -> Iterator[Entry]:
                     json.dumps(block.get('input'), ensure_ascii=False),
                 )
                 continue
-            if not src.exact and not in_window:
+            if not in_window:
                 continue
-            trace_id = f'{src.path.stem}:{n}'
+            # 1 行 (1 message) に複数の tool_result が入ることがあるので block 番号まで付ける
+            trace_id = f'{src.path.stem}:{n}.{i}'
             if kind == 'tool_result':
                 name, args = tools.get(str(block.get('tool_use_id')), ('?', ''))
                 text = f'{args}\n=> {_text(block.get("content"))}'
@@ -175,17 +179,23 @@ def fmt(e: Entry, query: str = '') -> str:
 
 
 def get(trace_id: str, context: int = 0) -> list[str]:
-    """trace_id の行 (と前後 context 行) を、tool の入力と結果つきで返す."""
-    session_id, _, line = trace_id.rpartition(':')
+    """trace_id (<session_id>:<行>.<block>) と前後 context 行を、tool の入力と結果つきで返す.
+
+    `<session_id>:<行>` だけなら、その行の全 block を返す.
+    """
+    session_id, _, pos = trace_id.rpartition(':')
+    line, _, blk = pos.partition('.')
     path = mtc.find_session_transcript(session_id)
-    if not path or not line.isdigit():
+    if not path or not line.isdigit() or not (blk.isdigit() or not blk):
         return [f'{trace_id}: transcript が見つかりません']
     src = Source('', '', '', path, exact=True)
-    lo, hi = int(line) - context, int(line) + context
+    center = int(line)
+    lo, hi = center - context, center + context
     out = []
     for e in entries(src):
-        n = int(e.trace_id.rpartition(':')[2])
-        if lo <= n <= hi:
+        n, _, b = e.trace_id.rpartition(':')[2].partition('.')
+        n = int(n)
+        if lo <= n <= hi and not (n == center and blk and b != blk):
             err = ' ERROR' if e.is_error else ''
             out.append(f'--- {e.trace_id} {e.timestamp[:19]} {e.tool}{err}\n{e.text[:DETAIL_LIMIT]}')
         elif n > hi:

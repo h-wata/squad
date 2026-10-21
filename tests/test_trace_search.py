@@ -22,7 +22,7 @@ SID_APPROX = '22222222-2222-4222-8222-222222222222'
 TOKEN = 'ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'  # pragma: allowlist secret
 
 
-def _jsonl(path: Path, ts: str) -> None:
+def _jsonl(path: Path, ts: str, extra: list[dict] | None = None) -> None:
     rows = [
         {'type': 'assistant', 'timestamp': ts, 'message': {'content': [{'type': 'text', 'text': 'まず build する'}]}},
         {
@@ -50,6 +50,7 @@ def _jsonl(path: Path, ts: str) -> None:
             'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'tu2', 'content': [{'text': 'make ok'}]}]},
         },
     ]
+    rows += extra or []
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('\n'.join(json.dumps(r) for r in rows) + '\nnot json\n')
 
@@ -69,7 +70,7 @@ def queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (pj / 'reports').mkdir()
     t2 = pj / 'tasks' / 'worker2.yaml'
     t2.write_text('task_id: T2\n')
-    start = 1_759_363_200  # 2026-10-02T00:00:00Z
+    start = 1_790_899_200  # 2026-10-02T00:00:00Z
     os.utime(t2, (start, start))
     (pj / 'reports' / 'worker1_report.yaml').write_text(
         f'task_id: T1\nstatus: completed\nworker: worker1\nsession_id: "{SID}"\n'
@@ -86,15 +87,15 @@ def test_search_exact_approx_and_missing(queue: Path) -> None:
     assert missing == ['pj/T3']
     hits = trace_search.search(srcs, 'make')
     lines = [trace_search.fmt(e, 'make') for e in hits]
-    assert any(line.startswith(f'{SID}:3  pj/T1 worker1') for line in lines)
-    assert any(line.startswith(f'~{SID_APPROX}:3  pj/T2 worker2') for line in lines)  # 近似は ~ 付き
+    assert any(line.startswith(f'{SID}:3.0  pj/T1 worker1') for line in lines)
+    assert any(line.startswith(f'~{SID_APPROX}:3.0  pj/T2 worker2') for line in lines)  # 近似は ~ 付き
 
 
 def test_filters(queue: Path) -> None:
     srcs, _ = trace_search.sources(queue, project='pj', task='T1')
     errors = trace_search.search(srcs, '', errors_only=True)
-    assert [(e.trace_id, e.tool, e.is_error) for e in errors] == [(f'{SID}:3', 'Bash', True)]
-    assert [e.trace_id for e in trace_search.search(srcs, 'make', tool='Read')] == [f'{SID}:5']
+    assert [(e.trace_id, e.tool, e.is_error) for e in errors] == [(f'{SID}:3.0', 'Bash', True)]
+    assert [e.trace_id for e in trace_search.search(srcs, 'make', tool='Read')] == [f'{SID}:5.0']
     assert [e.tool for e in trace_search.search(srcs, 'BUILD')] == ['text']
 
 
@@ -117,3 +118,59 @@ def test_approx_window_excludes_outside(queue: Path) -> None:
 
 def test_get_unknown_trace_id(queue: Path) -> None:
     assert 'transcript が見つかりません' in trace_search.get('nope:1')[0]
+
+
+def test_exact_session_is_cut_by_task_window(queue: Path) -> None:
+    """同じ session で T0 → T1 と続けて処理した。T1 の検索に T0 の分 (task 発行前) は出さない."""
+    pj = queue / 'projects' / 'pj'
+    t1 = pj / 'tasks' / 'worker1.yaml'
+    t1.write_text('task_id: T1\n')
+    start = 1_790_813_400  # 2026-10-01T00:10:00Z (fixture の行と同時刻)
+    os.utime(t1, (start, start))
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    early = {
+        'type': 'assistant',
+        'timestamp': '2026-10-01T00:00:00Z',
+        'message': {'content': [{'type': 'text', 'text': 'T0 の作業'}]},
+    }
+    projects = trace_search.mtc.CLAUDE_PROJECTS
+    _jsonl(projects / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z', [early])
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert trace_search.search(srcs, 'T0 の作業') == []
+    assert trace_search.search(srcs, 'build')
+
+
+def test_multiple_tool_results_in_one_line(queue: Path) -> None:
+    projects = trace_search.mtc.CLAUDE_PROJECTS
+    two = [
+        {
+            'type': 'assistant',
+            'timestamp': '2026-10-01T00:10:00Z',
+            'message': {
+                'content': [
+                    {'type': 'tool_use', 'id': 'a', 'name': 'Bash', 'input': {'command': 'one'}},
+                    {'type': 'tool_use', 'id': 'b', 'name': 'Bash', 'input': {'command': 'two'}},
+                ]
+            },
+        },
+        {
+            'type': 'user',
+            'timestamp': '2026-10-01T00:10:00Z',
+            'message': {
+                'content': [
+                    {'type': 'tool_result', 'tool_use_id': 'a', 'is_error': True, 'content': 'boom one'},
+                    {'type': 'tool_result', 'tool_use_id': 'b', 'is_error': True, 'content': 'boom two'},
+                ]
+            },
+        },
+    ]
+    _jsonl(projects / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z', two)
+    srcs, _ = trace_search.sources(queue, task='T1')
+    ids = sorted(e.trace_id for e in trace_search.search(srcs, 'boom', errors_only=True))
+    assert ids == [f'{SID}:7.0', f'{SID}:7.1']
+    assert len(trace_search.get(f'{SID}:7')) == 2  # 行だけ指定すれば全 block
+    only = trace_search.get(f'{SID}:7.1')
+    assert len(only) == 1
+    assert 'boom two' in only[0]

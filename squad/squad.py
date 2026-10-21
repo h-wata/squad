@@ -561,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ts.add_argument('--limit', type=int, default=20)
     p_ts.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
     p_tg = trace_sub.add_parser('get', help='trace_id の詳細 (出力はマスク済み)')
-    p_tg.add_argument('trace_id', help='<session_id>:<行番号>')
+    p_tg.add_argument('trace_id', help='<session_id>:<行>.<block> (<行> だけならその行の全 block)')
     p_tg.add_argument('--context', type=int, default=0, help='前後に含める行数')
     p_trace.set_defaults(func=cmd_trace)
 
