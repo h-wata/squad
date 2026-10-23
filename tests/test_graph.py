@@ -236,6 +236,7 @@ def test_status_counts_and_unfinished(status_queue: Path) -> None:
     [
         ('worker4_review_T1.yaml', 'task_id: T1\nverdict: approve\n'),  # 同じ task_id
         ('worker4_review_T1R.yaml', 'task_id: T1R\nverdict: approve\npr_url: https://github.com/o/r/pull/1\n'),  # PR
+        ('worker4_review_T1.yaml', 'task_id: T1\nverdict: approve_continues\n'),  # 古い approve の再レビュー
     ],
 )
 def test_verified_needs_verify_pass_and_approve(status_queue: Path, review_name: str, review: str) -> None:

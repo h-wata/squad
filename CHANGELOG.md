@@ -25,7 +25,7 @@
   `derived_from` を追加した。判断の根拠は ADR 0007 (#55)。
 - `squad graph status` を追加した。探索グラフから PJ ごとの未完了 task (running / blocked と理由) と、
   goal (Issue) ごとの running / blocked / done / verified / unreported の件数を出す。verified は
-  report の `verify_status: pass` と cross-review の `verdict: approve` から機械的に決まる (review は
+  report の `verify_status: pass` と cross-review の `verdict` (`approve` で始まる値) から機械的に決まる (review は
   task_id か `pr_url` で突き合わせる)。Dispatcher の状態復元の最初の手順にした。task YAML に任意の
   `replan_reason` を追加した。判断の根拠は ADR 0009 (#57)。
 - worker の Claude Code transcript を横断検索する `squad trace search / get` を追加した

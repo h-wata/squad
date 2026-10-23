@@ -29,7 +29,8 @@ Dispatcher は `/clear` やセッションの再起動のあと、`dashboard.md`
 2. **status は毎回 sync してから読む。** watchd は report を配達したときにしか sync しないので、
    発行したばかりの task が running に出ない。sync は実 queue で約 1.2 秒なので、毎回作り直す。
 3. **verified は YAML から機械的に決める。** done のうち、最新 report の `verify_status` が
-   `pass` で、最新の cross-review の `verdict` が `approve` のもの。cross-review は実装と別の
+   `pass` で、最新の cross-review の `verdict` が `approve` で始まるもの（`approve_continues` /
+   `approve_with_nits` なども承認に数える）。cross-review は実装と別の
    task_id で発行されることが多い（実 queue の review report 156 件中 142 件）ので、task_id に加えて
    `pr_url` でも突き合わせる。
 4. **出力するだけで、再開・再起票はしない。** `dispatcher.md` の「勝手に再開・再起票はしない」は

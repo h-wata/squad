@@ -262,7 +262,8 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
                 review = max([(0.0, ''), *reviews.get(intent, []), *(reviews.get(pr, []) if pr else [])])[1]
                 if status not in ('completed', 'complete'):
                     nodes[intent]['state'] = 'blocked'
-                elif verify in ('pass', 'passed') and review == 'approve':
+                # approve / approve_continues (再レビュー, dispatcher.md) / approve_with_nits 等を承認とみなす
+                elif verify in ('pass', 'passed') and review.startswith('approve'):
                     nodes[intent]['state'] = 'verified'
                 else:
                     nodes[intent]['state'] = 'done'
