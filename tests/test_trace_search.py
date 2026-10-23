@@ -87,8 +87,11 @@ def test_search_exact_approx_and_missing(queue: Path) -> None:
     assert missing == ['pj/T3']
     hits = trace_search.search(srcs, 'make')
     lines = [trace_search.fmt(e, 'make') for e in hits]
-    assert any(line.startswith(f'{SID}:3.0  pj/T1 worker1') for line in lines)
-    assert any(line.startswith(f'~{SID_APPROX}:3.0  pj/T2 worker2') for line in lines)  # 近似は ~ 付き
+    assert any(line.startswith(f'{SID}:3.0   pj/T1 worker1') for line in lines)
+    approx = next(line for line in lines if line.startswith(f'{SID_APPROX}:3.0 ~ pj/T2 worker2'))  # 近似は ~ 付き
+    # 出力の先頭の ID をそのまま get に渡せる (近似の transcript でも)
+    assert 'make failed' in '\n'.join(trace_search.get(approx.split()[0]))
+    assert 'make failed' in '\n'.join(trace_search.get(f'~{SID_APPROX}:3.0'))  # 旧形式の ~ 付きも受ける
 
 
 def test_filters(queue: Path) -> None:

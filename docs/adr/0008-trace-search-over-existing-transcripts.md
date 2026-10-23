@@ -36,8 +36,8 @@ transcript を特定する関数（exact / 時間窓による近似）を持っ�
    ただし PRIVATE KEY だけは shell 版より強くする。transcript の tool 入力は `json.dumps` で
    改行が `\n` になり鍵が 1 行に詰まるため、BEGIN と同じ行の本文も伏せる。
 4. **transcript の特定は `measure_task_cost.py` の関数を import して使う。** `session_id` が
-   無い report は時間窓の近似になり、同じ cwd の他 session が混ざりうるので、出力の行頭に `~`
-   を付けて区別する。
+   無い report は時間窓の近似になり、同じ cwd の他 session が混ざりうるので、出力の trace_id の後ろに
+   `~` を付けて区別する（trace_id はそのまま `get` に渡せるよう、`~` を ID に含めない）。
    `session_id` がある場合も、task YAML の mtime 〜 report の `completed_at` の時間窓で切る。
    worker は `/clear` せずに次の task を受けることがあり、1 つの session に複数 task が入るため。
 5. **モジュール名は `trace_search.py`。** Python 標準ライブラリの `trace` を隠さないため

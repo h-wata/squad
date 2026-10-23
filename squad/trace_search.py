@@ -172,9 +172,10 @@ def fmt(e: Entry, query: str = '') -> str:
     flat = ' '.join(e.text.split())
     i = max(flat.lower().find(query.lower()) - 40, 0) if query else 0
     s = e.source
-    mark = '' if s.exact else '~'  # ~ = session_id が無く時間窓で近似した transcript
+    # ~ = session_id が無く時間窓で近似した transcript。trace_id をそのまま get に渡せるよう ID の後ろに置く
+    mark = ' ' if s.exact else '~'
     err = ' ERROR' if e.is_error else ''
-    head = f'{mark}{e.trace_id}  {s.project}/{s.task_id} {s.worker} {e.timestamp[:19]} {e.tool}{err}'
+    head = f'{e.trace_id} {mark} {s.project}/{s.task_id} {s.worker} {e.timestamp[:19]} {e.tool}{err}'
     return f'{head}  {flat[i : i + SNIPPET]}'
 
 
@@ -183,7 +184,7 @@ def get(trace_id: str, context: int = 0) -> list[str]:
 
     `<session_id>:<行>` だけなら、その行の全 block を返す.
     """
-    session_id, _, pos = trace_id.rpartition(':')
+    session_id, _, pos = trace_id.lstrip('~').rpartition(':')
     line, _, blk = pos.partition('.')
     path = mtc.find_session_transcript(session_id)
     if not path or not line.isdigit() or not (blk.isdigit() or not blk):

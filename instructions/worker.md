@@ -89,8 +89,8 @@ kioku-mesh が使える場合、非自明な学びが出たら**その場で** `
 同じ project の過去 task で失敗した手順を、着手前に確認してよい (squad の主 checkout で実行):
 `python3 squad/squad.py trace search <語句> --project <project> --errors-only`。
 詳細は表示された trace_id を `python3 squad/squad.py trace get <trace_id> --context 2` で引く。
-出力は secret をマスク済み。行頭が `~` のものは時間窓で近似した transcript で、他の session が
-混ざりうる。
+出力は secret をマスク済み。trace_id の後ろに `~` が付いたものは時間窓で近似した transcript で、
+他の session が混ざりうる。
 
 ## 補助ターミナルの操作
 
