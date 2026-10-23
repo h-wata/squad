@@ -16,6 +16,10 @@ DB を消しても `squad graph sync` で同じ内容に戻る。report 配達 l
 エッジ: goal -spawns-> intent、intent -yields-> result、result -yields-> fact、
         intent -derived_from-> intent|result (task YAML の任意フィールド derived_from)
 
+intent の state (#57): running (tasks/ 直下にあり、それより新しい report が無い) / blocked (最新 report の
+status が completed 以外) / done / verified (done のうち verify_status が pass で、最新の cross-review が
+approve) / unreported (archive にしか無く report も無い)。`squad graph status` はこれを集計して表示する。
+
 YAML のネスト (context / decision_bearing_claims / derived_from) を読むため PyYAML を使う。
 squad.py / watchd.py の stdlib only を崩さないよう、import はこのモジュールの中だけで行い、
 呼び出し側は ImportError を受けて graph 機能だけを諦める。
@@ -162,6 +166,8 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
                 current,
                 assigned_to=_s(data.get('assigned_to')),
                 created_at=_s(data.get('created_at')),
+                routing_reason=_s(data.get('routing_reason')),
+                replan_reason=_s(data.get('replan_reason')),
             )
             context = data.get('context') if isinstance(data.get('context'), dict) else {}
             goal = _goal_id(project, context.get('parent_issue'))
@@ -181,14 +187,26 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
                 if _s(ref).strip():
                     edges.add((intent, 'derived_from', _derived_target(project, _s(ref))))
 
-        results: dict[str, list[tuple[float, str]]] = {}  # intent id -> [(mtime, status)]
+        results: dict[
+            str, list[tuple[float, str, str, str, str]]
+        ] = {}  # intent -> [(mtime, status, verify, result, pr)]
+        # cross-review の verdict。review は別 task_id で発行されることが多い (実 queue で 156 件中 142 件) ので、
+        # task_id に加えて pr_url でも実装側と突き合わせる
+        reviews: dict[str, list[tuple[float, str]]] = {}  # intent id か pr_url -> [(mtime, verdict)]
         for path in sorted((pj_dir / 'reports').rglob('*.yaml')):
             try:
                 raw = path.read_bytes()
             except OSError:
                 continue
             data = _load(path)
-            if not data or not _s(data.get('task_id')).strip() or not _s(data.get('status')).strip():
+            if not data or not _s(data.get('task_id')).strip():
+                continue
+            if _s(data.get('verdict')).strip():  # cross-review の report (status を持たないことが多い)
+                verdict = (path.stat().st_mtime, _s(data['verdict']).strip())
+                reviews.setdefault(f'intent:{project}/{_s(data["task_id"]).strip()}', []).append(verdict)
+                if pr := _s(data.get('pr_url')).strip().rstrip('/'):
+                    reviews.setdefault(pr, []).append(verdict)
+            if not _s(data.get('status')).strip():
                 continue  # verdict 等、report 以外の YAML
             key = _result_key(data, raw)
             result = f'result:{key}'
@@ -210,7 +228,9 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
                 review='_review' in path.name,
             )
             edges.add((intent, 'yields', result))
-            results.setdefault(intent, []).append((mtime, status))
+            verify = _s(data.get('verify_status')).strip()
+            pr = _s(data.get('pr_url')).strip().rstrip('/')
+            results.setdefault(intent, []).append((mtime, status, verify, result, pr))
             claims = data.get('decision_bearing_claims')
             for i, c in enumerate(claims if isinstance(claims, list) else []):
                 if isinstance(c, dict) and _s(c.get('claim')).strip():
@@ -231,12 +251,22 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
         # 新しければ差し戻し後の再実行中。result が無く archive にしか無い task は、報告されずに
         # 外されたか、report が上書きされて残っていない (unreported のまま。実 queue では大半が
         # 後者)。archive への cp で mtime が進むことがあるので、archive の task は mtime を比べない
+        # verified (検証済み) は done のうち、最新 result の verify_status が pass で、最新の
+        # cross-review が approve のもの (#57)。どちらも YAML から機械的に決まる
         for intent, (current, mtime) in task_files.items():
             reported = sorted(results.get(intent, []))
             if current and (not reported or reported[-1][0] < mtime):
                 nodes[intent]['state'] = 'running'
             elif reported:
-                nodes[intent]['state'] = 'done' if reported[-1][1] in ('completed', 'complete') else 'blocked'
+                _, status, verify, result, pr = reported[-1]
+                review = max([(0.0, ''), *reviews.get(intent, []), *(reviews.get(pr, []) if pr else [])])[1]
+                if status not in ('completed', 'complete'):
+                    nodes[intent]['state'] = 'blocked'
+                elif verify in ('pass', 'passed') and review == 'approve':
+                    nodes[intent]['state'] = 'verified'
+                else:
+                    nodes[intent]['state'] = 'done'
+                nodes[intent]['payload'].update(latest_result=result, verify_status=verify, review=review)
     return nodes, edges
 
 
@@ -284,6 +314,74 @@ def sync(queue_dir: Path, db_path: Path | None = None) -> tuple[int, int]:
     finally:
         conn.close()
     return len(nodes), len(edges)
+
+
+STATES = ('running', 'blocked', 'done', 'verified', 'unreported')
+UNFINISHED = ('running', 'blocked')
+
+
+def status(db_path: Path, project: str | None = None) -> dict[str, Any]:
+    """Project ごとに、goal 別の intent 件数と未完了 (running / blocked) の intent 一覧を返す (読み取りのみ)."""
+    conn = connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT n.project, n.node_id, n.state, n.title, n.payload_json, n.updated_at, COALESCE(e.src_id, '-') "
+            "FROM nodes n LEFT JOIN edges e ON e.dst_id = n.node_id AND e.rel = 'spawns' "
+            "WHERE n.kind = 'intent' AND (? IS NULL OR n.project = ?) ORDER BY n.project, n.node_id",
+            (project, project),
+        ).fetchall()
+        results = {
+            r[0]: r[1:] for r in conn.execute("SELECT node_id, title, updated_at FROM nodes WHERE kind = 'result'")
+        }
+    finally:
+        conn.close()
+    out: dict[str, Any] = {}
+    for pj, node_id, state, title, payload_json, updated_at, goal in rows:
+        pj_out = out.setdefault(pj, {'goals': {}, 'unfinished': []})
+        counts = pj_out['goals'].setdefault(goal, dict.fromkeys(STATES, 0))
+        counts[state] = counts.get(state, 0) + 1
+        if state not in UNFINISHED:
+            continue
+        payload = json.loads(payload_json)
+        result = payload.get('latest_result', '') if state == 'blocked' else ''
+        reason, reported_at = results.get(result, ('', ''))
+        pj_out['unfinished'].append(
+            {
+                'node_id': node_id,
+                'state': state,
+                'title': title,
+                'goal': goal,
+                'assigned_to': payload.get('assigned_to', ''),
+                # running は task の発行 (mtime)、blocked は report の日付。古いものは放置の可能性がある
+                'since': (reported_at if result else updated_at)[:10],
+                'reason_id': result,
+                'reason': reason,
+            }
+        )
+    return out
+
+
+def render_status(data: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for pj, pj_out in data.items():
+        lines += [f'## {pj}', '', '| goal | ' + ' | '.join(STATES) + ' |', '|---' * (len(STATES) + 1) + '|']
+        only_unreported = 0
+        for goal, c in sorted(pj_out['goals'].items()):
+            if goal != '-' and sum(c.values()) == c['unreported']:
+                only_unreported += 1  # report が上書きされて追えない過去分だけの goal は畳む
+                continue
+            lines.append(f'| {goal} | ' + ' | '.join(str(c[k]) for k in STATES) + ' |')
+        if only_unreported:
+            lines.append(f'| (unreported だけの goal {only_unreported} 件) |' + ' |' * len(STATES))
+        lines += ['', '未完了:' if pj_out['unfinished'] else '未完了: なし']
+        for u in pj_out['unfinished']:
+            lines.append(
+                f'- [{u["state"]} {u["since"]}] {u["node_id"]} {u["title"]} ({u["assigned_to"] or "-"}, {u["goal"]})'
+            )
+            if u['reason_id']:
+                lines.append(f'  理由: {u["reason"][:100]} ({u["reason_id"]})')
+        lines.append('')
+    return lines
 
 
 def _iso(mtime: float) -> str:

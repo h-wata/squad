@@ -182,3 +182,67 @@ def test_concurrent_init_on_fresh_db(queue: Path) -> None:
         for t in threads:
             t.join()
     assert errors == []
+
+
+@pytest.fixture
+def status_queue(queue: Path) -> Path:
+    """T1: done (後で verified)、T2: running、T3: blocked、T4: done (PR の review は request_changes)."""
+    pj = queue / 'projects' / 'pj'
+    _write(pj / 'tasks' / 'archive' / 'worker3_T3.yaml', 'task_id: T3\ntitle: "詰まった"\nassigned_to: worker3\n', 100)
+    _write(
+        pj / 'reports' / 'archive' / 'worker3_T3.yaml',
+        'task_id: T3\nstatus: blocked\nsummary: "権限が無く投稿できない"\n',
+        110,
+    )
+    _write(pj / 'tasks' / 'archive' / 'worker4_T4.yaml', 'task_id: T4\n', 100)
+    _write(
+        pj / 'reports' / 'archive' / 'worker4_T4.yaml',
+        'task_id: T4\nstatus: completed\nverify_status: pass\npr_url: "https://github.com/o/r/pull/9"\n',
+        110,
+    )
+    _write(
+        pj / 'reports' / 'archive' / 'worker4_review_T4R.yaml',
+        'task_id: T4R\nverdict: request_changes\npr_url: "https://github.com/o/r/pull/9/"\n',
+        120,
+    )
+    return queue
+
+
+def _status(queue: Path) -> dict:
+    graph.sync(queue)
+    return graph.status(graph.default_db_path(queue))['pj']
+
+
+def test_status_counts_and_unfinished(status_queue: Path) -> None:
+    pj = _status(status_queue)
+    assert pj['goals']['goal:pj#42'] == {'running': 1, 'blocked': 0, 'done': 1, 'verified': 0, 'unreported': 0}
+    assert pj['goals']['-'] == {'running': 0, 'blocked': 1, 'done': 1, 'verified': 0, 'unreported': 0}
+    unfinished = {u['node_id']: u for u in pj['unfinished']}
+    assert set(unfinished) == {'intent:pj/T2', 'intent:pj/T3'}
+    blocked = unfinished['intent:pj/T3']
+    assert blocked['reason'] == '権限が無く投稿できない'
+    assert blocked['reason_id'].startswith('result:sha:')
+    assert blocked['assigned_to'] == 'worker3'
+    # 各行の node_id から why で根拠 (report) まで辿れる
+    text = '\n'.join(graph.why(graph.default_db_path(status_queue), blocked['reason_id']))
+    assert 'intent:pj/T3' in text
+    lines = '\n'.join(graph.render_status({'pj': pj}))
+    assert '[blocked 1970-01-01] intent:pj/T3 詰まった (worker3, -)' in lines
+    assert '理由: 権限が無く投稿できない' in lines
+
+
+@pytest.mark.parametrize(
+    ('review_name', 'review'),
+    [
+        ('worker4_review_T1.yaml', 'task_id: T1\nverdict: approve\n'),  # 同じ task_id
+        ('worker4_review_T1R.yaml', 'task_id: T1R\nverdict: approve\npr_url: https://github.com/o/r/pull/1\n'),  # PR
+    ],
+)
+def test_verified_needs_verify_pass_and_approve(status_queue: Path, review_name: str, review: str) -> None:
+    pj_dir = status_queue / 'projects' / 'pj'
+    report = pj_dir / 'reports' / 'archive' / 'worker1_T1.yaml'
+    _write(report, report.read_text() + 'pr_url: "https://github.com/o/r/pull/1"\n', 200)
+    _write(pj_dir / 'reports' / 'archive' / review_name, review, 210)
+    pj = _status(status_queue)
+    assert pj['goals']['goal:pj#42']['verified'] == 1  # T1
+    assert pj['goals']['-']['done'] == 1  # T4 は request_changes なので done のまま

@@ -460,6 +460,16 @@ def cmd_graph(args: argparse.Namespace, _cfg: dict) -> int:
         n_nodes, n_edges = graph.sync(queue_dir, db)
         print(f'synced {n_nodes} nodes, {n_edges} edges -> {db}')
         return 0
+    if args.graph_cmd == 'status':
+        # watchd は report 配達時にしか sync しないので、発行直後の task も拾えるよう毎回作り直す
+        graph.sync(queue_dir, db)
+        data = graph.status(db, args.project)
+        print(
+            json.dumps(data, ensure_ascii=False, indent=2)
+            if args.format == 'json'
+            else '\n'.join(graph.render_status(data))
+        )
+        return 0
     if not db.exists():
         print(f'{db} がありません。先に squad graph sync を実行してください', file=sys.stderr)
         return 1
@@ -538,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
     p_graph = sub.add_parser('graph', help='task / report YAML の探索グラフ索引 (Issue #55)')
     graph_sub = p_graph.add_subparsers(dest='graph_cmd', required=True)
     graph_sub.add_parser('sync', help='YAML から索引を作り直す (YAML は書き換えない)')
+    p_gs = graph_sub.add_parser('status', help='goal 別の intent 件数と未完了 intent 一覧 (sync してから表示)')
+    p_gs.add_argument('--project')
+    p_gs.add_argument('--format', choices=['markdown', 'json'], default='markdown')
     for name, help_text in (
         ('why', 'node_id から導出元 (goal 方向) へ遡る'),
         ('show', '1 ノードと前後のエッジを表示'),
