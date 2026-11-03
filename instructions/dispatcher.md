@@ -39,6 +39,9 @@
 3. `queue/_inbox.md`: watcher が積んだ未処理 (`- [ ]`) の発見候補
 4. kioku-mesh 等のメモリ MCP が設定されていれば、`search_memory(project="<pj>", limit=10)` で
    直近の方針・決定・PJ 知識を復元（worker に渡すべき制約があれば task 化時に反映）。
+   特定の task で保存された記憶は `recall_context(reference_prefix="squad:task:<pj>/<task_id>")`
+   （PJ 全体なら `squad:task:<pj>/`）で引ける。逆に記憶の references の `squad:task:<pj>/<task_id>` は
+   探索グラフの `intent:<pj>/<task_id>` なので、`squad graph show` で task YAML と report まで辿れる (#58)。
    設定が無ければこの項目はスキップしてよい
 5. 通知 queue を opt-in (`WATCH_NOTIFY_QUEUE=1`) している場合、または**過去に一度でも
    opt-in してから off に戻した (rollback) 場合**: `squad notify pull --health` で未 ack

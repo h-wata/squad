@@ -78,6 +78,11 @@ kioku-mesh が使える場合、非自明な学びが出たら**その場で** `
 - 設計判断 → `decision` / 設定変更の理由 → `config`
 - `project="<project>"` を付ける。importance は PJ 全体に効くもの = 4-5。
 - 既存知識を更新する場合は `supersedes=[古いid]` で繋ぐ（kioku-mesh は append-only）。
+- `references` に由来 task を必ず入れる (#58): `squad:task:<project>/<task_id>`。report を書いた後に
+  保存するなら `squad:report:<report_id>` も入れる。別の記憶から導いた知見なら `obs:<observation_id>`
+  （書式は kioku-mesh ADR-0036）。保存した observation_id は report の `memory_refs` に書く。
+- 記憶にするのは、report の `decision_bearing_claims` のうち `confirmed` のものと、`assumptions` のうち
+  以後の設計を縛るものだけ。それ以外は report に書くだけにし、同じ内容を両方に全文で書かない。
 - identity 引数 (user_id/agent_family 等) は渡さない（サーバー側解決, ADR-0004）。
 - PR/Issue ライフサイクルや「テスト通った」等の定型は保存しない（ノイズ回避）。
 

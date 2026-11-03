@@ -23,6 +23,12 @@
   で fact → result → task → Issue の導出経路を辿れる。YAML が正本で、DB は何度でも作り直せる
   派生索引。watchd は report を配達したサイクルで自動的に作り直す。task YAML に任意の
   `derived_from` を追加した。判断の根拠は ADR 0007 (#55)。
+- task / report と kioku-mesh の記憶を references で相互参照する規約を入れた。worker は
+  `save_observation` の `references` に `squad:task:<project>/<task_id>` を入れ、保存した observation_id を
+  report の任意フィールド `memory_refs` に書く。Dispatcher は `recall_context(reference_prefix=...)` で task
+  ごとの記憶を引ける。記憶にするのは confirmed の claim と設計を縛る assumption だけ。
+  `check_report_yaml.py` は `memory_refs` が 32 桁 16 進の list かだけを見る (kioku-mesh には接続しない)。
+  書式は h-wata/kioku-mesh の ADR-0036 (#58)。
 - `squad graph status` を追加した。探索グラフから PJ ごとの未完了 task (running / blocked と理由) と、
   goal (Issue) ごとの running / blocked / done / verified / unreported の件数を出す。verified は
   report の `verify_status: pass` と cross-review の `verdict` (`approve` で始まる値) から機械的に決まる (review は
