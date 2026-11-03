@@ -89,3 +89,11 @@ def test_missing_graph_db_shows_dash_and_no_bench_records_fails(tmp_path: Path, 
 
     empty = _write_jsonl(tmp_path / 'e.jsonl', [{'task_id': 'OLD', 'project': 'pj'}])
     assert bench_report.main(['--metrics', str(empty)]) == 1
+
+
+def test_same_trial_label_on_another_task_is_counted_once(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    metrics = _write_jsonl(tmp_path / 'm.jsonl', [_rec('A1', 'sonnet', 1), _rec('A9', 'sonnet', 1)])
+    records = bench_report.load_bench_records(metrics)
+
+    assert [r['task_id'] for r in records] == ['A9']
+    assert '重複' in capsys.readouterr().err

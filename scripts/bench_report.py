@@ -30,15 +30,28 @@ COLUMNS = ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation
 
 
 def load_bench_records(path: Path) -> list[dict]:
-    """Bench 付きのレコードを、(project, task_id) ごとに最後の 1 件だけ返す."""
-    latest: dict[tuple[str, str], dict] = {}
+    """Bench 付きのレコードを、(suite, config, trial) ごとに最後の 1 件だけ返す.
+
+    同じ trial を 2 回数えると trials・成功率・中央値がずれる。別の task に同じ trial 番号を
+    付けていたら、後のものを採って stderr に出す (測り直しは同じ task なので黙って置き換える).
+    """
+    latest: dict[tuple[str, str, str], dict] = {}
     for line in path.read_text(encoding='utf-8').splitlines():
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(rec, dict) and isinstance(rec.get('bench'), dict):
-            latest[rec.get('project', ''), rec.get('task_id', '')] = rec
+        if not (isinstance(rec, dict) and isinstance(rec.get('bench'), dict)):
+            continue
+        key = tuple(str(rec['bench'].get(k, '')) for k in ('suite', 'config', 'trial'))
+        old = latest.get(key)
+        if old and (old.get('project'), old.get('task_id')) != (rec.get('project'), rec.get('task_id')):
+            print(
+                f'bench {key} が {old.get("task_id")} と {rec.get("task_id")} で重複しています。'
+                f'{rec.get("task_id")} を使います',
+                file=sys.stderr,
+            )
+        latest[key] = rec
     return list(latest.values())
 
 
