@@ -247,3 +247,12 @@ def test_verified_needs_verify_pass_and_approve(status_queue: Path, review_name:
     pj = _status(status_queue)
     assert pj['goals']['goal:pj#42']['verified'] == 1  # T1
     assert pj['goals']['-']['done'] == 1  # T4 は request_changes なので done のまま
+
+
+def test_verified_ignores_approve_older_than_latest_result(status_queue: Path) -> None:
+    pj_dir = status_queue / 'projects' / 'pj'
+    _write(pj_dir / 'reports' / 'archive' / 'worker4_review_T4R2.yaml', 'task_id: T4\nverdict: approve\n', 130)
+    assert _status(status_queue)['goals']['-']['verified'] == 1  # T4: approve が最新 report より新しい
+    report = pj_dir / 'reports' / 'archive' / 'worker4_T4.yaml'
+    _write(report, report.read_text(), 140)  # やり直して新しい report が出た
+    assert _status(status_queue)['goals']['-']['verified'] == 0  # 古い approve は新しい report を承認しない

@@ -258,8 +258,10 @@ def collect(queue_dir: Path) -> tuple[dict[str, dict[str, Any]], set[tuple[str, 
             if current and (not reported or reported[-1][0] < mtime):
                 nodes[intent]['state'] = 'running'
             elif reported:
-                _, status, verify, result, pr = reported[-1]
-                review = max([(0.0, ''), *reviews.get(intent, []), *(reviews.get(pr, []) if pr else [])])[1]
+                latest, status, verify, result, pr = reported[-1]
+                # 最新 result より前の review は、やり直す前の変更へのものなので数えない
+                candidates = [*reviews.get(intent, []), *(reviews.get(pr, []) if pr else [])]
+                review = max([(0.0, ''), *(r for r in candidates if r[0] >= latest)])[1]
                 if status not in ('completed', 'complete'):
                     nodes[intent]['state'] = 'blocked'
                 # approve / approve_continues (再レビュー, dispatcher.md) / approve_with_nits 等を承認とみなす

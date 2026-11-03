@@ -29,7 +29,7 @@ Dispatcher は `/clear` やセッションの再起動のあと、`dashboard.md`
 2. **status は毎回 sync してから読む。** watchd は report を配達したときにしか sync しないので、
    発行したばかりの task が running に出ない。sync は実 queue で約 1.2 秒なので、毎回作り直す。
 3. **verified は YAML から機械的に決める。** done のうち、最新 report の `verify_status` が
-   `pass` で、最新の cross-review の `verdict` が `approve` で始まるもの（`approve_continues` /
+   `pass` で、その report 以降で最新の cross-review の `verdict` が `approve` で始まるもの（`approve_continues` /
    `approve_with_nits` なども承認に数える）。cross-review は実装と別の
    task_id で発行されることが多い（実 queue の review report 156 件中 142 件）ので、task_id に加えて
    `pr_url` でも突き合わせる。
@@ -55,3 +55,5 @@ Dispatcher は `/clear` やセッションの再起動のあと、`dashboard.md`
   graph からは見分けられない。日付を出しているので、Dispatcher が判断する。
 - blocked は、次の report が来るまで blocked のまま出続ける（人間が別経路で解決した場合も）。
 - verified は、report が上書きされて残っていない task では判定できない（unreported になる）。
+- review と report の前後は mtime で比べる。archive への cp で report の mtime が進むと、後から出た
+  approve でも数えられず done になる（未レビューを verified にする方向には倒れない）。
