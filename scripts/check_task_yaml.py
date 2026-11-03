@@ -267,6 +267,24 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
     else:
         results.append(Result(14, 'OK', f'derived_from: {derived}'))
 
+    # 15. bench (#59, 任意)。measure_task_cost.py が jsonl に書き写し、bench_report.py が suite × config で集計する
+    bench = data.get('bench')
+    if bench is None:
+        results.append(Result(15, 'OK', 'bench はありません (対象外)'))
+    elif (
+        not isinstance(bench, dict)
+        or set(bench) != {'suite', 'config', 'trial'}
+        or not all(isinstance(bench[k], str) and bench[k].strip() for k in ('suite', 'config'))
+        or isinstance(bench['trial'], bool)
+        or not isinstance(bench['trial'], int)
+        or bench['trial'] <= 0
+    ):
+        results.append(
+            Result(15, 'NG', f'bench は {{suite: 文字列, config: 文字列, trial: 正の整数}} にしてください: {bench!r}')
+        )
+    else:
+        results.append(Result(15, 'OK', f'bench: {bench}'))
+
     # 16. next_on_pass / next_on_fail (#34, 任意)。watchd は stdlib の parse_block で読むので、
     # PyYAML で読めても parse_block で同じ値にならない書き方 (flow 形式等) は NG にする
     for key in ('next_on_pass', 'next_on_fail'):

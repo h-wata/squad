@@ -83,6 +83,9 @@ context:
 # 任意 (#55): この task が前提にした過去の task_id (同じ project) か report_id (UUID)。
 # 探索グラフ (squad graph why) で導出元を辿れるようにする。無ければ省略
 # derived_from: ["TASK-011", "11111111-1111-4111-8111-111111111111"]
+# 任意 (#59): ハーネス構成の比較ベンチマークで流す task だけに付ける。手順は docs/benchmark.md。
+# measure_task_cost.py が計測結果に書き写し、bench_report.py が suite × config で集計する
+# bench: {suite: "issue34", config: "claude-sonnet", trial: 1}
   # 例: ["/safe-pathspec-commit", "/inherit-wip"]
   recommended_skills: []
 # 任意 (#34): report の後に起票する次の step。watchd が report の verify_status で選び
