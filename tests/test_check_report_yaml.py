@@ -171,6 +171,7 @@ def test_memory_refs_absent_or_valid_is_ok(tmp_path: Path) -> None:
 def test_memory_refs_invalid_is_ng(tmp_path: Path) -> None:
     pj = _project(tmp_path, TASK_NO_VERIFY)
     base = 'task_id: T1\nworker: worker1\nstatus: completed\nassumptions: none\n'
-    for extra in ('memory_refs: abc\n', 'memory_refs: ["obs:' + '0' * 32 + '"]\n', 'memory_refs: ["123"]\n'):
+    obs_prefixed = 'memory_refs: ["obs:' + '0' * 32 + '"]\n'
+    for extra in ('memory_refs: abc\n', 'memory_refs: {}\n', obs_prefixed, 'memory_refs: ["123"]\n'):
         p = _report(pj, base + extra)
         assert 5 in _ng_items(check_report_yaml(p))

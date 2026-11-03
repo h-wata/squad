@@ -182,7 +182,7 @@ def check_stop_reason(data: dict) -> Result:
 def check_memory_refs(data: dict) -> Result:
     """memory_refs は任意。書いたなら kioku-mesh の observation_id (32 桁 16 進) の list であること (#58)."""
     refs = data.get('memory_refs')
-    if is_blank(refs) or refs == []:
+    if refs is None or refs == []:  # {} や '' は書き間違いとして下で NG にする
         return Result(5, 'OK', 'memory_refs なし')
     if not isinstance(refs, list):
         return Result(5, 'NG', f'memory_refs は list で書いてください: {refs!r}')
