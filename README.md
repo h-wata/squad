@@ -16,8 +16,9 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
 - **Codex CLI (`codex`)** — Worker 4 (Codex 担当) を使う場合のみ必須。使わない場合は
   `SQUAD_ENABLE_CODEX=0` を指定して起動すれば Pane 6 (Codex) を起動せずに済む
   （詳細は下記「起動 / 終了」参照）。
-- **Python 3** — `squad/squad.py` は標準ライブラリのみで動作し、追加パッケージの
-  インストールは不要。
+- **Python 3 + PyYAML** — task / report の検査スクリプト (`scripts/check_*.py`) と
+  `squad graph` が PyYAML を使う (例: `apt install python3-yaml` か `pip install pyyaml`)。
+  それ以外の `squad/squad.py` のサブコマンドは標準ライブラリだけで動く。
   report ledger は Python 標準の `sqlite3` で排他制御するため、`flock` 等の追加ツールは
   不要（Issue #26 の Python 移植で `flock` 依存は廃止）。
 
@@ -214,7 +215,7 @@ SQUAD_DISPATCHER_MODEL=sonnet ./start.sh <workspace_path>
 | `scripts/pi-log-triage.sh` | ログ 1 本を pi (local vLLM) に読ませ、根拠付きの一次切り分け YAML を返す薄いラッパー |
 | `scripts/hooks/on-event.sh` | Claude Code hook。Stop/Notification 等のイベントを `squad/state/<worker>.json` に即時反映 |
 | `squad/squad.py` | worker 状態確認・タスク割当・dashboard 生成用の軽量 CLI (stdlib only) |
-| `squad/graph.py` | task / report YAML から探索グラフの派生索引 `queue/.graph.db` を作る (`squad graph sync / why / show / status`。PyYAML を使うのはここだけ) |
+| `squad/graph.py` | task / report YAML から探索グラフの派生索引 `queue/.graph.db` を作る (`squad graph sync / why / show / status`) |
 | `squad/trace_search.py` / `squad/mask.py` | worker の Claude Code transcript を横断検索する `squad trace search / get`。出力は `pi-log-triage.sh` と同じ規則で secret をマスクする |
 | `instructions/dispatcher.md` / `worker.md` / `worker-codex.md` | 各エージェントの役割定義。Claude には `--append-system-prompt`、Codex (W4) には同等フラグが無いため初期プロンプトとして渡す |
 | `queue/projects/<project>/` | PJ 単位のタスク/報告 YAML 置き場 |

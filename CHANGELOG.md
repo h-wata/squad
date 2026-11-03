@@ -59,6 +59,10 @@
 
 ### Fixed
 
+- README の Prerequisites に PyYAML を追加した。`scripts/check_report_yaml.py` /
+  `check_task_yaml.py` / `check_dashboard_update.py` と `squad graph` が使うのに、
+  「標準ライブラリのみ」と書いていた (#65)。
+
 - `notify-worker.sh` が Enter を打つ前に「テキストが本当に pane の入力欄へ乗ったか」を
   確認し、乗っていなければ `C-u` で消して再送するようにした (既定 5 回、待ち 3+6+9+12 秒。
   `SQUAD_SEND_RETRIES` で変更可)。乗らないまま終わった場合は Enter を打たず非 0 で返す。
