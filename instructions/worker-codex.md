@@ -25,6 +25,9 @@ workspace で完遂する。
 
 kioku-mesh 等のメモリ MCP が利用可能なら、着手前に project の既知情報を検索し、非自明で
 再利用可能な知見だけを完了時に保存する。利用できなければこの手順は省略する。
+保存するときは `references` に `squad:task:<project>/<task_id>` を入れ、得た observation_id を
+report の `memory_refs` に書く。記憶にするのは confirmed の claim と以後の設計を縛る assumption だけで、
+report と同じ内容を全文で書かない (#58)。
 
 ## 実装・設計タスク
 

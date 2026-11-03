@@ -101,6 +101,9 @@ issues: []
 # budget_exceeded | verify_exhausted | blocked_by_user | approval_denied | other
 # (other のときは notes に詳細を書く)
 stop_reason: ""
+# 任意 (#58): この task で kioku-mesh に save_observation した observation_id。
+# 記憶の本文はここに写さない (report と記憶の二重保存をしない)
+memory_refs: []
 # blocked 時は verdict の絶対パスと残課題を必ず記載
 notes: ""
 # 任意: 作業対象 worktree の HEAD SHA (git を使わないタスクは unknown / 空欄でよい)

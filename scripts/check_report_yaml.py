@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import sys
 
 import yaml
@@ -42,6 +43,8 @@ PLACEHOLDER_VALUES = ('-', 'n/a', 'tbd', '')
 SKIP_VERDICT_SUFFIXES = ('_verdict.yaml', '_review.yaml')
 # 途中停止の理由 (#54)。空・未記入は「止めていない」扱いで OK
 VALID_STOP_REASONS = ('budget_exceeded', 'verify_exhausted', 'blocked_by_user', 'approval_denied', 'other')
+# kioku-mesh の observation_id (#58)。kioku-mesh には問い合わせない (Squad 単体でも通すため)
+OBSERVATION_ID_RE = re.compile(r'[0-9a-f]{32}')
 
 
 class Result:
@@ -176,6 +179,19 @@ def check_stop_reason(data: dict) -> Result:
     return Result(4, 'OK', f'stop_reason: {reason}')
 
 
+def check_memory_refs(data: dict) -> Result:
+    """memory_refs は任意。書いたなら kioku-mesh の observation_id (32 桁 16 進) の list であること (#58)."""
+    refs = data.get('memory_refs')
+    if is_blank(refs) or refs == []:
+        return Result(5, 'OK', 'memory_refs なし')
+    if not isinstance(refs, list):
+        return Result(5, 'NG', f'memory_refs は list で書いてください: {refs!r}')
+    bad = [r for r in refs if not (isinstance(r, str) and OBSERVATION_ID_RE.fullmatch(r))]
+    if bad:
+        return Result(5, 'NG', f'memory_refs に observation_id (32 桁 16 進) でない値があります: {bad!r}')
+    return Result(5, 'OK', f'memory_refs: {len(refs)} 件')
+
+
 def check_report_yaml(path: Path) -> list[Result]:
     """1 ファイルの全検査項目を実行し、結果を蓄積して返す (例外は握って NG 報告)."""
     data, err = load_yaml(path)
@@ -184,6 +200,7 @@ def check_report_yaml(path: Path) -> list[Result]:
     results = [check_assumptions(data)]
     results.extend(check_verdict(path, data))
     results.append(check_stop_reason(data))
+    results.append(check_memory_refs(data))
     return results
 
 
