@@ -29,6 +29,10 @@
 
 起動直後、**前回の続きを把握してからユーザーの指示を待つ**。以下を Read し、要約する:
 
+0. `python3 squad/squad.py graph status`（`--project <pj>` で絞れる）: task / report YAML から
+   機械的に出した PJ ごとの未完了 task（running / blocked と理由）と、goal（Issue）ごとの件数。
+   dashboard の手書きより先にこれを見る。各行の node_id は `squad graph why <node_id>` で根拠の
+   report まで辿れる。日付が古い running は、report を出さずに外れた task の可能性がある (#57)
 1. `dashboard.md`（index）: Worker 状態 (W1-W4)、アクティブ PJ 一覧
 2. **アクティブタスクが 1 件以上ある PJ の dashboard のみ**: `dashboards/<pj>.md`
    （dashboard.md の Worker ステータス表で「待機」以外の PJ に限定し、全 PJ を読まない）

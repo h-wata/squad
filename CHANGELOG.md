@@ -23,6 +23,11 @@
   で fact → result → task → Issue の導出経路を辿れる。YAML が正本で、DB は何度でも作り直せる
   派生索引。watchd は report を配達したサイクルで自動的に作り直す。task YAML に任意の
   `derived_from` を追加した。判断の根拠は ADR 0007 (#55)。
+- `squad graph status` を追加した。探索グラフから PJ ごとの未完了 task (running / blocked と理由) と、
+  goal (Issue) ごとの running / blocked / done / verified / unreported の件数を出す。verified は
+  report の `verify_status: pass` と cross-review の `verdict` (`approve` で始まる値) から機械的に決まる (review は
+  task_id か `pr_url` で突き合わせる)。Dispatcher の状態復元の最初の手順にした。task YAML に任意の
+  `replan_reason` を追加した。判断の根拠は ADR 0009 (#57)。
 - worker の Claude Code transcript を横断検索する `squad trace search / get` を追加した
   (`squad/trace_search.py`)。report の `session_id` で transcript を特定し、無ければ
   `measure_task_cost.py` と同じ時間窓で近似する (出力に `~` を付ける)。新しい保存先は作らない。

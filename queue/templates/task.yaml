@@ -12,6 +12,8 @@ assigned_to: worker1
 agent: claude
 # なぜこの agent/worker に振ったか (判断ログとして必須)
 routing_reason: "実装メインのため Claude"
+# 任意 (#57): 差し戻しや方針変更で task を出し直すときの理由。探索グラフの intent に取り込まれる
+# replan_reason: "W4 の review で B1 が出たため修正を再発行"
 # Claude 時のみ: opus / sonnet / haiku。Codex (worker4) 時は無視される
 model: "sonnet"
 # critical / high / medium / low
