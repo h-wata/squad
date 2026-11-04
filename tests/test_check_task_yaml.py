@@ -271,6 +271,30 @@ def test_derived_from_is_optional(tmp_path: Path) -> None:
         assert _statuses(results, 14) == 'OK'
 
 
+@pytest.mark.parametrize(
+    'bench',
+    [
+        'issue34',
+        {'suite': 'issue34', 'config': 'sonnet'},
+        {'suite': 'issue34', 'config': '', 'trial': 1},
+        {'suite': 'issue34', 'config': 'sonnet', 'trial': 0},
+        {'suite': 'issue34', 'config': 'sonnet', 'trial': True},
+        {'suite': 'issue34', 'config': 'sonnet', 'trial': 1, 'extra': 'x'},
+    ],
+)
+def test_invalid_bench_is_ng(tmp_path: Path, bench: object) -> None:
+    path = _write(tmp_path, {**GOOD, 'bench': bench})
+    results = check_task_yaml(path, collect_task_id_locations([path]))
+    assert _statuses(results, 15) == 'NG'
+
+
+def test_bench_is_optional(tmp_path: Path) -> None:
+    for data in (GOOD, {**GOOD, 'bench': {'suite': 'issue34', 'config': 'sonnet', 'trial': 2}}):
+        path = _write(tmp_path, data)
+        results = check_task_yaml(path, collect_task_id_locations([path]))
+        assert _statuses(results, 15) == 'OK'
+
+
 def _item16(results: list) -> list[str]:
     return [r.status for r in results if r.item == 16]
 

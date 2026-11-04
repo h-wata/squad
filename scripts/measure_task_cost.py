@@ -124,6 +124,24 @@ def extract_workspace(task_text: str) -> str | None:
     return None
 
 
+def extract_bench(task_text: str) -> dict | None:
+    """Task YAML の任意フィールド `bench` (#59) を取り出す. 無い・dict でないなら None.
+
+    ネストを読むので PyYAML を使う。trace_search.py がこのモジュールを import するため、
+    import はここに閉じて `squad trace` を stdlib only のままにする。
+    """
+    if 'bench' not in task_text:
+        return None
+    import yaml  # noqa: PLC0415
+
+    try:
+        data = yaml.safe_load(task_text)
+    except yaml.YAMLError:
+        return None
+    bench = data.get('bench') if isinstance(data, dict) else None
+    return bench if isinstance(bench, dict) else None
+
+
 def parse_iso8601(value: str) -> datetime | None:
     """ISO8601 (Z 終端 / +HH:MM オフセット / オフセット無し) を UTC の aware datetime にする."""
     if not value:
@@ -400,7 +418,7 @@ def measure(project: str, task_id: str) -> dict:
         if delta is not None and delta < 0:
             notes.append(f'quota_{label}_delta_pct が負 ({delta}) — 集計区間中に usage limit の reset を跨いだ可能性')
 
-    return {
+    record = {
         'task_id': task_id,
         'project': project,
         'worker': report_meta.get('worker', task_meta.get('assigned_to', 'unknown')),
@@ -421,6 +439,10 @@ def measure(project: str, task_id: str) -> dict:
         'measured_at': datetime.now(tz=timezone.utc).isoformat(),
         'notes': '; '.join(notes) if notes else '',
     }
+    # bench の無い task のレコードは従来と同じ形のままにする (キーを足さない)
+    if bench := extract_bench(task_text):
+        record['bench'] = bench
+    return record
 
 
 def summarize(record: dict) -> str:

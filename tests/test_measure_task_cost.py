@@ -464,3 +464,15 @@ def test_measure_negative_quota_delta_is_noted_as_possible_reset(
 
     assert record['quota_7d_delta_pct'] == -92
     assert 'reset' in record['notes']
+
+
+def test_bench_is_copied_only_when_task_has_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir, _ = _setup_repo(tmp_path, monkeypatch)
+    task = _write_task(tasks_dir)
+    assert 'bench' not in mtc.measure(PROJECT, TASK_ID)  # 既存 task のレコードの形は変わらない
+
+    task.write_text(
+        task.read_text(encoding='utf-8') + 'bench:\n  suite: issue34\n  config: sonnet\n  trial: 2\n',
+        encoding='utf-8',
+    )
+    assert mtc.measure(PROJECT, TASK_ID)['bench'] == {'suite': 'issue34', 'config': 'sonnet', 'trial': 2}

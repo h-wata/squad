@@ -19,6 +19,12 @@
   `next_on_*` の無い task の通知本文は変わらない。Dispatcher は `[NEXT]` の step を必ず起票する
   (`instructions/dispatcher.md`)。`check_task_yaml.py` の項目 16 が、watchd が読めない書き方を NG にする (#34)。
 
+- ハーネス構成の比較ベンチマークの手順 (`docs/benchmark.md`) と集計 (`scripts/bench_report.py`) を
+  追加した。task YAML に任意の `bench: {suite, config, trial}` を書くと `measure_task_cost.py` が
+  計測結果に書き写し、`bench_report.py` が suite × config ごとに成功率・token・wall-clock・attempts・
+  重複作業率 (探索グラフの report 件数から) を Markdown の表で出す。`bench` の無い task の計測結果は
+  変わらない (#59)。
+
 - watchd が、危険操作 (`rm -r`、`git push --force`、`git reset --hard`、`gh pr merge` 等) を含む
   承認プロンプトを自動受理しなくなった。代わりに `[APPROVAL-HOLD]` を critical で Dispatcher に
   送る。パターンは `WATCH_APPROVAL_DENY` で変更できる。task YAML に任意の `max_wall_clock_min`
