@@ -49,6 +49,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ledger import Claim  # noqa: E402
 from ledger import delivery_key  # noqa: E402
 from ledger import find_reports  # noqa: E402
+from ledger import NEXT_KEYS  # noqa: E402
+from ledger import next_rule_error  # noqa: E402
+from ledger import parse_block  # noqa: E402
 from ledger import parse_scalars  # noqa: E402
 from ledger import report_identity  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
@@ -257,6 +260,41 @@ def _state_dir() -> Path:
     だった)。SQUAD_STATE_DIR があればそちらを見る。
     """
     return Path(os.environ.get('SQUAD_STATE_DIR') or (ROOT / 'state'))
+
+
+def resolve_next(task_path: Path, meta: dict[str, str]) -> str:
+    """Report の task YAML から次手 `[NEXT ...]` を決める (#34). 付けるものが無ければ ''.
+
+    task YAML に next_on_pass / next_on_fail が両方無ければ '' を返し、通知本文を変えない。
+    task YAML が読めない・task_id が report と違う (次タスクで上書き済み) ときは推測せず
+    `[NEXT unresolved reason=...]` にする。例外は投げない (遷移の解決失敗で通知を止めない)。
+    """
+    try:
+        text = task_path.read_text(errors='replace')
+    except OSError:
+        return '[NEXT unresolved reason=task_yaml_missing]'
+    task_id = parse_scalars(text).get('task_id', '')
+    if not task_id:
+        return '[NEXT unresolved reason=task_yaml_unreadable]'
+    if task_id != meta.get('task_id', ''):
+        return '[NEXT unresolved reason=task_id_mismatch]'
+    rules = {rule: parse_block(text, f'next_{rule}') for rule in ('on_pass', 'on_fail')}
+    if rules['on_pass'] is None and rules['on_fail'] is None:
+        return ''
+    verify = meta.get('verify_status', '')
+    rule = {'pass': 'on_pass', 'skipped': 'on_pass', 'fail': 'on_fail'}.get(verify)
+    if rule is None:
+        # report の値をそのまま載せると [NEXT] の区切りを壊せるので、語として読めるものだけ出す
+        shown = verify if re.fullmatch(r'[\w-]+', verify) else ('missing' if not verify else 'other')
+        return f'[NEXT unresolved reason=verify_status:{shown}]'
+    block = rules[rule]
+    if not block:
+        return '[NEXT none]'
+    if next_rule_error(block):
+        return '[NEXT unresolved reason=invalid_rule]'
+    # note は空白を含みうるので引用符で囲んで最後に置く
+    fields = ' '.join(f'{k}="{block[k]}"' if k == 'note' else f'{k}={block[k]}' for k in NEXT_KEYS if block.get(k))
+    return f'[NEXT rule={rule} {fields}]'
 
 
 class Watcher:
@@ -532,6 +570,10 @@ class Watcher:
                 self.log(f'report 検知: {path} -> queue 通知 (attempt={claim.attempt})')
                 body = f'Worker{wnum} {kind}: {path} を確認してください。(watcher 自動橋渡し)'
                 priority, source = 'normal', 'report'
+            # #34: 次手は watchd が task YAML から機械的に決める (LLM の解釈を挟まない)
+            nxt = resolve_next(self.cfg.projects_dir / project / 'tasks' / f'worker{wnum}.yaml', meta)
+            if nxt:
+                tag = f'{tag} {nxt}'
             # 1 行に収める: 本文を改行で分けると tmux send-keys が途中で確定してしまう
             # (直送は fallback だけだが、queue 本文としても同じ形式を踏襲する)。
             enqueued = self._enqueue_notification(

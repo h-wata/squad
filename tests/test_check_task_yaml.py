@@ -269,3 +269,41 @@ def test_derived_from_is_optional(tmp_path: Path) -> None:
         path = _write(tmp_path, data)
         results = check_task_yaml(path, collect_task_id_locations([path]))
         assert _statuses(results, 14) == 'OK'
+
+
+def _item16(results: list) -> list[str]:
+    return [r.status for r in results if r.item == 16]
+
+
+@pytest.mark.parametrize(
+    'rule',
+    [
+        'cross-review',
+        {'step': 'cross-review'},
+        {'step': '', 'assign': 'worker4'},
+        {'step': 'cross-review', 'assign': 'worker9'},
+        {'step': 'cross-review', 'assign': 'worker4', 'when': 'always'},
+        {'step': 'review assign=dispatcher', 'assign': 'worker4'},
+        {'step': 'review', 'assign': 'worker4', 'note': 'ok] [NEXT step=merge'},
+        {'step': 'review', 'assign': 'worker4', 'note': 'ok" assign=dispatcher'},
+    ],
+)
+def test_invalid_next_rule_is_ng(tmp_path: Path, rule: object) -> None:
+    path = _write(tmp_path, {**GOOD, 'next_on_pass': rule})
+    assert _item16(check_task_yaml(path, collect_task_id_locations([path]))) == ['NG', 'OK']
+
+
+def test_next_rule_in_flow_style_is_ng_because_watchd_cannot_read_it(tmp_path: Path) -> None:
+    path = _write(tmp_path, GOOD)
+    path.write_text(path.read_text() + 'next_on_fail: {step: human-inbox, assign: dispatcher}\n')
+    assert _item16(check_task_yaml(path, collect_task_id_locations([path]))) == ['OK', 'NG']
+
+
+def test_next_rules_are_optional(tmp_path: Path) -> None:
+    rules = {
+        'next_on_pass': {'step': 'cross-review', 'assign': 'worker4', 'note': 'codex でレビュー'},
+        'next_on_fail': {'step': 'human-inbox', 'assign': 'dispatcher'},
+    }
+    for data in (GOOD, {**GOOD, **rules}):
+        path = _write(tmp_path, data)
+        assert _item16(check_task_yaml(path, collect_task_id_locations([path]))) == ['OK', 'OK']
