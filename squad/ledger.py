@@ -106,6 +106,39 @@ def parse_scalars(text: str) -> dict[str, str]:
     return out
 
 
+# task YAML の next_on_pass / next_on_fail に書けるキー (#34)。watchd が [NEXT] に、この順で載せる
+NEXT_KEYS = ('step', 'assign', 'template', 'note')
+
+
+def parse_block(text: str, key: str) -> dict[str, str] | None:
+    """Top-level の `key:` の下に 1 段だけネストした `k: v` を拾う (#34). `key:` が無ければ None.
+
+    block 形式だけを読む。`key: {a: b}` のような flow 形式は読めないので None を返す
+    (check_task_yaml.py が NG にする)。引用符で囲まない値の行末コメント (` # ...`) は落とす。
+    """
+    out: dict[str, str] | None = None
+    for line in text.splitlines():
+        if out is None:
+            m = _SCALAR_RE.match(line)
+            if m and m.group(1) == key and (not m.group(2) or m.group(2).startswith('#')):
+                out = {}
+            continue
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if not line[0].isspace():
+            break
+        m = _SCALAR_RE.match(line.strip())
+        if not m:
+            continue
+        val = m.group(2)
+        if len(val) >= 2 and val[0] in '"\'' and val[0] in val[1:]:
+            val = val[1 : val.index(val[0], 1)]
+        else:
+            val = val.split(' #', 1)[0].strip()
+        out.setdefault(m.group(1), val)
+    return out
+
+
 def normalize_report_id(raw: str) -> str:
     """Report_id を UUID の正準形へ正規化する (UUID でなければ空文字).
 

@@ -445,6 +445,21 @@ worker に `report_id: <UUIDv4>` 付きでの再出力を指示する (Dispatche
 report_id へ変換できないため引き継いでいない。直後に既存 report が最大 1 回だけ再通知されるので、
 既知の `report_id` と一致するものは無視してよい。
 
+### 次手 `[NEXT ...]` (#34)
+
+task YAML に `next_on_pass` / `next_on_fail` を書いておくと、watchd が report の
+`verify_status` (pass / skipped → on_pass、fail → on_fail) で次の step を選び、`[REPORT ...]` の
+後ろに付ける。決めるのは watchd で、Dispatcher は解釈し直さない。
+
+- `[NEXT rule=... step=... assign=... template=... note=...]`: **その step を必ず起票する。**
+  飛ばしてよいのはユーザーが明示的に中止したときだけ
+- `[NEXT none]`: 選ばれた側 (例: fail なのに `next_on_fail` が無い) が未記入。従来どおり Dispatcher が判断する
+- `[NEXT unresolved reason=...]`: 次手を推測せずに止めた印。reason ごとに次を確認してから手で決める
+  - `task_id_mismatch`: task YAML が次のタスクで上書き済み。`tasks/archive/` の元の task を見る
+  - `task_yaml_missing` / `task_yaml_unreadable`: task YAML が無いか `task_id` を読めない
+  - `verify_status:<値>`: report の `verify_status` が pass / skipped / fail のどれでもない
+- `[NEXT]` が付かない: task YAML に `next_on_*` が両方無い。通知本文は従来と同じ
+
 ## Cross-review (手動運用)
 
 PR がレビュー待ちになったら、`author_agent` の反対 agent でレビュータスクを生成。

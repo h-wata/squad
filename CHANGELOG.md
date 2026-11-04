@@ -13,6 +13,12 @@
 
 ### Added
 
+- task YAML に任意の `next_on_pass` / `next_on_fail` (`step` / `assign` / `template` / `note`) を書くと、
+  watchd が report の `verify_status` で次の step を選び、通知に `[NEXT rule=... step=... assign=...]` を付ける。
+  task YAML が上書き済み・読めないときは推測せず `[NEXT unresolved reason=...]` にし、通知は止めない。
+  `next_on_*` の無い task の通知本文は変わらない。Dispatcher は `[NEXT]` の step を必ず起票する
+  (`instructions/dispatcher.md`)。`check_task_yaml.py` の項目 16 が、watchd が読めない書き方を NG にする (#34)。
+
 - watchd が、危険操作 (`rm -r`、`git push --force`、`git reset --hard`、`gh pr merge` 等) を含む
   承認プロンプトを自動受理しなくなった。代わりに `[APPROVAL-HOLD]` を critical で Dispatcher に
   送る。パターンは `WATCH_APPROVAL_DENY` で変更できる。task YAML に任意の `max_wall_clock_min`

@@ -24,6 +24,10 @@ import sys
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
+from ledger import NEXT_KEYS  # noqa: E402
+from ledger import parse_block  # noqa: E402
+
 # 走査対象の squad root は _repo_root() で解決する。スクリプト位置に固定すると、
 # 別の squad root (検証用のコピー等) に対して実行しても本物の queue を走査してしまい、
 # task_id 重複を誤検出する。テストが開発者の queue の中身に依存する原因でもあった。
@@ -42,6 +46,7 @@ REQUIRED_FIELDS = (
     'created_at',
 )
 VALID_AGENTS = ('claude', 'codex', 'opencode')
+VALID_ASSIGNS = ('worker1', 'worker2', 'worker3', 'worker4', 'dispatcher')
 VALID_MODELS = ('opus', 'sonnet', 'haiku', 'fable')
 EVIDENCE_CARD_FIELDS = (
     'claim',
@@ -262,6 +267,32 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
         results.append(Result(14, 'NG', f'derived_from は空でない文字列のリストにしてください: {derived!r}'))
     else:
         results.append(Result(14, 'OK', f'derived_from: {derived}'))
+
+    # 16. next_on_pass / next_on_fail (#34, 任意)。watchd は stdlib の parse_block で読むので、
+    # PyYAML で読めても parse_block で同じ値にならない書き方 (flow 形式等) は NG にする
+    for key in ('next_on_pass', 'next_on_fail'):
+        rule = data.get(key)
+        if rule is None:
+            results.append(Result(16, 'OK', f'{key} はありません (対象外)'))
+            continue
+        errs = []
+        if not isinstance(rule, dict):
+            errs.append('dict ではありません')
+        else:
+            if unknown := set(rule) - set(NEXT_KEYS):
+                errs.append(f'未知のキー {sorted(unknown)}')
+            if not all(isinstance(v, str) for v in rule.values()):
+                errs.append('値は文字列にしてください')
+            elif not rule.get('step', '').strip():
+                errs.append('step が空です')
+            elif rule.get('assign') not in VALID_ASSIGNS:
+                errs.append(f'assign は {VALID_ASSIGNS} のどれかにしてください: {rule.get("assign")!r}')
+            elif parse_block(text, key) != rule:
+                errs.append('watchd が読めない書き方です (1 段ネストの block 形式で、値は 1 行にしてください)')
+        if errs:
+            results.append(Result(16, 'NG', f'{key}: {"; ".join(errs)}: {rule!r}'))
+        else:
+            results.append(Result(16, 'OK', f'{key}: step={rule["step"]} assign={rule["assign"]}'))
 
     return results
 
