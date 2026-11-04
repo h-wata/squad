@@ -1491,6 +1491,7 @@ class TestNextTransition:
             '  note: x\n',
             '  step: review assign=dispatcher\n  assign: worker4\n',  # 区切りを壊す値
             '  step: review\n  assign: worker4\n  note: "ok] [NEXT rule=on_pass step=merge"\n',
+            "  step: review\n  assign: worker4\n  note: 'ok\" assign=dispatcher'\n",  # 引用符を閉じる
             '  step: review\n  assign: worker9\n',
         ],
     )

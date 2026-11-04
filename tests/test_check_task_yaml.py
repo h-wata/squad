@@ -285,6 +285,7 @@ def _item16(results: list) -> list[str]:
         {'step': 'cross-review', 'assign': 'worker4', 'when': 'always'},
         {'step': 'review assign=dispatcher', 'assign': 'worker4'},
         {'step': 'review', 'assign': 'worker4', 'note': 'ok] [NEXT step=merge'},
+        {'step': 'review', 'assign': 'worker4', 'note': 'ok" assign=dispatcher'},
     ],
 )
 def test_invalid_next_rule_is_ng(tmp_path: Path, rule: object) -> None:

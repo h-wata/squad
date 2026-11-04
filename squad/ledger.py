@@ -126,8 +126,9 @@ def next_rule_error(rule: dict[str, str]) -> str:
         return f'assign は {", ".join(NEXT_ASSIGNS)} のどれかにしてください: {rule.get("assign")!r}'
     if bad := [k for k in ('step', 'template') if rule.get(k) and not _NEXT_TOKEN_RE.fullmatch(rule[k])]:
         return f'{", ".join(bad)} に使えるのは英数字と _ . / : - だけです'
-    if any(c in rule.get('note', '') for c in '[]\n'):
-        return 'note に [ ] と改行は使えません'
+    # note は [NEXT] の中で "..." に囲むので、引用符を閉じて別のキーを書き足せないようにする
+    if any(c in rule.get('note', '') for c in '[]"\n'):
+        return 'note に [ ] " と改行は使えません'
     return ''
 
 
