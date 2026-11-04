@@ -108,6 +108,27 @@ def parse_scalars(text: str) -> dict[str, str]:
 
 # task YAML の next_on_pass / next_on_fail に書けるキー (#34)。watchd が [NEXT] に、この順で載せる
 NEXT_KEYS = ('step', 'assign', 'template', 'note')
+NEXT_ASSIGNS = ('worker1', 'worker2', 'worker3', 'worker4', 'dispatcher')
+# [NEXT key=value ...] は空白区切りなので、note 以外の値に空白や [ ] を入れさせない
+_NEXT_TOKEN_RE = re.compile(r'[\w./:-]+')
+
+
+def next_rule_error(rule: dict[str, str]) -> str:
+    """next_on_* の 1 ブロックを検査し、問題があればその説明を返す (問題なければ '').
+
+    watchd は不正なブロックから [NEXT] を作らず、check_task_yaml.py は同じ判定で NG にする.
+    """
+    if unknown := sorted(set(rule) - set(NEXT_KEYS)):
+        return f'未知のキー {unknown}'
+    if not rule.get('step'):
+        return 'step が空です'
+    if rule.get('assign') not in NEXT_ASSIGNS:
+        return f'assign は {", ".join(NEXT_ASSIGNS)} のどれかにしてください: {rule.get("assign")!r}'
+    if bad := [k for k in ('step', 'template') if rule.get(k) and not _NEXT_TOKEN_RE.fullmatch(rule[k])]:
+        return f'{", ".join(bad)} に使えるのは英数字と _ . / : - だけです'
+    if any(c in rule.get('note', '') for c in '[]\n'):
+        return 'note に [ ] と改行は使えません'
+    return ''
 
 
 def parse_block(text: str, key: str) -> dict[str, str] | None:

@@ -50,6 +50,7 @@ from ledger import Claim  # noqa: E402
 from ledger import delivery_key  # noqa: E402
 from ledger import find_reports  # noqa: E402
 from ledger import NEXT_KEYS  # noqa: E402
+from ledger import next_rule_error  # noqa: E402
 from ledger import parse_block  # noqa: E402
 from ledger import parse_scalars  # noqa: E402
 from ledger import report_identity  # noqa: E402
@@ -283,12 +284,16 @@ def resolve_next(task_path: Path, meta: dict[str, str]) -> str:
     verify = meta.get('verify_status', '')
     rule = {'pass': 'on_pass', 'skipped': 'on_pass', 'fail': 'on_fail'}.get(verify)
     if rule is None:
-        return f'[NEXT unresolved reason=verify_status:{verify or "missing"}]'
+        # report の値をそのまま載せると [NEXT] の区切りを壊せるので、語として読めるものだけ出す
+        shown = verify if re.fullmatch(r'[\w-]+', verify) else ('missing' if not verify else 'other')
+        return f'[NEXT unresolved reason=verify_status:{shown}]'
     block = rules[rule]
     if not block:
         return '[NEXT none]'
-    # note は空白を含むので最後に置く (1 行の通知に収めるため改行は潰す)
-    fields = ' '.join(f'{k}={" ".join(block[k].split())}' for k in NEXT_KEYS if block.get(k))
+    if next_rule_error(block):
+        return '[NEXT unresolved reason=invalid_rule]'
+    # note は空白を含みうるので引用符で囲んで最後に置く
+    fields = ' '.join(f'{k}="{block[k]}"' if k == 'note' else f'{k}={block[k]}' for k in NEXT_KEYS if block.get(k))
     return f'[NEXT rule={rule} {fields}]'
 
 

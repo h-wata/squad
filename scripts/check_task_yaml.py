@@ -25,7 +25,7 @@ import sys
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
-from ledger import NEXT_KEYS  # noqa: E402
+from ledger import next_rule_error  # noqa: E402
 from ledger import parse_block  # noqa: E402
 
 # 走査対象の squad root は _repo_root() で解決する。スクリプト位置に固定すると、
@@ -46,7 +46,6 @@ REQUIRED_FIELDS = (
     'created_at',
 )
 VALID_AGENTS = ('claude', 'codex', 'opencode')
-VALID_ASSIGNS = ('worker1', 'worker2', 'worker3', 'worker4', 'dispatcher')
 VALID_MODELS = ('opus', 'sonnet', 'haiku', 'fable')
 EVIDENCE_CARD_FIELDS = (
     'claim',
@@ -276,19 +275,12 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
             results.append(Result(16, 'OK', f'{key} はありません (対象外)'))
             continue
         errs = []
-        if not isinstance(rule, dict):
-            errs.append('dict ではありません')
-        else:
-            if unknown := set(rule) - set(NEXT_KEYS):
-                errs.append(f'未知のキー {sorted(unknown)}')
-            if not all(isinstance(v, str) for v in rule.values()):
-                errs.append('値は文字列にしてください')
-            elif not rule.get('step', '').strip():
-                errs.append('step が空です')
-            elif rule.get('assign') not in VALID_ASSIGNS:
-                errs.append(f'assign は {VALID_ASSIGNS} のどれかにしてください: {rule.get("assign")!r}')
-            elif parse_block(text, key) != rule:
-                errs.append('watchd が読めない書き方です (1 段ネストの block 形式で、値は 1 行にしてください)')
+        if not isinstance(rule, dict) or not all(isinstance(v, str) for v in rule.values()):
+            errs.append('値が文字列の dict にしてください')
+        elif err := next_rule_error(rule):
+            errs.append(err)
+        elif parse_block(text, key) != rule:
+            errs.append('watchd が読めない書き方です (1 段ネストの block 形式で、値は 1 行にしてください)')
         if errs:
             results.append(Result(16, 'NG', f'{key}: {"; ".join(errs)}: {rule!r}'))
         else:
