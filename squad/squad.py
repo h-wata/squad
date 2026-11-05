@@ -497,6 +497,26 @@ def cmd_trace(args: argparse.Namespace, _cfg: dict) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace, _cfg: dict) -> int:
+    import web  # noqa: PLC0415
+
+    token = args.token or os.environ.get('SQUAD_WEB_TOKEN', '')
+    if not token:
+        sys.exit(
+            'squad web: トークンが必要です (SQUAD_WEB_TOKEN か --token)。LAN に公開するため未設定では起動しません'
+        )
+    queue_dir = Path(args.queue_dir) if args.queue_dir else REPO_ROOT / 'queue'
+    srv = web.make_server(args.host, args.port, token, queue_dir, REPO_ROOT / 'dashboards')
+    print(f'squad web: http://{args.host}:{srv.server_address[1]}/?token=<token> (読み取り専用, Ctrl-C で停止)')
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0
+
+
 # ---------- entry ----------
 
 
@@ -577,6 +597,13 @@ def main(argv: list[str] | None = None) -> int:
     p_tg.add_argument('trace_id', help='<session_id>:<行>.<block> (<行> だけならその行の全 block)')
     p_tg.add_argument('--context', type=int, default=0, help='前後に含める行数')
     p_trace.set_defaults(func=cmd_trace)
+
+    p_web = sub.add_parser('web', help='全 project の進捗を見る読み取り専用 Web ダッシュボード (Issue #76)')
+    p_web.add_argument('--host', default='0.0.0.0', help='既定 0.0.0.0 (LAN から開ける)')  # noqa: S104
+    p_web.add_argument('--port', type=int, default=8765)
+    p_web.add_argument('--token', help='アクセストークン (既定: env SQUAD_WEB_TOKEN。未設定なら起動しない)')
+    p_web.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
+    p_web.set_defaults(func=cmd_web)
 
     args = ap.parse_args(argv)
     cfg = load_config()

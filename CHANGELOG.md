@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `squad web`: 全 project の進捗 (active / blocked のタスク、担当、直近の report、
+  dashboard の最終更新)、squad セッションの各 pane の内容、探索グラフを 1 画面で見る
+  読み取り専用の Web ダッシュボード (#76)。stdlib のみ。トークン (`SQUAD_WEB_TOKEN`
+  か `--token`) が無いと起動しない。pane の中身は `squad/mask.py` を通してから返す。
+
 ### Removed
 
 - `local-coder` agent と、それへの委譲フロー (`instructions/worker.md` /
