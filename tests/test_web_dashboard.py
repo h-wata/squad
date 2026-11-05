@@ -223,8 +223,8 @@ def test_no_send_keys_in_source() -> None:
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
     name = lambda c: ast.unparse(c.func)  # noqa: E731
     subcommands = {c.args[0].value for c in calls if name(c) == '_tmux_lines'}
-    assert subcommands == {'list-sessions', 'list-panes'}
-    # subprocess を呼ぶのは _tmux_lines の中の 1 箇所だけ (capture-pane は squad.tmux_capture)
+    assert subcommands == {'list-sessions', 'list-panes', 'capture-pane'}
+    # subprocess を呼ぶのは _tmux_lines の中の 1 箇所だけ
     assert [ast.unparse(c) for c in calls if name(c).startswith('subprocess.')] == [
         "subprocess.run(['tmux', *args], capture_output=True, text=True)"
     ]
@@ -236,12 +236,17 @@ def test_pane_masked_before_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     body = [f'KEYBODY{i:03d}' for i in range(web.PANE_LINES + 10)]
     screen = '\n'.join(['-----BEGIN RSA PRIVATE KEY-----', *body])  # pragma: allowlist secret
 
+    calls: list[list[str]] = []
+
     def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
-        out = {'list-sessions': 's\n', 'list-panes': 's:0.5\tAux-Shell\n', 'capture-pane': screen}[cmd[1]]
+        calls.append(cmd)
+        out = {'list-sessions': 's\n', 'list-panes': 's:0.5\tAux-Shell\n', 'capture-pane': screen + '\n\n'}[cmd[1]]
         return subprocess.CompletedProcess(cmd, 0, out, '')
 
     monkeypatch.setattr(web.subprocess, 'run', run)
-    monkeypatch.setattr(squad_cli.subprocess, 'run', run)
     (pane,) = web.panes_data()['sessions'][0]['panes']
+    (capture,) = [c for c in calls if c[1] == 'capture-pane']
+    assert capture[capture.index('-S') + 1] == '-'  # 可視範囲でなく履歴全体を取る
     assert 'KEYBODY' not in pane['text']
+    assert pane['text'].split('\n')[-1] == '[REDACTED PRIVATE KEY LINE]'  # 末尾の空行は落とす
     assert len(pane['text'].split('\n')) == web.PANE_LINES

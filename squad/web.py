@@ -27,7 +27,6 @@ from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
 from mask import mask
-from squad import tmux_capture
 from squad import yaml_shallow
 
 SQUAD_PANE_TITLE = 'Aux-Shell'
@@ -118,11 +117,10 @@ def panes_data() -> dict[str, Any]:
             continue
         panes = []
         for target, title in (r for r in rows if len(r) == 2):
-            # 画面全体をマスクしてから末尾を切る (先に切ると PRIVATE KEY の BEGIN 行が落ちて本文が残る)
-            ok, text = tmux_capture(target, 0)
-            panes.append(
-                {'target': target, 'title': title, 'ok': ok, 'text': '\n'.join(mask(text).split('\n')[-PANE_LINES:])}
-            )
+            # 履歴全体 (-S -) をマスクしてから末尾を切る。可視範囲や末尾だけをマスクすると、PRIVATE KEY の
+            # BEGIN 行が範囲外に出て本文が素通しになる。ponytail: history-limit を超えて捨てられた BEGIN 行は救えない
+            text = mask('\n'.join(_tmux_lines('capture-pane', '-p', '-S', '-', '-t', target)).rstrip('\n'))
+            panes.append({'target': target, 'title': title, 'text': '\n'.join(text.split('\n')[-PANE_LINES:])})
         sessions.append({'name': name, 'panes': panes})
     return _masked({'sessions': sessions})
 
