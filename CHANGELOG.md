@@ -71,6 +71,10 @@
 
 ### Fixed
 
+- `scripts/measure_task_cost.py` が、ローカルモデル worker の token と、worker が書く時刻を
+  正しく扱えていなかった (#72)。claude-local worker の transcript (`config/claude-worker/projects/`) も
+  探す。Opencode worker は同じ cwd の別セッションの token を拾わず `attribution: unavailable` とする。
+  オフセット無しの `completed_at` はローカル時刻として読み、report の更新時刻より後なら更新時刻を使う。
 - README の Prerequisites に PyYAML を追加した。`scripts/check_report_yaml.py` /
   `check_task_yaml.py` / `check_dashboard_update.py` と `squad graph` が使うのに、
   「標準ライブラリのみ」と書いていた (#65)。

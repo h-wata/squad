@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 import pytest
 
@@ -476,3 +477,82 @@ def test_bench_is_copied_only_when_task_has_it(tmp_path: Path, monkeypatch: pyte
         encoding='utf-8',
     )
     assert mtc.measure(PROJECT, TASK_ID)['bench'] == {'suite': 'issue34', 'config': 'sonnet', 'trial': 2}
+
+
+def test_claude_local_transcript_under_worker_config_dir_is_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claude-local worker の transcript (config/claude-worker/projects) を session_id で見つける (#72)."""
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 5, 3, 10, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat(), session_id='local-1')
+    worker_dir = mtc.REPO_ROOT / 'config' / 'claude-worker' / 'projects' / '-home-x'
+    worker_dir.mkdir(parents=True)
+    usage = {'input_tokens': 5, 'output_tokens': 7}
+    (worker_dir / 'local-1.jsonl').write_text(
+        _assistant_line(start + timedelta(minutes=1), session_id='local-1', usage=usage) + '\n', encoding='utf-8'
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'exact'
+    assert record['output_tokens'] == 7
+
+
+def test_opencode_usage_is_unavailable_not_borrowed_from_same_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opencode worker は同じ cwd の別セッション (verifier 等) の token を拾わず unknown にする (#72)."""
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 5, 3, 10, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    report = _write_report(reports_dir, completed_at=end.isoformat())
+    report.write_text(report.read_text().replace('agent: claude', 'agent: opencode'), encoding='utf-8')
+    session_dir = _session_dir_for_repo_root(mtc.CLAUDE_PROJECTS, mtc.REPO_ROOT)
+    (session_dir / 'verifier.jsonl').write_text(
+        _assistant_line(start + timedelta(minutes=1), usage={'output_tokens': 99}) + '\n', encoding='utf-8'
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'unavailable'
+    assert record['output_tokens'] is None
+    assert record['wall_clock_sec'] == 600
+
+
+def test_naive_completed_at_is_read_as_local_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """オフセット無しの completed_at はローカル時刻として読む (UTC 扱いで 9 時間ずれない, #72)."""
+    monkeypatch.setenv('TZ', 'Asia/Tokyo')
+    time.tzset()
+    try:
+        tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+        start = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)  # = 12:00 JST
+        _write_task(tasks_dir, mtime=start)
+        report = _write_report(reports_dir, completed_at='2026-11-05T12:05:00')
+        later = datetime(2026, 11, 5, 3, 30, tzinfo=timezone.utc).timestamp()
+        os.utime(report, (later, later))
+
+        record = mtc.measure(PROJECT, TASK_ID)
+
+        assert record['wall_clock_sec'] == 300
+    finally:
+        monkeypatch.delenv('TZ')
+        time.tzset()
+
+
+def test_completed_at_after_report_mtime_is_capped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """completed_at が report の更新時刻より未来なら、更新時刻を使う (#72)."""
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    report = _write_report(reports_dir, completed_at=(start + timedelta(minutes=10)).isoformat())
+    written = (start + timedelta(minutes=8)).timestamp()
+    os.utime(report, (written, written))
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['wall_clock_sec'] == 480
+    assert '更新時刻を使う' in record['notes']
