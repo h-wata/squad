@@ -375,14 +375,8 @@ fi
 # 誤発火の危険がある。そこで指示本文は事前レンダリングしたファイルに置き、--prompt には
 # 「読んで待機しろ」という短い bootstrap だけを渡す。
 opencode_prompt_file() { echo "$SCRIPT_DIR/squad/state/worker$1-opencode-instructions.md"; }
-opencode_bootstrap() {
-    local n="$1"
-    echo "あなたは squad の Worker $n です。まず $(opencode_prompt_file "$n") を Read して運用ルールを頭に入れてください。\
-読み終えたら「W$n 待機中」とだけ出力して停止すること。\
-起動直後のこのターンでは、それ以外を一切しないこと: queue/ や他プロジェクトを探索しない、\
-既存の task YAML / report を読まない、ファイルを変更しない、git / gh コマンドを打たない。\
-Dispatcher が tmux 経由で task YAML の絶対パスを通知してくるまで待機します。"
-}
+# 文面は notify-worker.sh --clear (/new 後の再 bootstrap) と共有するため別ファイルに置く (#71)。
+opencode_bootstrap() { "$SCRIPT_DIR/scripts/opencode-bootstrap.sh" "$1"; }
 
 # dispatcher.md 用。Opencode で動いている worker がいるときだけ routing の注意を足す。
 OPENCODE_WORKERS=""
@@ -490,7 +484,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。

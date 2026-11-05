@@ -74,6 +74,10 @@ while True:
                 buf = b''
                 if mode != 'no-interrupt':
                     busy_until = time.time() + 6
+                if line == '/new' and mode != 'drop-new':   # Opencode は /new で新しい会話を始める
+                    transcript.append('new session ses_mock')
+                if 'とだけ出力して停止' in line and mode != 'never-ready':   # Opencode の bootstrap に答える
+                    transcript.append('W0 待機中')
         elif ch == b'\x15':      # Ctrl-U
             if mode != 'blind-start':
                 buf = b''
@@ -184,3 +188,75 @@ def test_does_not_repaste_when_body_already_landed(pane: tuple[str, Path], tmp_p
     lines = [ln for ln in log.read_text().splitlines() if ln]
     assert len(lines) == 1, lines  # 発注は 1 回だけ
     assert lines[0].count(PROBE) == 1, lines[0]  # 本文が入力欄で積み上がっていない
+
+
+def _opencode_pane(tmp_path: Path, mode: str) -> tuple[str, Path]:
+    """モックを ``opencode`` という名前で動かす session を作る (前面プロセス名で Opencode を判定するため).
+
+    comm は exec したファイル名になるので、python3 への symlink を opencode と名付ける。
+    """
+    session = f'squad71test-{uuid.uuid4().hex[:8]}'
+    mock = tmp_path / 'mock_tui.py'
+    mock.write_text(MOCK_TUI)
+    opencode = tmp_path / 'opencode'
+    opencode.symlink_to(shutil.which('python3'))
+    log = tmp_path / 'submitted.log'
+    _tmux(
+        'new-session',
+        '-d',
+        '-s',
+        session,
+        '-x',
+        '100',
+        '-y',
+        '30',
+        f'MOCK_LOG={log} MOCK_MODE={mode} exec {opencode} {mock}',
+    )
+    time.sleep(1.0)
+    return session, log
+
+
+def _notify_clear(session: str, wait: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, 'SQUAD_SESSION': session, 'SQUAD_BOOTSTRAP_WAIT': wait}
+    return subprocess.run(
+        ['bash', str(NOTIFY), '0.0', MSG, '--clear'], capture_output=True, text=True, env=env, timeout=180, check=False
+    )
+
+
+def test_clear_on_opencode_sends_new_and_bootstrap(tmp_path: Path) -> None:
+    """Opencode worker への --clear は /new → bootstrap → 「W{N} 待機中」を待って本文の順に送る (#71)."""
+    session, log = _opencode_pane(tmp_path, 'normal')
+    try:
+        proc = _notify_clear(session, '20')
+        assert proc.returncode == 0, proc.stderr
+        lines = [ln for ln in log.read_text().splitlines() if ln]
+        assert lines[0] == '/new', lines
+        assert 'あなたは squad の Worker 0 です' in lines[1], lines
+        assert lines[2].count(PROBE) == 1, lines
+        assert len(lines) == 3, lines  # /clear は送らない
+    finally:
+        _tmux('kill-session', '-t', session)
+
+
+def test_clear_on_opencode_does_not_send_body_when_not_ready(tmp_path: Path) -> None:
+    """Bootstrap に「待機中」が返らなければ、本文を送らずに失敗する (#71)."""
+    session, log = _opencode_pane(tmp_path, 'never-ready')
+    try:
+        proc = _notify_clear(session, '3')
+        assert proc.returncode == 1
+        assert '本文は送りません' in proc.stderr
+        assert PROBE not in log.read_text()
+    finally:
+        _tmux('kill-session', '-t', session)
+
+
+def test_clear_on_opencode_stops_when_new_session_does_not_start(tmp_path: Path) -> None:
+    """/new が効かなければ、旧会話に bootstrap や本文を送らない (#71)."""
+    session, log = _opencode_pane(tmp_path, 'drop-new')
+    try:
+        proc = _notify_clear(session, '3')
+        assert proc.returncode == 1
+        assert '新しい会話が始まりません' in proc.stderr
+        assert [ln for ln in log.read_text().splitlines() if ln] == ['/new']
+    finally:
+        _tmux('kill-session', '-t', session)
