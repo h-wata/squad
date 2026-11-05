@@ -49,28 +49,51 @@ def _masked(obj: Any) -> Any:  # noqa: ANN401
 
 # ---------- project 一覧 ----------
 
+# 同じ task_id に複数の結果があるときの優先順: worker の report > cross-review > verifier の verdict
+_RESULT_RANK = {'status': 2, 'verdict': 1, 'result': 0}
+
+
+def _result_state(meta: dict[str, str]) -> tuple[int, str] | None:
+    """結果ファイル 1 つから (優先度, state)。report / review / verdict のどれでもなければ None."""
+    if 'status' in meta:
+        return _RESULT_RANK['status'], 'done' if meta['status'] == 'completed' else 'blocked'
+    if 'verdict' in meta:  # cross-review は approve でも request_changes でも、書いた時点で task は終わり
+        return _RESULT_RANK['verdict'], 'done'
+    if 'result' in meta:
+        return _RESULT_RANK['result'], 'done' if meta['result'] == 'pass' else 'blocked'
+    return None
+
 
 def projects_data(queue_dir: Path, dashboards_dir: Path) -> dict[str, Any]:
-    """tasks/ 直下の task と同じ worker の report を突き合わせて active / blocked / done を決める."""
+    """tasks/ 直下の task と reports/ の結果を task_id で突き合わせて active / blocked / done を決める.
+
+    結果は `<task>_report.yaml` に限らず worker4_review*.yaml や workerN_verdict.yaml にもあるので、
+    reports/*.yaml を全部読む。task より古い結果は数えない (同じ task_id の再発注を done にしない)。
+    """
     out = []
     for pj_dir in sorted(p for p in (queue_dir / 'projects').glob('*') if p.is_dir()):
         reports = {p.name: p for p in (pj_dir / 'reports').glob('*.yaml')}
+        results: dict[str, list[tuple[float, int, str]]] = {}
+        for rep_path in reports.values():
+            rep = yaml_shallow(rep_path)
+            if rep.get('task_id') and (st := _result_state(rep)):
+                results.setdefault(rep['task_id'], []).append((rep_path.stat().st_mtime, *st))
         tasks = []
         for task in sorted((pj_dir / 'tasks').glob('*.yaml')):
             meta = yaml_shallow(task)
             worker = meta.get('assigned_to') or task.stem
-            rep_path = reports.get(f'{task.stem}_report.yaml')
-            rep = yaml_shallow(rep_path) if rep_path else {}
-            state = 'active'
-            if rep.get('task_id') and rep.get('task_id') == meta.get('task_id'):
-                state = 'done' if rep.get('status') == 'completed' else 'blocked'
+            issued = task.stat().st_mtime
+            found = [
+                (rank, mtime, st) for mtime, rank, st in results.get(meta.get('task_id', ''), []) if mtime >= issued
+            ]
+            state = max(found)[2] if found else 'active'
             tasks.append(
                 {
                     'task_id': meta.get('task_id', ''),
                     'title': meta.get('title', ''),
                     'worker': worker,
                     'state': state,
-                    'issued_at': iso(task.stat().st_mtime),
+                    'issued_at': iso(issued),
                 }
             )
         latest = max(reports.values(), key=lambda p: p.stat().st_mtime, default=None)

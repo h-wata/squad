@@ -172,7 +172,8 @@ def load_state(worker: str) -> dict | None:
 def yaml_shallow(path: Path) -> dict[str, str]:
     """top-level の `key: value` だけ拾う簡易リーダー.
 
-    block scalar (`|`, `>`) や list, nested は無視。CLI で必要な
+    block scalar (`|`, `>`) は本文を空白区切りの 1 行に畳んで返す (表示用。report の summary は
+    `summary: |` で書かれることが多い)。list, nested は無視。CLI で必要な
     task_id/project/assigned_to/agent/model/title/status/summary/completed_at
     だけ取れれば十分。
     """
@@ -180,7 +181,16 @@ def yaml_shallow(path: Path) -> dict[str, str]:
     if not path.exists():
         return out
     pat = re.compile(r'^([A-Za-z_][\w\-]*)\s*:\s*(.+?)\s*$')
+    block_key = ''  # 本文を集めている block scalar の key
+    block: list[str] = []
     for line in path.read_text(errors='replace').splitlines():
+        if block_key and (not line.strip() or line[0].isspace()):
+            if line.strip():
+                block.append(line.strip())
+            continue
+        if block_key:
+            out[block_key] = ' '.join(block)
+            block_key, block = '', []
         # top-level 行 (インデント無し) のみ対象
         if not line or line[0].isspace() or line.startswith('#'):
             continue
@@ -188,13 +198,15 @@ def yaml_shallow(path: Path) -> dict[str, str]:
         if not m:
             continue
         key, val = m.group(1), m.group(2)
-        # block scalar 開始マーカは捨てる (本文は読まない)
         if val in ('|', '>', '|-', '>-', '|+', '>+'):
+            block_key = key
             continue
         # クオート剥がし
         if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
             val = val[1:-1]
         out[key] = val
+    if block_key:
+        out[block_key] = ' '.join(block)
     return out
 
 

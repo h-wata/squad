@@ -262,3 +262,47 @@ def test_pane_capture_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> No
     (pane,) = web.panes_data()['sessions'][0]['panes']
     assert pane['ok'] is False
     assert pane['text'] == ''
+
+
+def test_yaml_shallow_reads_block_scalar(tmp_path: Path) -> None:
+    """`summary: |` の本文を 1 行に畳んで返す (dashboard の表に入れても崩れない). 他の key は従来どおり."""
+    p = tmp_path / 'r.yaml'
+    p.write_text(
+        'task_id: X\nsummary: |\n  1 行目\n\n  2 行目: 値\nnotes: >-\n  folded\nissues:\n  - a\nstatus: completed\n'
+    )
+    meta = squad_cli.yaml_shallow(p)
+    assert meta['summary'] == '1 行目 2 行目: 値'
+    assert meta['notes'] == 'folded'
+    assert meta['status'] == 'completed'
+    assert meta['task_id'] == 'X'
+    assert 'issues' not in meta
+
+
+def test_projects_match_results_by_task_id(tmp_path: Path) -> None:
+    """実 queue と同じ名前の結果ファイル (worker4_review*.yaml / workerN_verdict.yaml) を task_id で突き合わせる."""
+    pj = tmp_path / 'queue' / 'projects' / 'pj'
+    t, r = pj / 'tasks', pj / 'reports'
+    # cross-review: 結果は worker4_review_<id>.yaml と worker4_review.yaml にだけある
+    _write(t / 'worker4.yaml', 'task_id: X-1\nassigned_to: worker4\n', 1_000)
+    _write(r / 'worker4_review_X-1.yaml', 'task_id: X-1\nverdict: approve\n', 1_100)
+    _write(r / 'worker4_report.yaml', 'task_id: OLD-4\nstatus: completed\n', 900)
+    # report は別 task のまま、verdict だけが pass (SQUAD-281 と同じ形)
+    _write(t / 'worker2.yaml', 'task_id: X-2\nassigned_to: worker2\n', 1_000)
+    _write(r / 'worker2_report.yaml', 'task_id: OLD-2\nstatus: completed\n', 900)
+    _write(r / 'worker2_verdict.yaml', 'task_id: X-2\nresult: pass\n', 1_200)
+    # verdict は fail でも report が completed なら report を採る
+    _write(t / 'worker3.yaml', 'task_id: X-3\n', 1_000)
+    _write(r / 'worker3_report.yaml', 'task_id: X-3\nstatus: completed\nsummary: |\n  直した\n  2 行目\n', 1_600)
+    _write(r / 'worker3_verdict.yaml', 'task_id: X-3\nresult: fail\n', 1_250)
+    # 同じ task_id で再発注された task: 発注より古い完了報告では done にしない
+    _write(t / 'worker1.yaml', 'task_id: X-4\n', 2_000)
+    _write(r / 'worker1_report.yaml', 'task_id: X-4\nstatus: completed\n', 1_500)
+    # verdict が fail だけ
+    _write(t / 'worker5.yaml', 'task_id: X-5\n', 1_000)
+    _write(r / 'worker5_verdict.yaml', 'task_id: X-5\nresult: fail\n', 1_100)
+
+    (data,) = web.projects_data(tmp_path / 'queue', tmp_path / 'dashboards')['projects']
+    states = {x['task_id']: x['state'] for x in data['tasks']}
+    assert states == {'X-1': 'done', 'X-2': 'done', 'X-3': 'done', 'X-4': 'active', 'X-5': 'blocked'}
+    assert data['latest_report']['file'] == 'worker3_report.yaml'
+    assert data['latest_report']['summary'] == '直した 2 行目'
