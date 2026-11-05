@@ -71,6 +71,11 @@
 
 ### Fixed
 
+- claude-local worker の独立検証が Sonnet に届かず、同じローカルモデルで自己検証になっていた。
+  `scripts/verify-task.sh` が worker の `ANTHROPIC_BASE_URL` / `CLAUDE_CONFIG_DIR` 等を引き継ぎ、
+  sonnet 宛ての要求が LAN の LiteLLM に飛んで 400 になっていたので、起動時に外す。
+  `instructions/worker.md` には、claude-local worker は verifier サブエージェントを使わず
+  `verify-task.sh` を使い、それも失敗したら代替せず blocked で報告する、と書いた (#69)。
 - README の Prerequisites に PyYAML を追加した。`scripts/check_report_yaml.py` /
   `check_task_yaml.py` / `check_dashboard_update.py` と `squad graph` が使うのに、
   「標準ライブラリのみ」と書いていた (#65)。

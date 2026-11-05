@@ -99,7 +99,12 @@ case "$(basename "$CLI")" in
         # headless (-p) では承認プロンプトに答える人がいないため bypassPermissions。
         # verdict は worktree の外 (queue 配下) に書くので --add-dir が要る。
         # prompt は stdin から渡す (位置引数だと長文・先頭文字で拾われないことがある)
-        printf '%s' "$PROMPT" | "$CLI" -p --model "$MODEL" \
+        # claude-local worker (start.sh) から呼ばれると接続先・設定の env を引き継ぎ、
+        # sonnet 宛ての要求が LAN の LiteLLM に飛んで 400 になる (#69)。verifier は
+        # author と別系統で動かすのが目的なので、それらを外して Anthropic に向ける。
+        printf '%s' "$PROMPT" | env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN \
+            -u ANTHROPIC_MODEL -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CONFIG_DIR \
+            -u CLAUDE_CODE_MAX_CONTEXT_TOKENS "$CLI" -p --model "$MODEL" \
             --permission-mode bypassPermissions \
             --allowedTools 'Bash Read Write Grep Glob' \
             --add-dir "$SQUAD_ROOT_FOR_VERDICT" || true

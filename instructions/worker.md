@@ -126,6 +126,11 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
 （自己採点の禁止）。
 
 1. 実装が一段落したら、**verifier サブエージェントを Task ツールで起動**する。
+   - **`ANTHROPIC_BASE_URL` が設定されている (Claude Code + ローカルモデルで動いている) なら、
+     サブエージェントは使わず最初から下の `verify-task.sh` を実行する。** サブエージェントも
+     同じローカルモデルで動くので自己採点になる (#69)。`verify-task.sh` も失敗したら
+     代わりの検証はせず、`status: blocked`・`verify_status: fail` で報告し、失敗の出力を
+     `issues:` に書く
    - 渡す情報: `task_yaml`（タスク YAML 絶対パス）、`worktree`（作業ディレクトリ）、
      `attempt`（試行回数, 1 始まり）、`worker_num`（自分の N）
    - verifier は `verify.commands` を worktree で実走し、acceptance_criteria と照合して
