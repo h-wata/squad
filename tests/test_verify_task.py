@@ -7,9 +7,9 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'verify-task.sh'
 
-# 偽の claude: 受け取った env を記録し、prompt に書かれた出力先へ verdict を書く
+# 偽の claude: 受け取った env の名前だけを記録し、prompt に書かれた出力先へ verdict を書く
 FAKE_CLAUDE = """#!/usr/bin/env bash
-env > "$FAKE_ENV_OUT"
+env | cut -d= -f1 > "$FAKE_ENV_OUT"  # 値は残さない (API キー等)
 verdict="$(sed -n 's/^- verdict の出力先 (このパスに Write すること): //p')"
 printf 'result: pass\\n' > "$verdict"
 """
@@ -48,7 +48,7 @@ def _run(tmp_path: Path, extra_env: dict[str, str]) -> set[str]:
 
     assert proc.returncode == 0, proc.stderr
     assert 'result=pass' in proc.stdout
-    return {line.split('=', 1)[0] for line in env_out.read_text().splitlines() if '=' in line}
+    return set(env_out.read_text().split())
 
 
 def test_claude_local_worker_env_is_dropped(tmp_path: Path) -> None:
