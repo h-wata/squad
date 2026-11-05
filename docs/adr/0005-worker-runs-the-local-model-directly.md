@@ -72,3 +72,24 @@ Sonnet と **Claude Code + Qwen** の 2 本で、Opencode + Qwen は黙って解
   退避先として Opencode 経路 (`SQUAD_W*_AGENT=opencode`) を残してある。
 - ADR 0003 / 0004 の実測値 (39/39 PASS、p50 30 秒等) は Qwen3.8-Flash-Next の能力
   評価としては引き続き有効。無効になったのは「委譲という構図」のほう。
+
+## 追記 (2026-11-05): 3 trial で取り直した結果
+
+squad#59 のベンチ (`docs/benchmark.md`) で、同じ #34 を base `a3b0946` から 3 構成 × 3 trial で
+流し直した。Decision (local-coder の廃止) は変わらないが、Context の観測のうち 2 点は 1 回の
+観測による偶然だった、または状況が変わっている。
+
+| config | 成功 | wall_clock 中央値 | 受け入れ条件の矛盾 |
+|---|---:|---:|---|
+| Claude Code + Sonnet | 3/3 | 278 秒 | 3/3 で `assumptions:` に書いた |
+| Opencode + Qwen3.8-Flash-Next | 3/3 | 443 秒 | 3/3 で `assumptions:` に書いた |
+| Claude Code + Qwen3.8-Flash-Next | 2/3 | 3005 秒 | 3/3 で `assumptions:` に書いた |
+
+- **「Opencode + Qwen は矛盾を黙って解釈する」は再現しなかった。** 3 構成とも 9/9 で矛盾に
+  気づいて開示した。したがって「同じモデルでもハーネスを変えると開示するようになった」という
+  診断の根拠は弱い。ハーネスの差より、その後の worker.md / report 書式の変更が効いている可能性がある
+- **Claude Code + Qwen は「worker として不足がない」とは言い切れない。** 品質 (テスト・境界の
+  扱い) は他と同等だったが、「これから〜する」と宣言して手番を終える停止が 3 trial 中 2 回起き、
+  所要時間は他構成の約 10 倍だった。独立検証も Sonnet に届かず、同じ Qwen での検証になっていた (#69)
+- 失敗した 1 trial は、外部モデルでの検証を止めたあと Sonnet でも検証できず blocked になったもので、
+  実装自体はテストを流し直して全件 pass した

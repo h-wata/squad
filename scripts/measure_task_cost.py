@@ -9,7 +9,9 @@ usage を合算し、`metrics/task_costs.jsonl` に追記する。
 
 **セッション単位の一意特定 (SQUAD-261)**: report YAML に `session_id` (worker 実行時の
 `$CLAUDE_CODE_SESSION_ID`) が記録されていれば、`~/.claude/projects/*/<session_id>.jsonl` を
-直接特定して集計する (`attribution: "exact"`)。session_id が無い古い report は、cwd 推測 +
+直接特定して集計する (`attribution: "exact"`)。claude-local worker の transcript がある
+`config/claude-worker/projects/` も探す。Opencode worker は Claude Code の transcript を残さないので
+token は数えず `attribution: "unavailable"` とする (#72)。session_id が無い古い report は、cwd 推測 +
 時間窓で重なる全 jsonl を合算する従来の近似にフォールバックする (`attribution:
 "approximate"`)。近似モードでは、Claude Code の session transcript が「セッション起動時の
 cwd」で固定され (dedicated worktree に `cd` しても専用ディレクトリは作られない)、同じ cwd で
@@ -78,6 +80,17 @@ def _resolve_queue_root() -> Path:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 QUEUE_ROOT = _resolve_queue_root()
 CLAUDE_PROJECTS = Path.home() / '.claude' / 'projects'
+
+
+def projects_roots() -> list[Path]:
+    """Transcript を探す projects ディレクトリ.
+
+    claude-local worker は ``CLAUDE_CONFIG_DIR=config/claude-worker`` で動くので、その transcript は
+    ``config/claude-worker/projects/`` にある (#72)。
+    """
+    return [CLAUDE_PROJECTS, REPO_ROOT / 'config' / 'claude-worker' / 'projects']
+
+
 METRICS_PATH = REPO_ROOT / 'metrics' / 'task_costs.jsonl'
 QUOTA_CACHE_PATH = Path('/tmp/claude_usage_cache.json')
 _TMUX_PCT_RE = re.compile(r'(5h|7d):(\d+)%')
@@ -153,8 +166,8 @@ def parse_iso8601(value: str) -> datetime | None:
         dt = datetime.fromisoformat(text)
     except ValueError:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+    # オフセット無しは worker が手元の時計で書いた値なので、ローカル時刻として読む
+    # (UTC として読むと JST では 9 時間ずれる, #72)。naive の astimezone() はローカル時刻扱い
     return dt.astimezone(timezone.utc)
 
 
@@ -174,10 +187,11 @@ def session_dirs_for(task_text: str) -> list[Path]:
     seen: set[Path] = set()
     for cwd in candidates:
         encoded = cwd.rstrip('/').replace('/', '-')
-        d = CLAUDE_PROJECTS / encoded
-        if d.is_dir() and d not in seen:
-            seen.add(d)
-            dirs.append(d)
+        for root in projects_roots():
+            d = root / encoded
+            if d.is_dir() and d not in seen:
+                seen.add(d)
+                dirs.append(d)
     return dirs
 
 
@@ -188,9 +202,9 @@ def find_session_transcript(session_id: str) -> Path | None:
     sessionId と一致する (実測で確認済み: `$CLAUDE_CODE_SESSION_ID` == transcript ファイル名
     == 各行の `sessionId` フィールド)。
     """
-    if not session_id or not CLAUDE_PROJECTS.is_dir():
+    if not session_id:
         return None
-    matches = sorted(CLAUDE_PROJECTS.glob(f'*/{session_id}.jsonl'))
+    matches = sorted(m for root in projects_roots() if root.is_dir() for m in root.glob(f'*/{session_id}.jsonl'))
     return matches[0] if matches else None
 
 
@@ -365,11 +379,24 @@ def measure(project: str, task_id: str) -> dict:
         end = parse_iso8601(report_meta.get('completed_at', ''))
         if end is None:
             notes.append('report の completed_at が ISO8601 として解釈できず終了時刻が不明 (unknown)')
+        else:
+            # worker が書いた completed_at が report を書いた時刻より後のことがある (#72)。
+            # report はそれより前には存在しないので、ファイルの更新時刻を上限にする
+            written = datetime.fromtimestamp(report_path.stat().st_mtime, tz=timezone.utc)
+            if end > written:
+                notes.append(f'completed_at ({end.isoformat()}) が report の更新時刻より後なので更新時刻を使う')
+                end = written
 
     session_id = report_meta.get('session_id', '')
     attribution = 'approximate'
     jsonl_paths: list[Path] = []
-    if session_id:
+    agent = report_meta.get('agent', task_meta.get('agent', ''))
+    if agent == 'opencode':
+        # Opencode は Claude Code の transcript を残さない。同じ cwd の別セッション (verifier 等) を
+        # 拾うと誤った値になるので、usage は数えずに unknown とする (#72)
+        attribution = 'unavailable'
+        notes.append('agent: opencode は Claude Code の transcript を残さないため token は unknown')
+    elif session_id:
         exact_path = find_session_transcript(session_id)
         if exact_path is not None:
             jsonl_paths = [exact_path]
@@ -380,18 +407,21 @@ def measure(project: str, task_id: str) -> dict:
                 '見つからず approximate にフォールバック',
             )
 
-    if attribution == 'approximate':
+    if attribution == 'unavailable':
+        pass
+    elif attribution == 'approximate':
         session_dirs = session_dirs_for(task_text)
         if not session_dirs:
             notes.append('session transcript ディレクトリ (~/.claude/projects/...) が見つからない')
         for session_dir in session_dirs:
             jsonl_paths.extend(sorted(session_dir.glob('*.jsonl')))
 
-    if start is None or end is None:
+    if attribution == 'unavailable' or start is None or end is None:
         # 区間の片側が不明なまま集計すると、際限なく過去まで遡って無関係な session まで
         # 合算してしまい (実測: Dispatcher の長期セッション全体を拾って桁違いの値になった)、
         # 0 と見分けのつかない不正確な数値よりも unknown の方が安全なため集計自体を行わない。
-        notes.append('集計区間が不完全 (開始/終了のいずれかが不明) なため usage 集計をスキップ (unknown)')
+        if attribution != 'unavailable':
+            notes.append('集計区間が不完全 (開始/終了のいずれかが不明) なため usage 集計をスキップ (unknown)')
         usage = {'corrupt_lines': 0, 'usage_missing': 0, 'session_ids': set(), 'matched_messages': 0}
         totals = dict.fromkeys(('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens'), 0)
         has_usage = False

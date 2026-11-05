@@ -71,7 +71,10 @@
 
 ### Fixed
 
-
+- `scripts/measure_task_cost.py` が、ローカルモデル worker の token と、worker が書く時刻を
+  正しく扱えていなかった (#72)。claude-local worker の transcript (`config/claude-worker/projects/`) も
+  探す。Opencode worker は同じ cwd の別セッションの token を拾わず `attribution: unavailable` とする。
+  オフセット無しの `completed_at` はローカル時刻として読み、report の更新時刻より後なら更新時刻を使う。
 - Opencode worker に `notify-worker.sh --clear` が効かず、前の task の会話を持ち越していた。
   Opencode の pane には `/new` を送り、start.sh が起動時に送るのと同じ bootstrap を送り直して
   「W{N} 待機中」を待ってから本文を送る。bootstrap の文面は `scripts/opencode-bootstrap.sh` に
