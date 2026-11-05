@@ -71,10 +71,18 @@
 
 ### Fixed
 
+
 - Opencode worker に `notify-worker.sh --clear` が効かず、前の task の会話を持ち越していた。
   Opencode の pane には `/new` を送り、start.sh が起動時に送るのと同じ bootstrap を送り直して
   「W{N} 待機中」を待ってから本文を送る。bootstrap の文面は `scripts/opencode-bootstrap.sh` に
   移し、start.sh と共有する (#71)。
+- claude-local worker の独立検証が Sonnet に届かず、同じローカルモデルで自己検証になっていた。
+  `scripts/verify-task.sh` が worker の `ANTHROPIC_BASE_URL` / `CLAUDE_CONFIG_DIR` 等を引き継ぎ、
+  sonnet 宛ての要求が LAN の LiteLLM に飛んで 400 になっていた。start.sh が claude-local worker に
+  `SQUAD_WORKER_AGENT=claude-local` を渡し、verify-task.sh はそのときだけそれらの env を外す。
+  `instructions/worker.md` には、claude-local worker は verifier サブエージェントを使わず
+  `verify-task.sh` を使い、verdict が書けずに終わったら代替せず blocked で報告する、と書いた。
+  検証先の env を自分で書き換えること (とくに外部サービスのモデルを使うこと) も禁止した (#69)。
 - README の Prerequisites に PyYAML を追加した。`scripts/check_report_yaml.py` /
   `check_task_yaml.py` / `check_dashboard_update.py` と `squad graph` が使うのに、
   「標準ライブラリのみ」と書いていた (#65)。
