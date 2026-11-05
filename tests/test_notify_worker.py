@@ -74,6 +74,8 @@ while True:
                 buf = b''
                 if mode != 'no-interrupt':
                     busy_until = time.time() + 6
+                if 'とだけ出力して停止' in line:   # Opencode の bootstrap に答える
+                    transcript.append('W0 待機中')
         elif ch == b'\x15':      # Ctrl-U
             if mode != 'blind-start':
                 buf = b''
@@ -184,3 +186,41 @@ def test_does_not_repaste_when_body_already_landed(pane: tuple[str, Path], tmp_p
     lines = [ln for ln in log.read_text().splitlines() if ln]
     assert len(lines) == 1, lines  # 発注は 1 回だけ
     assert lines[0].count(PROBE) == 1, lines[0]  # 本文が入力欄で積み上がっていない
+
+
+def test_clear_on_opencode_sends_new_and_bootstrap(tmp_path: Path) -> None:
+    """Opencode worker への --clear は /new → bootstrap → 「W{N} 待機中」を待って本文の順に送る (#71).
+
+    pane の前面プロセス名で Opencode を判定するので、モックを ``opencode`` という名前で動かす。
+    """
+    session = f'squad71test-{uuid.uuid4().hex[:8]}'
+    # 前面プロセス名 (comm) は exec したファイル名になるので、python3 への symlink を opencode と名付ける
+    mock = tmp_path / 'mock_tui.py'
+    mock.write_text(MOCK_TUI)
+    opencode = tmp_path / 'opencode'
+    opencode.symlink_to(shutil.which('python3'))
+    log = tmp_path / 'submitted.log'
+    _tmux('new-session', '-d', '-s', session, '-x', '100', '-y', '30', f'MOCK_LOG={log} exec {opencode} {mock}')
+    try:
+        time.sleep(1.0)
+        assert (
+            _tmux('display-message', '-p', '-t', f'{session}:0.0', '#{pane_current_command}').stdout.strip()
+            == 'opencode'
+        )
+        env = {**os.environ, 'SQUAD_SESSION': session, 'SQUAD_BOOTSTRAP_WAIT': '20'}
+        proc = subprocess.run(
+            ['bash', str(NOTIFY), '0.0', MSG, '--clear'],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=180,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        lines = [ln for ln in log.read_text().splitlines() if ln]
+        assert lines[0] == '/new', lines
+        assert 'あなたは squad の Worker 0 です' in lines[1], lines
+        assert lines[2].count(PROBE) == 1, lines
+        assert len(lines) == 3, lines  # /clear は送らない
+    finally:
+        _tmux('kill-session', '-t', session)

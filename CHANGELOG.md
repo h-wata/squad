@@ -71,6 +71,10 @@
 
 ### Fixed
 
+- Opencode worker に `notify-worker.sh --clear` が効かず、前の task の会話を持ち越していた。
+  Opencode の pane には `/new` を送り、start.sh が起動時に送るのと同じ bootstrap を送り直して
+  「W{N} 待機中」を待ってから本文を送る。bootstrap の文面は `scripts/opencode-bootstrap.sh` に
+  移し、start.sh と共有する (#71)。
 - README の Prerequisites に PyYAML を追加した。`scripts/check_report_yaml.py` /
   `check_task_yaml.py` / `check_dashboard_update.py` と `squad graph` が使うのに、
   「標準ライブラリのみ」と書いていた (#65)。
