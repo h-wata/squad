@@ -126,6 +126,12 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
 （自己採点の禁止）。
 
 1. 実装が一段落したら、**verifier サブエージェントを Task ツールで起動**する。
+   - **環境変数 `SQUAD_WORKER_AGENT` が `claude-local` (Claude Code + ローカルモデルで動いている)
+     なら、サブエージェントは使わず最初から下の `verify-task.sh` を実行する。** サブエージェントも
+     同じローカルモデルで動くので自己採点になる (#69)。`verify-task.sh` が verdict を書けずに
+     終わったら (起動失敗・API エラーで `result=inconclusive`)、代わりの検証はせず
+     `status: blocked`・`verify_status: fail` で報告し、失敗の出力を `issues:` に書く。
+     verdict が `result: fail` なら、下の 2. のとおり直して再検証する
    - 渡す情報: `task_yaml`（タスク YAML 絶対パス）、`worktree`（作業ディレクトリ）、
      `attempt`（試行回数, 1 始まり）、`worker_num`（自分の N）
    - verifier は `verify.commands` を worktree で実走し、acceptance_criteria と照合して
@@ -140,6 +146,10 @@ task YAML に `verify:` ブロックがあるタスクは、`status: completed` 
      **fork や自分自身で代替しないこと** — author と同じモデルでは死角を共有し、
      実測でも意味論の欠陥を素通しした。失敗した事実と代替手段は report の
      `issues:` に残す。
+   - **`SQUAD_VERIFIER_CMD` / `SQUAD_VERIFIER_MODEL` / `ANTHROPIC_*` を自分で書き換えて検証先を
+     変えないこと。** 既定 (sonnet) で検証できないときは、上のとおり blocked で報告して
+     Dispatcher の判断を待つ。とくに外部サービスのモデル (例: `opencode/*-free`) は、
+     非公開のコードを許可なく外へ送ることになるので使わない (#69)
 2. verdict を Read して分岐:
    - **result: pass** → 報告プロトコルへ。`status: completed`、`verify_status: pass`。
    - **result: fail / inconclusive** → verdict の `recommendations` / `unmet_acceptance_criteria`
