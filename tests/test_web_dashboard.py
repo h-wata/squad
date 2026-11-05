@@ -171,6 +171,7 @@ def test_panes_are_masked_and_only_squad_sessions(server: tuple[str, list]) -> N
     assert [s['name'] for s in data['sessions']] == ['squad']
     panes = data['sessions'][0]['panes']
     assert [p['target'] for p in panes] == ['squad:0.0', 'squad:0.5']
+    assert all(p['ok'] for p in panes)
     text = json.dumps(data)
     assert SECRET not in text
     assert 'working...' in text
@@ -250,3 +251,14 @@ def test_pane_masked_before_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     assert 'KEYBODY' not in pane['text']
     assert pane['text'].split('\n')[-1] == '[REDACTED PRIVATE KEY LINE]'  # 末尾の空行は落とす
     assert len(pane['text'].split('\n')) == web.PANE_LINES
+
+
+def test_pane_capture_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
+        out = {'list-sessions': 's\n', 'list-panes': 's:0.5\tAux-Shell\n', 'capture-pane': ''}[cmd[1]]
+        return subprocess.CompletedProcess(cmd, 1 if cmd[1] == 'capture-pane' else 0, out, 'no pane')
+
+    monkeypatch.setattr(web.subprocess, 'run', run)
+    (pane,) = web.panes_data()['sessions'][0]['panes']
+    assert pane['ok'] is False
+    assert pane['text'] == ''

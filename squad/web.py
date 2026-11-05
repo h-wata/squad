@@ -99,19 +99,21 @@ def projects_data(queue_dir: Path, dashboards_dir: Path) -> dict[str, Any]:
 # ---------- tmux pane ----------
 
 
-def _tmux_lines(*args: str) -> list[str]:
+def _tmux_lines(*args: str) -> list[str] | None:
+    """Tmux の出力行。失敗したら None."""
     r = subprocess.run(['tmux', *args], capture_output=True, text=True)
-    return r.stdout.splitlines() if r.returncode == 0 else []
+    return r.stdout.splitlines() if r.returncode == 0 else None
 
 
 def panes_data() -> dict[str, Any]:
     sessions = []
-    for name in _tmux_lines('list-sessions', '-F', '#{session_name}'):
+    for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []:
         rows = [
             ln.split('\t', 1)
             for ln in _tmux_lines(
                 'list-panes', '-s', '-t', name, '-F', '#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}'
             )
+            or []
         ]
         if not any(len(r) == 2 and r[1] == SQUAD_PANE_TITLE for r in rows):
             continue
@@ -119,8 +121,16 @@ def panes_data() -> dict[str, Any]:
         for target, title in (r for r in rows if len(r) == 2):
             # 履歴全体 (-S -) をマスクしてから末尾を切る。可視範囲や末尾だけをマスクすると、PRIVATE KEY の
             # BEGIN 行が範囲外に出て本文が素通しになる。ponytail: history-limit を超えて捨てられた BEGIN 行は救えない
-            text = mask('\n'.join(_tmux_lines('capture-pane', '-p', '-S', '-', '-t', target)).rstrip('\n'))
-            panes.append({'target': target, 'title': title, 'text': '\n'.join(text.split('\n')[-PANE_LINES:])})
+            lines = _tmux_lines('capture-pane', '-p', '-S', '-', '-t', target)
+            text = mask('\n'.join(lines or []).rstrip('\n'))
+            panes.append(
+                {
+                    'target': target,
+                    'title': title,
+                    'ok': lines is not None,
+                    'text': '\n'.join(text.split('\n')[-PANE_LINES:]),
+                }
+            )
         sessions.append({'name': name, 'panes': panes})
     return _masked({'sessions': sessions})
 
@@ -270,7 +280,7 @@ async function panes() {
   for (const s of d.sessions) {
     root.append(el('h3', '', s.name)); const row = el('div', 'row');
     for (const p of s.panes) { const c = el('div', 'card'); c.append(el('div', 'small', `${p.target} ${p.title}`));
-      c.append(el('pre', '', p.text)); row.append(c); }
+      c.append(el('pre', '', p.ok ? p.text : '(capture-pane に失敗)')); row.append(c); }
     root.append(row);
   }
 }
