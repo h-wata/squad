@@ -82,7 +82,7 @@ def projects_data(queue_dir: Path, dashboards_dir: Path) -> dict[str, Any]:
                 'file': latest.name,
                 'task_id': rep.get('task_id', ''),
                 'status': rep.get('status', ''),
-                'summary': rep.get('summary', '')[:200],
+                'summary': mask(rep.get('summary', ''))[:200],  # 切ってからだと token の一部が残る
                 'mtime': iso(latest.stat().st_mtime),
             }
         dash = dashboards_dir / f'{pj_dir.name}.md'
@@ -118,10 +118,13 @@ def panes_data() -> dict[str, Any]:
             continue
         panes = []
         for target, title in (r for r in rows if len(r) == 2):
-            ok, text = tmux_capture(target, PANE_LINES)
-            panes.append({'target': target, 'title': title, 'ok': ok, 'text': mask(text)})
+            # 画面全体をマスクしてから末尾を切る (先に切ると PRIVATE KEY の BEGIN 行が落ちて本文が残る)
+            ok, text = tmux_capture(target, 0)
+            panes.append(
+                {'target': target, 'title': title, 'ok': ok, 'text': '\n'.join(mask(text).split('\n')[-PANE_LINES:])}
+            )
         sessions.append({'name': name, 'panes': panes})
-    return {'sessions': sessions}
+    return _masked({'sessions': sessions})
 
 
 # ---------- 探索グラフ ----------

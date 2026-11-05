@@ -204,7 +204,7 @@ def _snapshot(root: Path) -> dict[str, tuple[float, str]]:
     }
 
 
-@pytest.mark.parametrize('method', ['POST', 'PUT', 'DELETE', 'PATCH'])
+@pytest.mark.parametrize('method', ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
 def test_write_methods_rejected_and_files_unchanged(server: tuple[str, list], root: Path, method: str) -> None:
     base, _ = server
     before = _snapshot(root)
@@ -229,3 +229,19 @@ def test_no_send_keys_in_source() -> None:
         "subprocess.run(['tmux', *args], capture_output=True, text=True)"
     ]
     assert 'send-keys' not in src
+
+
+def test_pane_masked_before_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """末尾 PANE_LINES 行に BEGIN 行が入らない長い鍵でも本文が出ない (切ってからマスクしない)."""
+    body = [f'KEYBODY{i:03d}' for i in range(web.PANE_LINES + 10)]
+    screen = '\n'.join(['-----BEGIN RSA PRIVATE KEY-----', *body])  # pragma: allowlist secret
+
+    def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
+        out = {'list-sessions': 's\n', 'list-panes': 's:0.5\tAux-Shell\n', 'capture-pane': screen}[cmd[1]]
+        return subprocess.CompletedProcess(cmd, 0, out, '')
+
+    monkeypatch.setattr(web.subprocess, 'run', run)
+    monkeypatch.setattr(squad_cli.subprocess, 'run', run)
+    (pane,) = web.panes_data()['sessions'][0]['panes']
+    assert 'KEYBODY' not in pane['text']
+    assert len(pane['text'].split('\n')) == web.PANE_LINES
