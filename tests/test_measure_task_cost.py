@@ -525,7 +525,8 @@ def test_opencode_usage_is_unavailable_not_borrowed_from_same_cwd(
 
 def test_naive_completed_at_is_read_as_local_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """オフセット無しの completed_at はローカル時刻として読む (UTC 扱いで 9 時間ずれない, #72)."""
-    monkeypatch.setenv('TZ', 'Asia/Tokyo')
+    original_tz = os.environ.get('TZ')
+    os.environ['TZ'] = 'Asia/Tokyo'
     time.tzset()
     try:
         tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
@@ -539,7 +540,10 @@ def test_naive_completed_at_is_read_as_local_time(tmp_path: Path, monkeypatch: p
 
         assert record['wall_clock_sec'] == 300
     finally:
-        monkeypatch.delenv('TZ')
+        if original_tz is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = original_tz
         time.tzset()
 
 
