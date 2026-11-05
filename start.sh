@@ -375,14 +375,8 @@ fi
 # 誤発火の危険がある。そこで指示本文は事前レンダリングしたファイルに置き、--prompt には
 # 「読んで待機しろ」という短い bootstrap だけを渡す。
 opencode_prompt_file() { echo "$SCRIPT_DIR/squad/state/worker$1-opencode-instructions.md"; }
-opencode_bootstrap() {
-    local n="$1"
-    echo "あなたは squad の Worker $n です。まず $(opencode_prompt_file "$n") を Read して運用ルールを頭に入れてください。\
-読み終えたら「W$n 待機中」とだけ出力して停止すること。\
-起動直後のこのターンでは、それ以外を一切しないこと: queue/ や他プロジェクトを探索しない、\
-既存の task YAML / report を読まない、ファイルを変更しない、git / gh コマンドを打たない。\
-Dispatcher が tmux 経由で task YAML の絶対パスを通知してくるまで待機します。"
-}
+# 文面は notify-worker.sh --clear (/new 後の再 bootstrap) と共有するため別ファイルに置く (#71)。
+opencode_bootstrap() { "$SCRIPT_DIR/scripts/opencode-bootstrap.sh" "$1"; }
 
 # dispatcher.md 用。Opencode で動いている worker がいるときだけ routing の注意を足す。
 OPENCODE_WORKERS=""

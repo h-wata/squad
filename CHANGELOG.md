@@ -71,6 +71,11 @@
 
 ### Fixed
 
+
+- Opencode worker に `notify-worker.sh --clear` が効かず、前の task の会話を持ち越していた。
+  Opencode の pane には `/new` を送り、start.sh が起動時に送るのと同じ bootstrap を送り直して
+  「W{N} 待機中」を待ってから本文を送る。bootstrap の文面は `scripts/opencode-bootstrap.sh` に
+  移し、start.sh と共有する (#71)。
 - claude-local worker の独立検証が Sonnet に届かず、同じローカルモデルで自己検証になっていた。
   `scripts/verify-task.sh` が worker の `ANTHROPIC_BASE_URL` / `CLAUDE_CONFIG_DIR` 等を引き継ぎ、
   sonnet 宛ての要求が LAN の LiteLLM に飛んで 400 になっていた。start.sh が claude-local worker に

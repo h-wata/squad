@@ -15,6 +15,7 @@
 #   scripts/notify-worker.sh W2 "新しいタスクがあります。.../worker2.yaml を確認してください。"
 #   scripts/notify-worker.sh W1 "....worker1.yaml を確認してください。" --model sonnet
 #   scripts/notify-worker.sh W2 "....worker2.yaml を確認してください。" --clear --model sonnet
+#   (Opencode worker への --clear は /new + 起動時と同じ bootstrap を送り、「W{N} 待機中」を待つ)
 #   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。"          # /new 自動送信
 #   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。" --no-new  # /new をスキップ
 #
@@ -86,6 +87,18 @@ if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_in
   fi
   exit 1
 fi
+
+# Opencode worker は /clear で context が消えない。会話の作り直しは /new で、その後は
+# start.sh が起動時に送る bootstrap も送り直す必要がある (#71)。pane の前面プロセス名で判定する。
+# 判定は前面プロセス名か、start.sh が付ける pane タイトル「WorkerN (Opencode)」のどちらか。
+IS_OPENCODE=0
+case "$(tmux display-message -p -t "$TARGET" '#{pane_current_command}|#{pane_title}' 2>/dev/null)" in
+  opencode\|* | *"(Opencode)"*) IS_OPENCODE=1 ;;
+esac
+NOTIFY_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+WORKER_NUM="${PANE#0.}"
+# bootstrap の後、worker が「W{N} 待機中」とだけ出すまで待つ秒数
+BOOTSTRAP_WAIT="${SQUAD_BOOTSTRAP_WAIT:-120}"
 
 # 送信の状態は 3 つに分かれる。混ぜると誤報になる (SQUAD-281)。
 #   landed    : 入力欄に本文が乗った (pane に本文 or 貼り付けマーカーが見える)
@@ -222,10 +235,35 @@ send_line() {
   return 1
 }
 
-# --clear (Claude のみ。Codex には /clear 概念が無いのでスキップ)
+# --clear (Claude は /clear、Opencode は /new + bootstrap。Codex には /clear 概念が無いのでスキップ)
 if [ "$DO_CLEAR" -eq 1 ]; then
   if [ "$IS_CODEX" -eq 1 ]; then
     echo "[notify-worker] W4(Codex) には --clear は無効。スキップします。" >&2
+  elif [ "$IS_OPENCODE" -eq 1 ]; then
+    # /new が落ちると旧会話のまま bootstrap と本文が進むので、Opencode が出す
+    # 「new session ses_...」の行が増えたことで届いたと確かめる (/new は短く、send_line の
+    # 本文プローブ (ASCII 8 文字以上) では確認できない)
+    new_count() { tmux capture-pane -p -S - -t "$TARGET" | grep -c "new session ses_" || true; }
+    before_new="$(new_count)"
+    send_line "/new" 0.5
+    for _ in $(seq 1 15); do [ "$(new_count)" -gt "$before_new" ] && break; sleep 1; done
+    if [ "$(new_count)" -le "$before_new" ]; then
+      echo "[notify-worker] Opencode に /new を送りましたが、新しい会話が始まりません。本文は送りません。" >&2
+      exit 1
+    fi
+    # bootstrap 文自体にも「W{N} 待機中」が含まれるので、その語だけの行を数える。
+    # 前回の起動時の行が履歴に残っているため、送る前より増えたら「読み終えた」とみなす。
+    ready_count() { tmux capture-pane -p -S - -t "$TARGET" | grep -Ec "^[[:space:]]*W${WORKER_NUM} 待機中[[:space:]]*$" || true; }
+    before="$(ready_count)"
+    send_line "$("$NOTIFY_DIR/opencode-bootstrap.sh" "$WORKER_NUM")" 0.8 1
+    for _ in $(seq 1 "$BOOTSTRAP_WAIT"); do
+      [ "$(ready_count)" -gt "$before" ] && break
+      sleep 1
+    done
+    if [ "$(ready_count)" -le "$before" ]; then
+      echo "[notify-worker] Opencode の bootstrap 後、${BOOTSTRAP_WAIT} 秒待っても「W${WORKER_NUM} 待機中」が出ません。本文は送りません。" >&2
+      exit 1
+    fi
   else
     send_line "/clear" 0.5
     sleep 1.5
