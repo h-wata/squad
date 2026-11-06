@@ -1662,3 +1662,35 @@ class TestReportArchiveCopy:
         d = make_project(queue, 'pj', session='testsess')
         w._archive_copy(str(d / 'reports' / 'worker1_report.yaml'), '../../x', 'f' * 64, {'task_id': 'T'}, b'a', 0)  # noqa: SLF001
         assert [p.name for p in self._archive(d)] == ['T__.._.._x.yaml']
+
+
+class TestTaskYamlTriggersGraphSync:
+    """task YAML の発注・書換・移動で次サイクルに graph sync が走る (#84)."""
+
+    def _synced(self, w: Watcher, calls: list) -> bool:
+        before = len(calls)
+        w.refresh_owned_projects()
+        w.sync_graph()
+        return len(calls) > before
+
+    def test_sync_only_on_task_change(self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        w, queue = watcher
+        import graph  # noqa: PLC0415
+
+        calls: list = []
+        monkeypatch.setattr(graph, 'sync', lambda q: calls.append(q) or (0, 0))
+        d = make_project(queue, 'pj', session='testsess')
+        assert self._synced(w, calls)  # 起動直後の 1 回
+        assert not self._synced(w, calls)  # 何も変わらない
+        task = d / 'tasks' / 'worker1.yaml'
+        task.write_text('task_id: T1\n')
+        assert self._synced(w, calls)  # 発注
+        assert not self._synced(w, calls)
+        os.utime(task, ns=(1, 1))
+        assert self._synced(w, calls)  # 書き換え (mtime 変化)
+        (d / 'tasks' / 'archive').mkdir()
+        task.rename(d / 'tasks' / 'archive' / 'T1.yaml')
+        assert self._synced(w, calls)  # archive へ移動
+        assert not self._synced(w, calls)
+        (d / 'tasks' / 'archive' / 'T1.yaml').unlink()
+        assert self._synced(w, calls)  # 削除

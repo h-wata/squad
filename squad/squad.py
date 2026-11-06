@@ -108,6 +108,8 @@ THINKING_PATTERNS = [
     # 本文中の引用で誤検知しないよう、スピナーの記号 (· ✢ ✳ ✶ ✻ ✽ の許可リスト) で始まる行に限る
     r'(?m)^[ \t]*[·✢✳✶✻✽][ \t]+[\w-]+…[ \t]*\(\d+[ms]',
     r'(?m)^[ \t]*[·✢✳✶✻✽][ \t]+Working \(\d+m \d+s\)',
+    # Codex: `• Working (1m 06s • esc to interrupt)`。終了は `─ Worked for 7m 07s` で別の形
+    r'(?m)^[ \t]*•[ \t]+Working \((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)',
 ]
 CTX_PATTERNS = [
     re.compile(r'\bctx\s+(\d+)%', re.IGNORECASE),

@@ -53,3 +53,43 @@ def test_legacy_working_spinner_is_busy() -> None:
 
 def test_symbol_and_spinner_on_different_lines_is_idle() -> None:
     assert detect_status('✻\nThinking… (12s\n❯ ')['status'] == 'idle'
+
+
+# Codex の実 pane (tmux capture-pane) の形。作業中は最下部のスピナー行、完了後は区切り線 + プロンプト
+CODEX_WORKING = """\
+• Ran stat -c '%y %n' queue/projects/*/tasks/worker4.yaml | sort
+  └ 2026-07-02 18:24:58.292757912 +0900 queue/projects/mesh-mem/tasks/worker4.yaml
+    … +24 lines (ctrl + t to view transcript)
+
+• Working (1m 06s • esc to interrupt)
+
+› Summarize recent commits
+  gpt-5.6-terra high · ~/work/squad · Context 87% left · 5h 98% left
+"""
+CODEX_DONE = """\
+• Ran stat -c '%y %n' queue/projects/*/tasks/worker4.yaml | sort
+─ Worked for 7m 07s ────────────────────────────────────────────
+• worker4 の cross-review を完了し、報告を作成しました。
+
+› Improve documentation in @filename
+  gpt-5.6-terra high · ~/work · Context 77% left · 5h 67% left
+"""
+
+
+def test_codex_working_is_busy() -> None:
+    assert detect_status(CODEX_WORKING)['status'] == 'busy'
+    assert detect_status('• Working (6s • esc to interrupt)')['status'] == 'busy'
+    assert detect_status('• Working (1h 2m 3s • esc to interrupt)')['status'] == 'busy'
+
+
+def test_codex_finished_is_idle() -> None:
+    assert detect_status(CODEX_DONE)['status'] == 'idle'
+
+
+def test_codex_quoted_working_text_is_idle() -> None:
+    assert detect_status('例: • Working (1m 06s • esc to interrupt)\n› ')['status'] == 'idle'
+    assert detect_status('> • Working (1m 06s • esc to interrupt)\n› ')['status'] == 'idle'
+
+
+def test_codex_permission_wins_over_working() -> None:
+    assert detect_status(CODEX_WORKING + 'Do you want to proceed?\n 1. Yes')['status'] == 'permission_wait'

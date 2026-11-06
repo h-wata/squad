@@ -326,6 +326,8 @@ class Watcher:
         self._queue_readable = True
         # report を配達したサイクルの最後に探索グラフを作り直す (#55)。起動直後に 1 回は作る
         self._graph_dirty = True
+        # tasks/ 以下の task YAML の (path, mtime_ns) 一覧。変わったら発注・書換・移動・削除があった (#84)
+        self._tasks_sig: tuple | None = None
 
     # ---- ログ / 通知 ----
 
@@ -637,12 +639,32 @@ class Watcher:
         except OSError as e:
             self.log(f'[WARN] report の写しを archive に残せません (配達は継続): {dest}: {e}')
 
+    def _tasks_changed(self) -> bool:
+        """担当 project の tasks/ 以下 (archive 含む) の YAML が前回から変わったか (#84).
+
+        path 込みで比べるので、移動・削除も拾う。初回は比較元が無いので False
+        (起動直後の sync は _graph_dirty の初期値 True が担う)。
+        """
+        sig = []
+        for d in self.owned:
+            for p in (d / 'tasks').rglob('*.y*ml'):
+                try:
+                    sig.append((str(p), p.stat().st_mtime_ns))
+                except OSError:
+                    continue
+        new = tuple(sorted(sig))
+        changed = self._tasks_sig is not None and new != self._tasks_sig
+        self._tasks_sig = new
+        return changed
+
     def sync_graph(self) -> None:
         """探索グラフ (queue/.graph.db) を作り直す (#55).
 
         graph は PyYAML に依存するため、ここでだけ import する。PyYAML が無い・YAML が
         壊れている等で失敗しても、report 配達には影響させない (ログだけ残して次の配達で再試行)。
         """
+        if self._tasks_changed():
+            self._graph_dirty = True
         if not self._graph_dirty:
             return
         self._graph_dirty = False
