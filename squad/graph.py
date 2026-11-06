@@ -220,6 +220,7 @@ def collect(
                 current,
                 assigned_to=_s(data.get('assigned_to')),
                 created_at=_s(data.get('created_at')),
+                issued_at=_iso(created if created is not None else mtime),  # 活動タブの発注時刻 (#82)
                 routing_reason=_s(data.get('routing_reason')),
                 replan_reason=_s(data.get('replan_reason')),
                 description=_s(data.get('description'))[:4000],
@@ -362,7 +363,9 @@ def collect(
         # 一番重い状態。配下が closed だけのゴールは closed (結果が 1 件も残っていない) のまま灰色で出す
         state = 'closed' if states == {'closed'} else next((s for s in ('running', 'blocked') if s in states), 'done')
         times = [t for m in members for t in (nodes[m]['_mtime'], nodes[m].get('_finished', 0.0))]
-        add(goal, 'goal', project, state, title, ref, max(times), members=members)
+        # 完了したゴールは配下の最後の結果の時刻を完了時刻にする (活動タブ, #82)。closed だけのゴールは結果が無い
+        finished = _iso(max(nodes[m].get('_finished', 0.0) for m in members)) if state == 'done' else ''
+        add(goal, 'goal', project, state, title, ref, max(times), members=members, finished_at=finished)
         edges.update((goal, 'spawns', m) for m in members)
     return nodes, edges, projects
 
