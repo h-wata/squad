@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timezone
+import contextlib
+import fcntl
 import glob as globmod
 import json
 import os
@@ -59,6 +61,7 @@ from ledger import ReportLedger  # noqa: E402
 from notify_queue import NotificationQueue  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
 from notify_queue import QueueUnreadableError  # noqa: E402
+from squad import detect_status  # noqa: E402 (squad ls / squad web と同じ作業中判定, #79)
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -158,6 +161,15 @@ def _bool_env(name: str, default: bool) -> bool:
     return v in ('1', 'true', 'yes', 'on')
 
 
+# web からの指示 (#85) を pane に打ち込む前に空白へ置き換える制御文字 (改行で途中確定、ESC で端末操作をさせない)
+INSTRUCTION_CTRL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def _flat(text: str) -> str:
+    """Pane に打ち込む文字列を 1 行にする (制御文字を空白にし、空白の並びを 1 つにまとめる)."""
+    return ' '.join(INSTRUCTION_CTRL_RE.sub(' ', text).split())
+
+
 # graph sync 失敗後の再試行間隔 (秒)。最後の値を上限として使い続ける
 GRAPH_RETRY_BACKOFF = (5, 30, 300)
 
@@ -253,7 +265,9 @@ class Tmux:
         r = self._run(['capture-pane', '-p', '-t', pane])
         if r.returncode != 0:
             return ''
-        return '\n'.join(r.stdout.splitlines()[-lines:])
+        # 画面の下の空行を落としてから末尾を取る。/clear 直後など出力が画面の上にあると、空行だけの末尾に
+        # なってスピナー行が範囲外に出て、作業中の pane を待機中と読む (#85 の real check で再現)
+        return '\n'.join(r.stdout.rstrip().splitlines()[-lines:])
 
     def send_keys(self, pane: str, keys: str) -> bool:
         return self._run(['send-keys', '-t', pane, keys]).returncode == 0
@@ -335,6 +349,9 @@ class Watcher:
         # sync 失敗時は dirty を残し backoff で再試行する (一時的な失敗で永久に古いままにしない)
         self._graph_failures = 0
         self._graph_retry_at = 0.0
+        # このサイクルで Dispatcher pane に何か送ったか (送った直後は待機中に見えても指示を重ねない, #85)
+        self._sent_to_dispatcher = False
+        self._instructions_sig: tuple[str, ...] | None = None
 
     # ---- ログ / 通知 ----
 
@@ -351,6 +368,7 @@ class Watcher:
         メッセージと連結される事象があるため、間に sleep を挟んで別々に送る。
         """
         pane = self.cfg.dispatcher
+        self._sent_to_dispatcher = True
         if not self.tmux.send_keys(pane, msg):
             return False
         self.sleep(0.5)
@@ -645,6 +663,88 @@ class Watcher:
                 os.unlink(tmp)
         except OSError as e:
             self.log(f'[WARN] report の写しを archive に残せません (配達は継続): {dest}: {e}')
+
+    def deliver_instructions(self) -> None:
+        """Squad web が queue/instructions/<session>/ に書いた指示を Dispatcher へ 1 件渡す (#85).
+
+        Dispatcher (pane 0) が待機中のときだけ、古い順に 1 サイクル 1 件。このサイクルで既に pane 0 へ
+        何か送ったときは次のサイクルに回す (送った直後は作業中の表示がまだ出ていない)。
+        二重に送らないよう、打ち込む前に delivered_at を書く (at-most-once)。書いた後に watchd が落ちても
+        再起動後に送り直さない。送れなかったら delivered_at を消して failed_at を書き、活動タブに
+        「送れず」と出す (中途半端に入力欄に残った文字列へ重ねて送らないため、自動では再送しない)。
+        ログには本文を出さない (ファイル名だけ)。
+        """
+        d = self.cfg.queue_dir / 'instructions' / self.cfg.session
+        files = sorted(d.glob('*.json'))
+        sig = tuple(p.name for p in files)
+        if sig != self._instructions_sig:  # 新しい指示は渡す前から活動タブに出す
+            self._instructions_sig = sig
+            self._graph_dirty = True
+        if not files:
+            return
+        pane = self.cfg.dispatcher
+        if self._sent_to_dispatcher or not self.tmux.pane_exists(pane):
+            return
+        # 同じ session の watchd が 2 つ動いていても (再起動で旧プロセスが残る等)、印付けと送信を 1 つずつにする。
+        # 取れなければこのサイクルは見送る。ロックの中で読み直すので、相手が印を付けた指示は送らない
+        try:
+            lock = os.open(d / '.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as e:
+            self.log(f'[WARN] 指示のロックを開けません (今回は渡さない): {e}')
+            return
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(lock)
+            return
+        try:
+            self._deliver_one_instruction(files, pane)
+        finally:
+            os.close(lock)  # flock も外れる
+
+    def _deliver_one_instruction(self, files: list[Path], pane: str) -> None:
+        for path in files:
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get('body'), str) and data['body'].strip():
+                if not data.get('delivered_at') and not data.get('failed_at'):
+                    break
+        else:
+            return
+        if detect_status(self.tmux.capture(pane))['status'] != 'idle':
+            return
+        now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        if not self._write_instruction(path, {**data, 'delivered_at': now}):
+            return
+        project = _flat(data['project']) if isinstance(data.get('project'), str) else ''
+        # 先頭を固定のタグにする: 本文が - で始まると tmux が option と読み、Enter 等の名前だけなら key と読む。
+        # 末尾も固定: 引数の末尾の ; は tmux がコマンドの区切りとして食べる
+        tag = f' [project: {project}]' if project else ''
+        msg = f'[squad-web 指示]{tag} {_flat(data["body"])} [id={_flat(path.stem)}]'
+        self._graph_dirty = True
+        if self.notify_dispatcher(msg):
+            self.log(f'web からの指示を Dispatcher に渡しました: {path.name}')
+            return
+        self.log(f'[WARN] web からの指示を Dispatcher に送れませんでした (再送しない): {path.name}')
+        self._write_instruction(path, {**data, 'delivered_at': '', 'failed_at': now})
+
+    def _write_instruction(self, path: Path, data: dict) -> bool:
+        """指示ファイルを丸ごと書き換える (一時ファイル + rename なので、読む側は書きかけを見ない)."""
+        tmp = ''
+        try:
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.tmp-')
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+            return True
+        except OSError as e:
+            self.log(f'[WARN] 指示ファイルを更新できません (今回は渡さない): {path.name}: {e}')
+            if tmp:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+            return False
 
     def _tasks_changed(self) -> bool:
         """担当 project の tasks/ 以下 (archive 含む) の YAML が前回から変わったか (#84).
@@ -1203,8 +1303,10 @@ class Watcher:
 
     def cycle(self) -> None:
         """1 サイクル分の監視処理."""
+        self._sent_to_dispatcher = False
         self.refresh_owned_projects()
         self.report_bridge()
+        self.deliver_instructions()
         self.sync_graph()
         self.check_workers()
 

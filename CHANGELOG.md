@@ -13,6 +13,13 @@
 
 ### Added
 
+- `squad web --allow-write`: 活動タブから Dispatcher に指示を出す (#85)。`POST /api/instructions` は
+  `queue/instructions/<session>/` に 1 件 1 ファイルで書くだけで、tmux には送らない。トークンは
+  `Authorization` ヘッダだけで受け付け、`Origin` が自分自身でなければ 403、本文は 4000 文字まで。
+  watchd が Dispatcher (pane 0) の待機中にだけ 1 件ずつ打ち込み、打ち込む前に `delivered_at` を書く
+  (再起動しても二重に送らない)。graph sync が指示を読み込み、活動タブに「指示」として時系列で出す。
+  フラグ無しは今と同じ読み取り専用 (POST は 405、入力欄も出ない)。graph DB の schema は 3 に上がる
+  (古い DB は次の sync で作り直される)。
 - task YAML の Write 時に PreToolUse Hook (`scripts/hooks/stamp_created_at.py`) が `created_at` を実時刻に差し替える (#87)。
   同じファイルの書き直しでは既存の値を残し、Edit と task YAML 以外は触らない。`settings.local.json.example` に追加済み。
   稼働中の設定への反映は手動。dispatcher.md の例もタイムゾーン付きにした。

@@ -9,6 +9,9 @@
   - tmux は list-sessions / list-panes / capture-pane だけを呼ぶ (キー入力は送らない)。worker の状態は
     `squad ls` と同じ squad.probe_worker で判定する
   - GET 以外は 405。全リクエストでトークンを検査する (未設定なら起動しない)
+  - 例外は `--allow-write` で起動したときの `POST /api/instructions` だけ (#85)。Dispatcher への指示を
+    `queue/instructions/<session>/` に 1 件 1 ファイルで書く (tmux には送らない。打ち込むのは watchd)。
+    トークンは Authorization ヘッダだけ、Origin は自分自身だけ、本文は MAX_BODY_CHARS まで
   - pane の中身と DB 由来の文字列は squad/mask.py を通してから返す
 
 squad セッションの判定: start.sh が pane 0.5 に付けるタイトル "Aux-Shell" を持つセッション。
@@ -26,10 +29,13 @@ import hmac
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import subprocess
+import tempfile
 from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
@@ -41,7 +47,13 @@ SQUAD_PANE_TITLE = 'Aux-Shell'
 PANE_LINES = 300
 STATUS_LABEL = {'busy': '作業中', 'idle': '待機中', 'permission_wait': '許可待ち', 'unreachable': '停止'}
 DONE = ('done', 'verified')
-EVENT_ORDER = {'order': 0, 'result': 1, 'blocked': 1, 'goal_done': 2}
+EVENT_ORDER = {'instruction': -1, 'order': 0, 'result': 1, 'blocked': 1, 'goal_done': 2}
+# 指示 (#85): 本文の上限と、リクエスト全体 (JSON) の上限。日本語 1 文字は UTF-8 で 3 byte、JSON の
+# エスケープ (\uXXXX) なら 6 byte になるので、本文の上限の 6 倍 + 余裕を取る
+MAX_BODY_CHARS = 4000
+MAX_REQUEST_BYTES = MAX_BODY_CHARS * 6 + 1024
+# 書き込み先のディレクトリ名になるので、tmux のセッション一覧と完全一致したうえでこの形に限る
+SESSION_RE = re.compile(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}')
 DETAIL_KEYS = (
     'assigned_to',
     'created_at',
@@ -328,16 +340,81 @@ def activity_data(db_path: Path, hours: int, project: str = '', session: str = '
                     'node_id': node_id,
                 }
             )
-        # 同じ時刻なら発注 -> 結果 -> ゴール完了の順に起きたものとして、新しい順の上にゴール完了を出す
+        try:
+            instructions = conn.execute(
+                'SELECT session, id, project, body, created_at, delivered_at, failed_at FROM instructions'
+            ).fetchall()
+        except sqlite3.OperationalError:  # instructions 表の無い古い DB (次の sync で作り直される)
+            instructions = []
+        for sess, iid, pj, body, at, delivered, failed in instructions:
+            if not at or at < since or (project and pj != project) or (session and sess != session):
+                continue
+            events.append(
+                {
+                    'at': at,
+                    'project': pj,
+                    'session': sess,
+                    'worker': '',
+                    'task_id': '',
+                    'event': 'instruction',
+                    'state': 'delivered' if delivered else 'failed' if failed else 'pending',
+                    'verify': '',
+                    'title': body,
+                    'goal': '',
+                    'node_id': f'instruction:{sess}/{iid}',
+                    'delivered_at': delivered,
+                }
+            )
+        # 同じ時刻なら指示 -> 発注 -> 結果 -> ゴール完了の順に起きたものとして、新しい順の上にゴール完了を出す
         events.sort(key=lambda e: (e['at'], EVENT_ORDER[e['event']], e['node_id']), reverse=True)
         return {
             'hours': hours,
             'events': events,
             'projects': sorted(owners),
-            'sessions': sorted({s for s in owners.values() if s}),
+            'sessions': sorted({s for s in owners.values() if s} | {i[0] for i in instructions}),
         }
 
     return _query(db_path, fn)
+
+
+def targets_data(db_path: Path) -> dict[str, Any]:
+    """指示を出せる宛先: 起動中の squad セッションと、そのセッションが担当する project (#85)."""
+    owners = _query(db_path, lambda conn: {'owners': conn.execute('SELECT project, session FROM projects').fetchall()})
+    pairs = owners.get('owners', [])
+    return {
+        'sessions': {s: sorted(pj for pj, o in pairs if o == s) for s in squad_sessions() if SESSION_RE.fullmatch(s)}
+    }
+
+
+def write_instruction(queue_dir: Path, session: str, project: str, body: str) -> str:
+    """指示を queue/instructions/<session>/<id>.json に書き、id を返す。session は検証済みのものだけ渡す.
+
+    ファイル名は入力から作らない (時刻 + 乱数)。一時ファイルに書いてから link で置くので、watchd や graph
+    sync が書きかけを読まず、同名があれば上書きしない (FileExistsError)。
+    """
+    d = queue_dir / 'instructions' / session
+    d.mkdir(parents=True, exist_ok=True)
+    # instructions/ か <session>/ が symlink で他の場所 (tasks/ 等) を指していたら書かない
+    if d.resolve() != queue_dir.resolve() / 'instructions' / session:
+        raise OSError(f'instructions の置き場所が {queue_dir} の外を指しています')
+    now = datetime.now(timezone.utc)
+    iid = f'{now.strftime("%Y%m%dT%H%M%S%fZ")}-{secrets.token_hex(4)}'  # 名前順 = 時刻順
+    data = {
+        'id': iid,
+        'session': session,
+        'project': project,
+        'body': body,
+        'created_at': now.isoformat(timespec='seconds'),
+        'delivered_at': '',
+    }
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.tmp-')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.link(tmp, d / f'{iid}.json')
+    finally:
+        os.unlink(tmp)
+    return iid
 
 
 # ---------- tmux ----------
@@ -435,7 +512,7 @@ def pane_data(db_path: Path, target: str) -> dict[str, Any]:
 
 
 class Handler(BaseHTTPRequestHandler):
-    """GET のみ受け付ける。設定は make_server が server 属性に載せる."""
+    """GET のみ受け付ける (--allow-write なら POST /api/instructions も)。設定は make_server が server 属性に載せる."""
 
     def _send(self, code: int, body: bytes, ctype: str = 'application/json; charset=utf-8') -> None:
         self.send_response(code)
@@ -464,7 +541,7 @@ class Handler(BaseHTTPRequestHandler):
             return (query.get(key) or [default])[0]
 
         if url.path == '/':
-            self._send(200, PAGE.encode(), 'text/html; charset=utf-8')
+            self._send(200, self.server.page.encode(), 'text/html; charset=utf-8')
             return
         if url.path == '/api/sessions':
             data = sessions_data(db)
@@ -480,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == '/api/activity':
             hours = arg('hours', '24')
             data = activity_data(db, int(hours) if hours.isdigit() else 24, arg('project'), arg('session'))
+        elif url.path == '/api/targets' and self.server.allow_write:
+            data = targets_data(db)
         else:
             self._send(404, b'{"error": "not found"}')
             return
@@ -488,7 +567,65 @@ class Handler(BaseHTTPRequestHandler):
     def _reject(self) -> None:
         self._send(405, b'{"error": "read only"}')
 
-    do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _reject  # noqa: N815
+    def _error(self, code: int, reason: str) -> None:
+        """エラー応答は固定の文言だけ (入力の本文やトークンを返さない)."""
+        self._send(code, json.dumps({'error': reason}).encode())
+
+    def do_POST(self) -> None:  # noqa: N802
+        """指示を 1 件受け付ける (#85)。--allow-write で起動したときだけ."""
+        if not self.server.allow_write:
+            self._reject()
+            return
+        if urlsplit(self.path).path != '/api/instructions':
+            self._error(404, 'not found')
+            return
+        # トークンは Authorization ヘッダだけ (クエリ・Cookie は見ない)。他サイトのページはこのヘッダを
+        # 付けられない (付けると preflight の OPTIONS になり 405 で止まる) ので CSRF を防げる
+        header = self.headers.get('Authorization', '')
+        given = header[7:] if header.startswith('Bearer ') else ''
+        if not hmac.compare_digest(given.encode(), self.server.token.encode()):
+            self._error(401, 'unauthorized')
+            return
+        host = self.headers.get('Host', '')
+        if not host or self.headers.get('Origin') != f'http://{host}':
+            self._error(403, 'bad origin')
+            return
+        try:
+            length = int(self.headers.get('Content-Length', ''))
+        except ValueError:
+            self._error(411, 'length required')
+            return
+        if not 0 < length <= MAX_REQUEST_BYTES:
+            self._error(413, 'too large')
+            return
+        try:
+            req = json.loads(self.rfile.read(length))
+        except ValueError:  # UnicodeDecodeError も含む
+            self._error(400, 'bad json')
+            return
+        req = req if isinstance(req, dict) else {}
+        session, project, body = req.get('session'), req.get('project'), req.get('body')
+        project = project or ''
+        if not (isinstance(session, str) and isinstance(project, str) and isinstance(body, str) and body.strip()):
+            self._error(400, 'session and body are required')
+            return
+        if len(body) > MAX_BODY_CHARS:
+            self._error(413, 'body too long')
+            return
+        # session / project は既知の一覧と完全一致したものだけ (パスに使うので入力の形は信用しない)
+        targets = targets_data(self.server.db_path)['sessions']
+        if session not in targets or (project and project not in targets[session]):
+            self._error(400, 'unknown session or project')
+            return
+        try:
+            iid = write_instruction(self.server.db_path.parent, session, project, body.strip())
+        except OSError:
+            self.log_error('指示を書けませんでした (session=%s)', session)
+            self._error(500, 'write failed')
+            return
+        self._send(201, json.dumps({'id': iid}).encode())
+
+    do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _reject  # noqa: N815
 
     def log_message(self, fmt: str, *args: object) -> None:
         """クエリ (token を含みうる) をログに出さない."""
@@ -497,12 +634,18 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(fmt, *args)
 
 
-def make_server(host: str, port: int, token: str, db_path: Path) -> ThreadingHTTPServer:
+def make_server(host: str, port: int, token: str, db_path: Path, allow_write: bool = False) -> ThreadingHTTPServer:
+    """allow_write=True のときだけ指示の投入 (POST /api/instructions) と入力欄を有効にする (#85).
+
+    指示は db_path と同じディレクトリ (queue/) の instructions/ に書く。
+    """
     if not token:
         raise ValueError('token is required')
     srv = ThreadingHTTPServer((host, port), Handler)
     srv.token = token
     srv.db_path = db_path
+    srv.allow_write = allow_write
+    srv.page = PAGE_WRITE if allow_write else PAGE
     return srv
 
 
@@ -569,6 +712,8 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 .md pre code{background:none;padding:0}.md pre{overflow:auto}
 .sum .md{max-height:14em;overflow:auto}.plain{white-space:pre-wrap}
 #actbar{margin-bottom:.6em}#actbar select{margin:0 .8em 0 .3em}#actmore{margin-top:.6em}
+#instr{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.6em .8em;margin-bottom:.8em}
+#instr select{margin:0 .8em 0 .3em}#instr textarea{display:block;width:100%;margin:.4em 0;font:inherit}
 </style></head><body>
 <nav><button data-v="sessions" class="on">稼働状況</button><button data-v="projects">Projects</button>
 <button data-v="graph">Graph</button><button data-v="activity">活動</button><span id="sync"></span></nav>
@@ -576,7 +721,8 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 <section id="sessions"></section><section id="projects" hidden></section>
 <section id="graph" hidden><div id="goals"></div><div id="cy"></div>
 <div id="side"><p class="mono">ノードをクリックすると内容が出ます</p></div></section>
-<section id="activity" hidden><div id="actbar">project<select id="actpj"></select>セッション<select id="actsess">
+<section id="activity" hidden><!--WRITE_FORM-->
+<div id="actbar">project<select id="actpj"></select>セッション<select id="actsess">
 </select><span id="actrange" class="mono"></span></div><div id="actlist"></div>
 <button id="actmore">もっと見る</button></section></main>
 <div id="modal"><header><span id="mtitle" class="mono"></span><button onclick="closeModal()">閉じる</button></header>
@@ -756,16 +902,20 @@ function side(n) {
 
 // 活動タブ (#82): 既定は直近 24 時間、「もっと見る」で 7 日 -> 30 日 -> すべてと遡る
 const HOURS = [24, 168, 720, 0], HOURS_LABEL = {24: '直近 24 時間', 168: '直近 7 日', 720: '直近 30 日', 0: 'すべて'};
-const EVENT_LABEL = {order: '発注', result: '結果', blocked: 'blocked', goal_done: 'ゴール完了'};
+const EVENT_LABEL = {order: '発注', result: '結果', blocked: 'blocked', goal_done: 'ゴール完了', instruction: '指示'};
+const INSTR_BADGE = {delivered: 'done', pending: 'permission_wait', failed: 'blocked'};  // 指示の配達状態 (#85)
 let actHours = 24;
-function options(sel, values) {  // 5 秒ごとの更新で開いている select を閉じないよう、中身が変わったときだけ作り直す
+// 5 秒ごとの更新で開いている select を閉じないよう、中身が変わったときだけ作り直す。blank が null なら空の選択肢なし
+function options(sel, values, blank = 'すべて') {
   const key = JSON.stringify(values); if (sel.dataset.v === key) return; sel.dataset.v = key; const cur = sel.value;
-  sel.replaceChildren(new Option('すべて', ''), ...values.map(v => new Option(v, v, false, v === cur)));
+  sel.replaceChildren(...(blank === null ? [] : [new Option(blank, '')]),
+    ...values.map(v => new Option(v, v, false, v === cur)));
 }
 function openGoal(g, n) { goal = g; pickNode = n; if (cy) { cy.destroy(); cy = null; } show('graph'); }
 async function activity() {
   const pj = document.getElementById('actpj'), sess = document.getElementById('actsess');
   const q = new URLSearchParams({hours: actHours, project: pj.value, session: sess.value});
+  /*WRITE_HOOK*/
   const d = await api('/api/activity?' + q); meta(d);
   options(pj, d.projects || []); options(sess, d.sessions || []);
   const evs = d.events || [];
@@ -774,8 +924,11 @@ async function activity() {
   document.getElementById('actlist').replaceChildren(table(
     ['時刻', 'project', 'セッション', 'worker', 'task_id', '種類', '題名 / 要約'], evs.map(e => {
       const kind = el('span'); kind.append(badge(e.event === 'order' ? 'running' : e.event === 'goal_done' ? 'done'
-        : e.state, EVENT_LABEL[e.event]));
+        : e.event === 'instruction' ? INSTR_BADGE[e.state] : e.state, EVENT_LABEL[e.event]));
       if (e.verify) kind.append(' ', el('span', 'mono', 'verify ' + e.verify));
+      if (e.event === 'instruction') kind.append(' ', el('span', 'mono', e.state === 'delivered'
+        ? '渡した ' + local(e.delivered_at) : e.state === 'failed' ? '送れず (再送して下さい)'
+        : '待機中になったら渡す'));
       const tr = row([local(e.at), e.project, e.session || '-', e.worker || '-', el('span', 'mono', e.task_id || '-'),
         kind, renderMarkdown(el('span', 'sum'), e.title, true)]);
       if (e.goal) { tr.className = 'click'; tr.title = 'クリックで Graph を開く';
@@ -784,7 +937,7 @@ async function activity() {
 }
 for (const id of ['actpj', 'actsess']) document.getElementById(id).onchange = () => activity();
 document.getElementById('actmore').onclick = () => { actHours = HOURS[HOURS.indexOf(actHours) + 1]; activity(); };
-
+/*WRITE_JS*/
 async function refresh() {
   try { if (view === 'sessions') await sessions(); if (view === 'projects') await projects();
     if (view === 'graph') { await goals(); if (!cy) await drawGraph(); } if (view === 'activity') await activity();
@@ -800,4 +953,30 @@ show(view); setInterval(() => { if (view !== 'graph') refresh(); }, 5000);
     .replace('MARKED_SRI', MARKED_SRI)
     .replace('DOMPURIFY_URL', DOMPURIFY_URL)
     .replace('DOMPURIFY_SRI', DOMPURIFY_SRI)
+)
+# 指示の入力欄 (#85)。--allow-write のときのページにだけ入れる (読み取り専用のページには欄もコードも無い)
+WRITE_FORM = """<form id="instr"><b>Dispatcher への指示</b> セッション<select id="insess"></select>project
+<select id="inpj"></select><textarea id="intext" rows="3" maxlength="MAX_BODY_CHARS"
+placeholder="Dispatcher が待機中になったら watchd が打ち込みます (改行は空白になります)"></textarea>
+<button>送る</button> <span id="inmsg" class="mono"></span></form>""".replace('MAX_BODY_CHARS', str(MAX_BODY_CHARS))
+WRITE_JS = """// 指示の投入 (#85): 宛先は起動中の squad セッションと、そのセッションが担当する project
+async function loadTargets() {
+  const d = await api('/api/targets'), t = d.sessions || {}, s = document.getElementById('insess');
+  options(s, Object.keys(t), null); options(document.getElementById('inpj'), t[s.value] || [], '(指定しない)');
+}
+document.getElementById('insess').onchange = () => loadTargets();
+document.getElementById('instr').onsubmit = async ev => {
+  ev.preventDefault(); const msg = document.getElementById('inmsg'), text = document.getElementById('intext');
+  const r = await fetch('/api/instructions', {method: 'POST', headers: {Authorization: 'Bearer ' + token,
+    'Content-Type': 'application/json'}, body: JSON.stringify({session: document.getElementById('insess').value,
+    project: document.getElementById('inpj').value, body: text.value})});
+  const d = await r.json().catch(() => ({}));
+  msg.textContent = r.ok ? '受け付けました (' + d.id + ')' : '送れませんでした: ' + (d.error || r.status);
+  if (r.ok) { text.value = ''; activity(); }
+};
+"""
+PAGE_WRITE = (
+    PAGE.replace('<!--WRITE_FORM-->', WRITE_FORM)
+    .replace('/*WRITE_JS*/', WRITE_JS)
+    .replace('/*WRITE_HOOK*/', 'await loadTargets();')
 )
