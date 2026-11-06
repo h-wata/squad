@@ -567,7 +567,7 @@ def test_review_fields_derive_from_original_task(tmp_path: Path) -> None:
 
 
 def test_links_never_merge_different_issues(tmp_path: Path) -> None:
-    goal, _ = _link_queue(
+    goal, derived = _link_queue(
         tmp_path,
         {
             'X-1': 'context:\n  parent_issue: 1\n  pr_url: https://github.com/o/r/pull/9\n',
@@ -576,3 +576,4 @@ def test_links_never_merge_different_issues(tmp_path: Path) -> None:
     )
     assert goal['X-1'] == 'goal:pj#1'
     assert goal['X-2'] == 'goal:pj#2'
+    assert derived == set()  # 別 Issue の task へは derived_from も張らない

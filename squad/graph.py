@@ -369,9 +369,10 @@ def collect(
         for intent in task_files:
             nodes[intent]['payload'].setdefault('finished_at', '')
         derived_links = _task_links(queue_dir, project, link_refs, task_files)
-        for intent, target in derived_links:
-            edges.add((intent, 'derived_from', target))
         grouped = _group_goals(project, issues, nodes, pr_urls, derived_links)
+        goal_of = {m: g for g, (_, _, _, ms) in grouped.items() for m in ms}
+        # Issue が違う task 同士には張らない (参照されただけで別 Issue の流れに見えてしまう)
+        edges.update((i, 'derived_from', t) for i, t in derived_links if goal_of.get(i) == goal_of.get(t))
         for goal, (pj, title, ref, members) in grouped.items():
             # 同じ Issue の URL を別 project の task も指すことがあるので、上書きせず配下を足す
             goal_members.setdefault(goal, (pj, title, ref, []))[3].extend(members)
