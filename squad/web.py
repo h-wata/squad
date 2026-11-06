@@ -432,7 +432,7 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 .busy,.running{background:#ddf4ff;color:#0550ae}.idle{background:#eaeef2;color:#57606a}
 .permission_wait{background:#fff8c5;color:#7d4e00}.unreachable,.blocked{background:#ffebe9;color:#82071e}
 .done,.completed{background:#dafbe1;color:#116329}.verified{background:#116329;color:#fff}
-.unreported,.unknown{background:#eaeef2;color:#57606a}
+.closed,.unknown{background:#eaeef2;color:#57606a}
 .mono{font-family:ui-monospace,monospace;font-size:12px;color:#57606a}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .sum{max-width:48em;color:#424a53}
@@ -466,7 +466,8 @@ const params = new URLSearchParams(location.search), token = params.get('token')
 const api = p => fetch(p, {headers: {Authorization: 'Bearer ' + token}}).then(r => r.json());
 const el = (tag, cls, text) => { const e = document.createElement(tag);
   if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = text; return e; };
-const badge = (s, label) => el('span', 'badge ' + s, label || s);
+const STATE_LABEL = {closed: '完了 (報告なし)'};  // archive 済みで結果が残っていない task (#78)
+const badge = (s, label) => el('span', 'badge ' + s, label || STATE_LABEL[s] || s);
 // md:begin
 // 本文 (report の summary 等) を Markdown で描く。中身はサーバーでマスク済みだが信用はしない:
 // marked で HTML にしたものを必ず DOMPurify に通す。どちらかが無い・例外のときはプレーンテキスト
@@ -563,7 +564,7 @@ async function goals() {
 }
 
 const COLOR = {running: '#0969da', blocked: '#cf222e', done: '#1a7f37', verified: '#116329', completed: '#1a7f37',
-  confirmed: '#1a7f37', falsified: '#cf222e'};
+  confirmed: '#1a7f37', falsified: '#cf222e', closed: '#8c959f'};
 const SHAPE = {goal: 'round-rectangle', intent: 'round-rectangle', result: 'ellipse', fact: 'diamond'};
 function label(n) {
   const id = n.kind === 'intent' ? n.node_id.split('/').pop() : n.kind === 'goal' ? '' : n.kind;

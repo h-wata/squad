@@ -1518,3 +1518,147 @@ class TestNextTransition:
         msg = self._deliver(w, d, task, verify_status='pass')
         assert msg.endswith(f'[NEXT unresolved reason={reason}]')
         assert w.ledger.is_delivered('pj', ID1)
+
+
+class TestReportArchiveCopy:
+    """配達した report の写しを reports/archive/<task_id>__<report_id>.yaml に残す (#78)."""
+
+    @staticmethod
+    def _archive(d: Path) -> list[Path]:
+        return sorted((d / 'reports' / 'archive').glob('*.yaml'))
+
+    def test_delivered_report_is_copied_verbatim(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        src = write_report(d, task_id='SQUAD-1', summary='"結果"')
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert len(queued(w)) == 1
+        [copy] = self._archive(d)
+        assert copy.name == f'SQUAD-1__{ID1}.yaml'
+        assert copy.read_bytes() == src.read_bytes()
+
+    def test_redelivery_does_not_add_copies(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, task_id='SQUAD-1')
+        w.refresh_owned_projects()
+        w.report_bridge()
+        w.ledger.path.unlink()  # ledger を失うと同じ report が再配達される
+        w.report_bridge()
+        assert w.nq.unacked()[0]['attempts'] == 2  # 再配達は起きている
+        assert [p.name for p in self._archive(d)] == [f'SQUAD-1__{ID1}.yaml']
+        assert not [p for p in (d / 'reports' / 'archive').iterdir() if p.name.startswith('.tmp-')]
+
+    def test_review_without_report_id_is_copied(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        src = write_report(d, name='worker4_review.yaml', report_id=None, status='', task_id='SQUAD-1-review')
+        src.write_text('task_id: SQUAD-1-review\nverdict: approve\n')
+        w.refresh_owned_projects()
+        w.report_bridge()
+        [copy] = self._archive(d)
+        sha = report_identity(src.read_bytes())[0]
+        assert copy.name == f'SQUAD-1-review__review-{sha[:16]}.yaml'
+        assert copy.read_bytes() == src.read_bytes()
+
+    def test_invalid_report_and_verdict_are_not_copied(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, report_id=None, task_id='SQUAD-1')  # report_id 欠落 = [REPORT-INVALID]
+        (d / 'reports' / 'worker1_verdict.yaml').write_text('task_id: SQUAD-1\nresult: pass\n')  # 配達対象外
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert len(queued(w, '[REPORT-INVALID')) == 1
+        assert self._archive(d) == []
+
+    def test_task_id_cannot_escape_archive_dir(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, task_id='../../x')
+        w.refresh_owned_projects()
+        w.report_bridge()
+        assert [p.name for p in self._archive(d)] == [f'.._.._x__{ID1}.yaml']
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root は権限を無視して書ける')
+    def test_copy_failure_does_not_stop_delivery(
+        self, watcher: tuple[Watcher, Path], capsys: pytest.CaptureFixture
+    ) -> None:
+        """実ファイルシステムで reports/ を書込み不可にして、写しだけが失敗することを確かめる."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, task_id='SQUAD-1')
+        reports = d / 'reports'
+        os.chmod(reports, 0o500)  # 読めるが archive/ を作れない
+        try:
+            w.refresh_owned_projects()
+            w.report_bridge()
+        finally:
+            os.chmod(reports, 0o755)
+        assert len(queued(w)) == 1  # 配達は止まらない
+        assert w.ledger.is_delivered('pj', ID1)
+        assert 'report の写しを archive に残せません' in capsys.readouterr().out
+        assert not (reports / 'archive').exists()
+        w.report_bridge()  # 配達済みなので次のサイクルで再送も写し直しもしない
+        assert len(queued(w)) == 1
+
+    def test_two_tasks_on_same_worker_keep_both_results(self, watcher: tuple[Watcher, Path]) -> None:
+        """Issue #78 受け入れ条件: report を上書きしても graph sync 後に両方の result が残る."""
+        pytest.importorskip('yaml')
+        import graph  # noqa: PLC0415
+
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+        write_report(d, task_id='T1')
+        w.report_bridge()
+        # Dispatcher が T1 を閉じて T2 を発注し、worker が同じ report ファイルを上書きする
+        (d / 'tasks' / 'archive').mkdir()
+        shutil.move(d / 'tasks' / 'worker1.yaml', d / 'tasks' / 'archive' / 'worker1_T1.yaml')
+        (d / 'tasks' / 'worker1.yaml').write_text('task_id: T2\n')
+        write_report(d, report_id=ID2, task_id='T2')
+        w.report_bridge()
+        assert len(queued(w)) == 2
+        graph.sync(queue)
+        conn = sqlite3.connect(graph.default_db_path(queue))
+        try:
+            nodes = dict(conn.execute('SELECT node_id, state FROM nodes'))
+            edges = set(conn.execute("SELECT src_id, dst_id FROM edges WHERE rel = 'yields'"))
+        finally:
+            conn.close()
+        assert nodes[f'result:{ID1}'] == 'completed'
+        assert nodes[f'result:{ID2}'] == 'completed'
+        assert {('intent:pj/T1', f'result:{ID1}'), ('intent:pj/T2', f'result:{ID2}')} <= edges
+        assert nodes['intent:pj/T1'] == 'done'  # 上書き前は unreported (#78 の症状) だった
+
+    def test_copy_keeps_source_mtime_so_late_delivery_is_not_fresh(self, watcher: tuple[Watcher, Path]) -> None:
+        """Codex review: 写しの mtime がコピー時刻だと、completed_at の無い古い report が再発注後の結果に見える."""
+        pytest.importorskip('yaml')
+        import graph  # noqa: PLC0415
+
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        src = write_report(d, task_id='T1')  # completed_at なし
+        os.utime(src, (1000, 1000))
+        task = d / 'tasks' / 'worker1.yaml'
+        task.write_text('task_id: T1\n')  # 差し戻しで同じ task が再発注された (report より新しい)
+        os.utime(task, (2000, 2000))
+        w.refresh_owned_projects()
+        w.report_bridge()  # watchd が遅れて、再発注の後に配達・写しをする
+        [copy] = self._archive(d)
+        assert copy.stat().st_mtime == 1000
+        graph.sync(queue)
+        conn = sqlite3.connect(graph.default_db_path(queue))
+        try:
+            [(state,)] = conn.execute("SELECT state FROM nodes WHERE node_id = 'intent:pj/T1'").fetchall()
+        finally:
+            conn.close()
+        assert state == 'running'
+
+    def test_report_id_cannot_escape_archive_dir(self, watcher: tuple[Watcher, Path]) -> None:
+        """report_id は delivery_key が UUID に正規化するが、写しの名前でも念のため / を使わせない."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w._archive_copy(str(d / 'reports' / 'worker1_report.yaml'), '../../x', 'f' * 64, {'task_id': 'T'}, b'a', 0)  # noqa: SLF001
+        assert [p.name for p in self._archive(d)] == ['T__.._.._x.yaml']
