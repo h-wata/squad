@@ -326,7 +326,7 @@ class Watcher:
         self._queue_readable = True
         # report を配達したサイクルの最後に探索グラフを作り直す (#55)。起動直後に 1 回は作る
         self._graph_dirty = True
-        # tasks/ 以下の task YAML の (path, mtime_ns) 一覧。変わったら発注・書換・移動・削除があった (#84)
+        # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
         self._tasks_sig: tuple | None = None
 
     # ---- ログ / 通知 ----
@@ -649,7 +649,9 @@ class Watcher:
         for d in self.owned:
             for p in (d / 'tasks').rglob('*.y*ml'):
                 try:
-                    sig.append((str(p), p.stat().st_mtime_ns))
+                    st = p.stat()
+                    # ctime は utime / cp -p で巻き戻せないので、mtime を保った書き換えも拾う
+                    sig.append((str(p), st.st_mtime_ns, st.st_ctime_ns, st.st_size))
                 except OSError:
                     continue
         new = tuple(sorted(sig))

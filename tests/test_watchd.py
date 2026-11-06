@@ -1687,7 +1687,11 @@ class TestTaskYamlTriggersGraphSync:
         assert self._synced(w, calls)  # 発注
         assert not self._synced(w, calls)
         os.utime(task, ns=(1, 1))
-        assert self._synced(w, calls)  # 書き換え (mtime 変化)
+        assert self._synced(w, calls)  # mtime 変化
+        assert not self._synced(w, calls)
+        task.write_text('task_id: T2\n')
+        os.utime(task, ns=(1, 1))  # 内容だけ変えて mtime を戻しても ctime で拾う
+        assert self._synced(w, calls)
         (d / 'tasks' / 'archive').mkdir()
         task.rename(d / 'tasks' / 'archive' / 'T1.yaml')
         assert self._synced(w, calls)  # archive へ移動
