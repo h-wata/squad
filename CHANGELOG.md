@@ -10,7 +10,8 @@
   ゴール単位の Graph (Cytoscape.js 3.30.2、既定は直近 30 日のゴール一覧) を持つ。読むのは
   `queue/.graph.db` (read-only) と tmux だけで、YAML は読まない。画面に DB の最終 sync 時刻を出す。
   stdlib のみ。トークン (`SQUAD_WEB_TOKEN` か `--token`) が無いと起動しない。DB と pane の文字列は
-  `squad/mask.py` を通してから返す。
+  `squad/mask.py` を通してから返す。report の要約などの本文は Markdown として描く (marked 15.0.12 と
+  DOMPurify 3.2.6 を版固定 + SRI で CDN から読み、DOMPurify でサニタイズ。読めなければプレーンテキスト)。
 
 ### Changed
 

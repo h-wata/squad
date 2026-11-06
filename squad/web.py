@@ -142,7 +142,7 @@ def projects_data(db_path: Path) -> dict[str, Any]:
                     'node_id': latest,
                     'task_id': p.get('task_id', ''),
                     'status': row[0],
-                    'summary': row[1],
+                    'summary': p.get('summary') or row[1],  # 全文 (Markdown)。title は 1 行に潰した版
                     'at': p.get('reported_at', ''),
                 }
             out.append(
@@ -395,6 +395,12 @@ def make_server(host: str, port: int, token: str, db_path: Path) -> ThreadingHTT
 # られた script を実行しない)。階層レイアウトは同梱の breadthfirst を使う (拡張を足さない)。SRI は公開値
 CYTOSCAPE_URL = 'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js'
 CYTOSCAPE_SRI = 'sha384-IWROdLKRsN1UuJywMlWl7/blXQ8GEooN2n7dzTxfEPd7ybYIKCUJ2Ol/1Gpf3YV4'  # pragma: allowlist secret
+# report 本文の Markdown 表示。marked で HTML にし、DOMPurify で script / on* 属性 / javascript: を落とす。
+# どちらかが読めなければプレーンテキストで出す (renderMarkdown)。SRI は実ファイルから計算した値
+MARKED_URL = 'https://cdn.jsdelivr.net/npm/marked@15.0.12/lib/marked.umd.js'
+MARKED_SRI = 'sha384-fGlgqlm/GUgiVEyV6lvBJbxjprBPT1g0VoE9o/FjCWntEwOQYGqANQdFeFlqbObP'  # pragma: allowlist secret
+DOMPURIFY_URL = 'https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js'
+DOMPURIFY_SRI = 'sha384-JEyTNhjM6R1ElGoJns4U2Ln4ofPcqzSsynQkmEc/KGy6336qAZl70tDLufbkla+3'  # pragma: allowlist secret
 
 PAGE = (
     (
@@ -403,6 +409,8 @@ PAGE = (
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>squad dashboard</title>
 <script src="CYTOSCAPE_URL" integrity="CYTOSCAPE_SRI" crossorigin="anonymous"></script>
+<script src="MARKED_URL" integrity="MARKED_SRI" crossorigin="anonymous"></script>
+<script src="DOMPURIFY_URL" integrity="DOMPURIFY_SRI" crossorigin="anonymous"></script>
 <style>
 *{box-sizing:border-box}
 body{font-family:system-ui,sans-serif;margin:0;background:#f5f6f8;color:#1f2328;font-size:14px}
@@ -439,6 +447,11 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 #cy{flex:1;background:#fff;border:1px solid #d0d7de;border-radius:8px}
 #side{width:380px;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.8em}
 #side pre{white-space:pre-wrap;font-size:12px;background:#f6f8fa;padding:.5em;border-radius:6px}
+.md p,.md ul,.md ol,.md pre{margin:.3em 0}.md ul,.md ol{padding-left:1.4em}
+.md h1,.md h2,.md h3,.md h4{font-size:1em;margin:.4em 0 .2em}
+.md code{font-family:ui-monospace,monospace;font-size:12px;background:#eff1f3;padding:0 .2em;border-radius:3px}
+.md pre code{background:none;padding:0}.md pre{overflow:auto}
+.sum .md{max-height:14em;overflow:auto}.plain{white-space:pre-wrap}
 </style></head><body>
 <nav><button data-v="sessions" class="on">稼働状況</button><button data-v="projects">Projects</button>
 <button data-v="graph">Graph</button><span id="sync"></span></nav>
@@ -454,6 +467,23 @@ const api = p => fetch(p, {headers: {Authorization: 'Bearer ' + token}}).then(r 
 const el = (tag, cls, text) => { const e = document.createElement(tag);
   if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = text; return e; };
 const badge = (s, label) => el('span', 'badge ' + s, label || s);
+// md:begin
+// 本文 (report の summary 等) を Markdown で描く。中身はサーバーでマスク済みだが信用はしない:
+// marked で HTML にしたものを必ず DOMPurify に通す。どちらかが無い・例外のときはプレーンテキスト
+if (window.DOMPurify && window.DOMPurify.addHook) window.DOMPurify.addHook('afterSanitizeAttributes', n => {
+  if (n.tagName === 'A') { n.setAttribute('target', '_blank'); n.setAttribute('rel', 'noopener noreferrer'); } });
+function renderMarkdown(e, text, inline) {
+  text = text === undefined || text === null ? '' : String(text);
+  try {
+    if (window.marked && window.DOMPurify) {
+      const html = inline ? window.marked.parseInline(text) : window.marked.parse(text, {breaks: true});
+      e.innerHTML = window.DOMPurify.sanitize(html, {FORBID_TAGS: ['style', 'form', 'input']});
+      e.classList.add('md'); return e;
+    }
+  } catch (err) { /* 下のプレーンテキストに落とす */ }
+  e.textContent = text; if (!inline) e.classList.add('plain'); return e;
+}
+// md:end
 const local = iso => iso ? new Date(iso).toLocaleString('ja-JP', {hour12: false}) : '-';
 const row = cells => { const tr = el('tr'); for (const c of cells) { const td = el('td');
   if (c instanceof Node) td.append(c); else td.textContent = c ?? ''; tr.append(td); } return tr; };
@@ -486,7 +516,7 @@ async function sessions() {
     box.append(table(['worker', '状態', '担当タスク', 'model / ctx'], s.workers.map(w => {
       const task = el('div');
       for (const t of w.tasks) { const x = el('div'); x.append(badge(t.state), ' ',
-        el('span', 'mono', t.task_id + ' '), el('span', '', t.title)); task.append(x); }
+        el('span', 'mono', t.task_id + ' '), renderMarkdown(el('span', ''), t.title, true)); task.append(x); }
       if (!w.tasks.length) task.textContent = '-';
       const tr = row([el('span', '', w.worker + ' (' + w.agent + ')'), badge(w.status, w.label), task,
         (w.model || '-') + ' / ' + (w.context_pct == null ? '-' : w.context_pct + '%')]);
@@ -500,7 +530,8 @@ async function projects() {
   const d = await api('/api/projects'), root = document.getElementById('projects'); meta(d);
   root.replaceChildren(table(['project', 'session', 'active', 'blocked', '今日終わった', '最新の結果', '最終更新'],
     (d.projects || []).map(p => { const r = p.latest_result, res = el('div', 'sum');
-      if (r) res.append(badge(r.status), ' ', el('span', 'mono', r.task_id + ' '), r.summary);
+      if (r) res.append(badge(r.status), ' ', el('span', 'mono', r.task_id + ' '),
+        renderMarkdown(el('div'), r.summary));
       else res.textContent = '-';
       return row([el('b', '', p.name), p.session || '-', el('span', 'num', String(p.active)),
         el('span', 'num', String(p.blocked)), el('span', 'num', String(p.done_today)), res,
@@ -518,7 +549,8 @@ async function goals() {
   if (!goal && d.goals && d.goals.length) goal = d.goals[0].node_id;
   for (const g of d.goals || []) {
     const x = el('div', 'g' + (g.node_id === goal ? ' on' : '')); x.append(badge(g.state), ' ',
-      el('span', 'mono', g.project + ' / ' + g.tasks + ' task / ' + local(g.updated_at)), el('div', 't', g.title));
+      el('span', 'mono', g.project + ' / ' + g.tasks + ' task / ' + local(g.updated_at)),
+      renderMarkdown(el('div', 't'), g.title, true));
     x.onclick = () => { goal = g.node_id; goals(); drawGraph(); }; root.append(x);
   }
 }
@@ -533,9 +565,11 @@ function label(n) {
 }
 async function drawGraph() {
   if (!goal) return;
-  if (typeof cytoscape === 'undefined') { const e = document.getElementById('err'); e.hidden = false;
-    e.textContent = 'Cytoscape.js を CDN から読めませんでした'; return; }
   const d = await api('/api/graph?goal=' + encodeURIComponent(goal)); meta(d);
+  const pick = params.get('node');
+  const first = d.nodes.find(n => n.node_id === pick) || d.nodes.find(n => n.node_id === goal);
+  if (typeof cytoscape === 'undefined') { const e = document.getElementById('err'); e.hidden = false;
+    e.textContent = 'Cytoscape.js を CDN から読めませんでした (右の詳細だけ出します)'; side(first); return; }
   const els = d.nodes.map(n => ({data: {id: n.node_id, label: label(n), kind: n.kind,
     color: COLOR[n.state] || '#8c959f', n}}));
   for (const e of d.edges) els.push({data: {id: e.src + '>' + e.dst, source: e.src, target: e.dst, rel: e.rel}});
@@ -553,22 +587,22 @@ async function drawGraph() {
         'target-arrow-shape': 'triangle', 'curve-style': 'bezier'}},
       {selector: 'edge[rel = "derived_from"]', style: {'line-style': 'dashed'}}]});
   cy.on('tap', 'node', ev => side(ev.target.data('n')));
-  const pick = params.get('node');
-  const first = d.nodes.find(n => n.node_id === pick) || d.nodes.find(n => n.node_id === goal);
   if (pick && cy.getElementById(pick).length) cy.getElementById(pick).select();
   side(first);
 }
 const NAMES = {result_summary: '結果の要約', description: '内容', summary: '要約', evidence: '根拠',
   assigned_to: '担当', created_at: '作成', finished_at: '終了', verify_status: 'verify', review: 'review',
   pr_url: 'PR', worker: 'worker'};
+const BODY = ['result_summary', 'description', 'summary', 'evidence'];  // Markdown で書かれる本文
 function side(n) {
   const root = document.getElementById('side'); root.replaceChildren();
   if (!n) return;
-  root.append(el('div', 'mono', n.node_id)); const h = el('h3', '', ''); h.append(badge(n.state), ' ', n.title);
+  root.append(el('div', 'mono', n.node_id)); const h = el('h3', '', '');
+  h.append(badge(n.state), ' ', renderMarkdown(el('span', ''), n.title, true));
   root.append(h, el('div', 'mono', '更新: ' + local(n.updated_at)));
   for (const k in NAMES) {
     const v = n.detail[k]; if (!v) continue; root.append(el('h4', '', NAMES[k]));
-    root.append(String(v).length > 60 || String(v).includes('\\n') ? el('pre', '', v) : el('div', '', v));
+    root.append(BODY.includes(k) ? renderMarkdown(el('div'), v) : el('div', '', v));
   }
 }
 
@@ -583,4 +617,8 @@ show(view); setInterval(() => { if (view !== 'graph') refresh(); }, 5000);
     )
     .replace('CYTOSCAPE_URL', CYTOSCAPE_URL)
     .replace('CYTOSCAPE_SRI', CYTOSCAPE_SRI)
+    .replace('MARKED_URL', MARKED_URL)
+    .replace('MARKED_SRI', MARKED_SRI)
+    .replace('DOMPURIFY_URL', DOMPURIFY_URL)
+    .replace('DOMPURIFY_SRI', DOMPURIFY_SRI)
 )

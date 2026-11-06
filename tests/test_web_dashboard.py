@@ -13,6 +13,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -34,6 +35,14 @@ import web  # noqa: E402
 TOKEN = 'test-token-123'
 SECRET = 'ghp_' + 'A' * 36
 NOW = int(time.time())
+# report の summary は Markdown で書かれ、信用できない入力でもある (実 report と同じ block scalar の形)
+XSS_LINES = [
+    '## 結果',
+    f'- 権限が無い `{SECRET}`',
+    '- <script>alert(1)</script> <img src=x onerror=alert(1)>',
+    '- [x](javascript:alert(1)) <a href="javascript:alert(2)">raw</a>',
+]
+XSS_SUMMARY = ''.join(f'  {line}\n' for line in XSS_LINES)
 DAY = 86_400
 
 
@@ -68,7 +77,7 @@ def root(tmp_path: Path) -> Path:
     _write(pj / 'tasks' / 'worker2.yaml', 'task_id: SQUAD-2\ntitle: "詰まる"\nassigned_to: worker2\n', NOW - 300)
     _write(
         pj / 'reports' / 'worker2_report.yaml',
-        f'task_id: SQUAD-2\nstatus: blocked\nsummary: "権限が無い {SECRET}"\n',
+        f'task_id: SQUAD-2\nstatus: blocked\nsummary: |\n{XSS_SUMMARY}',
         NOW - 200,
     )
     old = NOW - 60 * DAY
@@ -337,3 +346,91 @@ def test_yaml_shallow_reads_block_scalar(tmp_path: Path) -> None:
     assert meta['status'] == 'completed'
     assert meta['task_id'] == 'X'
     assert 'issues' not in meta
+
+
+# ---------- Markdown 表示 (SQUAD-284-md) ----------
+
+
+def test_body_is_masked_on_server_and_sent_as_json_data(server: tuple[str, list]) -> None:
+    """本文は全文 (改行つき) をマスクしてから JSON で渡す。HTML としては返さない (nosniff)."""
+    base, _ = server
+    req = urllib.request.Request(f'{base}/api/projects', headers={'Authorization': f'Bearer {TOKEN}'})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.headers['Content-Type'] == 'application/json; charset=utf-8'
+        assert r.headers['X-Content-Type-Options'] == 'nosniff'
+        data = json.loads(r.read())
+    summary = {p['name']: p for p in data['projects']}['pj']['latest_result']['summary']
+    expected = '\n'.join(XSS_LINES).replace(SECRET, 'ghp_<redacted>') + '\n'
+    assert summary == expected  # 1 行に潰さない (Markdown のリストが崩れない)、マスク済み
+    graph_data = _get_json(base, '/api/graph?goal=goal:pj/SQUAD-2')
+    intent = {n['node_id']: n for n in graph_data['nodes']}['intent:pj/SQUAD-2']
+    assert intent['detail']['result_summary'] == expected
+    assert SECRET not in json.dumps(graph_data)
+
+
+def _md_script() -> str:
+    """PAGE から Markdown 描画の部分 (// md:begin .. // md:end) を取り出す."""
+    begin, end = web.PAGE.index('// md:begin'), web.PAGE.index('// md:end')
+    return web.PAGE[begin:end]
+
+
+@pytest.mark.parametrize(
+    ('libs', 'expected'),
+    [
+        ('both', {'html': 'SAN(MD(**b**))', 'text': None}),
+        ('inline', {'html': 'SAN(INLINE(**b**))', 'text': None}),
+        ('no_marked', {'html': None, 'text': '**b**'}),
+        ('no_purify', {'html': None, 'text': '**b**'}),
+        ('throws', {'html': None, 'text': '**b**'}),
+    ],
+)
+def test_render_markdown_falls_back_to_plain_text(libs: str, expected: dict) -> None:
+    """Marked と DOMPurify が両方あるときだけ innerHTML。欠けたり例外なら textContent (今のプレーンテキスト)."""
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node が無い')
+    stubs = {
+        'marked': "{parse: t => 'MD(' + t + ')', parseInline: t => 'INLINE(' + t + ')'}",
+        'purify': "{sanitize: h => 'SAN(' + h + ')', addHook: () => {}}",
+    }
+    setup = {
+        'both': f'window.marked = {stubs["marked"]}; window.DOMPurify = {stubs["purify"]};',
+        'inline': f'window.marked = {stubs["marked"]}; window.DOMPurify = {stubs["purify"]};',
+        'no_marked': f'window.DOMPurify = {stubs["purify"]};',
+        'no_purify': f'window.marked = {stubs["marked"]};',
+        'throws': "window.marked = {parse: () => { throw new Error('x') }}; " f'window.DOMPurify = {stubs["purify"]};',
+    }[libs]
+    js = (
+        'globalThis.window = globalThis;\n'
+        + setup
+        + '\n'
+        + _md_script()
+        + '\nconst e = {innerHTML: null, textContent: null, classList: {add() {}}, style: {}};\n'
+        + f'renderMarkdown(e, "**b**", {"true" if libs == "inline" else "false"});\n'
+        + 'console.log(JSON.stringify({html: e.innerHTML, text: e.textContent}));\n'
+    )
+    out = subprocess.run([node, '-e', js], capture_output=True, text=True, check=True).stdout
+    assert json.loads(out) == expected
+
+
+def test_page_loads_markdown_libs_pinned_with_sri() -> None:
+    page = web.PAGE
+    for url, sri in ((web.MARKED_URL, web.MARKED_SRI), (web.DOMPURIFY_URL, web.DOMPURIFY_SRI)):
+        assert '@latest' not in url
+        assert re.search(r'@\d+\.\d+\.\d+/', url)  # 版を URL に固定
+        assert re.fullmatch(r'sha384-[A-Za-z0-9+/]{64}', sri)
+        assert f'<script src="{url}" integrity="{sri}" crossorigin="anonymous"></script>' in page
+
+
+def test_every_body_field_goes_through_render_markdown() -> None:
+    """本文 (題名・要約・内容) を textContent で直接入れている箇所が無い. innerHTML は renderMarkdown だけ."""
+    script = web.PAGE[web.PAGE.index('<script>') :]
+    for expr in ('t.title', 'r.summary', 'g.title', 'n.title'):
+        assert not re.search(r"el\('[a-z0-9]+', '[^']*', " + re.escape(expr), script), expr
+    # 横パネルの本文 4 種は renderMarkdown、日付や worker 名など短い値だけ textContent
+    assert "const BODY = ['result_summary', 'description', 'summary', 'evidence'];" in script
+    assert "BODY.includes(k) ? renderMarkdown(el('div'), v) : el('div', '', v)" in script
+    assert script.count('innerHTML') == 1
+    assert 'DOMPurify.sanitize(' in _md_script()
+    for call in ("renderMarkdown(el('span', ''), t.title, true)", 'r.summary', 'g.title', 'n.title, true'):
+        assert call in script, call
