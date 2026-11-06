@@ -36,7 +36,7 @@ def write(path: str | Path, content: str = BODY, tool: str = 'Write') -> dict:
 
 def test_new_task_yaml_is_stamped(tmp_path: Path) -> None:
     out = run(write('queue/projects/p/tasks/worker1.yaml'), tmp_path)
-    assert out['permissionDecision'] == 'allow'
+    assert 'permissionDecision' not in out  # 通常の権限フローを変えない
     ti = out['updatedInput']
     assert ti['file_path'] == 'queue/projects/p/tasks/worker1.yaml'
     assert ti['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
