@@ -446,3 +446,23 @@ def test_purify_forbids_remote_loads_and_dom_clobbering() -> None:
         assert f"'{attr}'" in config.split('FORBID_ATTR')[1], attr
     assert 'SANITIZE_NAMED_PROPS: true' in config
     assert 'ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i' in config
+
+
+def test_closed_task_is_gray_and_goal_counts_as_done(tmp_path: Path) -> None:
+    """#78: archive 済みで結果の無い task は「完了 (報告なし)」として灰色、配下がそれと done だけのゴールは done."""
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'pj'
+    _write(pj / 'tasks' / 'archive' / 'a.yaml', 'task_id: SQUAD-9\ntitle: "上書きで消えた"\n', NOW - 300)
+    _write(pj / 'tasks' / 'archive' / 'b.yaml', 'task_id: SQUAD-9-fix1\n', NOW - 200)
+    _write(pj / 'reports' / 'archive' / 'b.yaml', 'task_id: SQUAD-9-fix1\nstatus: completed\n', NOW - 100)
+    _write(pj / 'tasks' / 'archive' / 'c.yaml', 'task_id: SQUAD-8\n', NOW - 300)
+    graph.sync(q, config_path=tmp_path / 'none.json')
+    db = q / '.graph.db'
+    goals = {g['node_id']: g['state'] for g in web.goals_data(db, 0)['goals']}
+    assert goals == {'goal:pj/SQUAD-9': 'done', 'goal:pj/SQUAD-8': 'closed'}
+    nodes = {n['node_id']: n['state'] for n in web.graph_data(db, 'goal:pj/SQUAD-9')['nodes']}
+    assert nodes['intent:pj/SQUAD-9'] == 'closed'
+    # 灰色: バッジは unknown と同じ灰色の class、グラフの枠線も灰色。表示名は「完了 (報告なし)」
+    assert '.closed,.unknown{background:#eaeef2;color:#57606a}' in web.PAGE
+    assert "closed: '#8c959f'" in web.PAGE
+    assert "STATE_LABEL = {closed: '完了 (報告なし)'}" in web.PAGE

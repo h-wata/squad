@@ -13,8 +13,16 @@
   `squad/mask.py` を通してから返す。report の要約などの本文は Markdown として描く (marked 15.0.12 と
   DOMPurify 3.2.6 を版固定 + SRI で CDN から読み、DOMPurify でサニタイズ。読めなければプレーンテキスト)。
 
+- watchd: report / review の配達に成功したら、中身をそのまま `reports/archive/<task_id>__<report_id>.yaml`
+  に写す (#78)。`workerN_report.yaml` が次のタスクで上書きされても、graph sync が前のタスクの結果を辿れる。
+  同じ名前があれば書かない (再配達で増えない)。report_id を持たない review は内容ハッシュで名前を決める。
+  写しに失敗しても配達は止めず、ログだけ残す。
+
 ### Changed
 
+- `squad graph sync` (#78): `tasks/archive/` にあって結果が無い task を `unreported` ではなく `closed`
+  (完了 (報告なし)) にする。`squad web` はこれを灰色で出す。配下が `closed` と done だけのゴールは done、
+  `closed` だけのゴールは `closed`。`tasks/` 直下で結果が無い task は従来どおり running。
 - `squad graph sync` の状態判定 (#76): task と結果の新旧を `created_at` / `completed_at` で比べる
   (無ければ mtime)、cross-review の verdict だけの report と verifier の verdict も結果として数える。
   task はゴールに組み分ける (parent_issue の Issue、無ければ task_id の頭が同じ派生 task をまとめる)。

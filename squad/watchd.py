@@ -41,6 +41,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
 
@@ -78,6 +79,8 @@ APPROVAL_DENY_DEFAULT = (
 )
 TODO_RE = re.compile(r'TODO|FIXME|XXX')
 WORKER_NUM_RE = re.compile(r'worker(\d+)')
+# reports/archive/ の写しのファイル名に使えない文字 (task_id に / 等が混ざっても archive の外に書かない)
+ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
 PANE_SUFFIX = {1: '0.1', 2: '0.2', 3: '0.3', 4: '0.6'}
 CAPTURE_TAIL_LINES = 40
 HOOK_FRESH_SECONDS = 300
@@ -518,7 +521,9 @@ class Watcher:
         """
         for project, path in find_reports(self.owned):
             try:
-                data = Path(path).read_bytes()
+                with open(path, 'rb') as f:  # noqa: PTH123 (読んだ内容と同じ inode の mtime を取る)
+                    data = f.read()
+                    mtime = os.fstat(f.fileno()).st_mtime
             except OSError:
                 continue  # 走査中に消えた/読めない。次サイクルで再評価する
             sha, meta, parse_error = report_identity(data)
@@ -526,7 +531,7 @@ class Watcher:
             claim = self.ledger.claim(project, report_id, path, sha)
             if not claim.ok:
                 continue
-            self._deliver(project, report_id, path, sha, meta, invalid, claim)
+            self._deliver(project, report_id, path, sha, meta, invalid, claim, data, mtime)
 
     def _deliver(
         self,
@@ -537,6 +542,8 @@ class Watcher:
         meta: dict[str, str],
         invalid: str,
         claim: Claim,
+        data: bytes,
+        mtime: float,
     ) -> None:
         dedupe_key = f'report:{project}:{report_id}'
         if invalid:
@@ -584,6 +591,8 @@ class Watcher:
         # next_attempt_at に達したサイクルで再送する。token が空 = claim は fail-open した
         # (ledger に記録が無い) ので、実態と逆のログを出さない。
         token = claim.token
+        if enqueued and not invalid:
+            self._archive_copy(path, report_id, sha, meta, data, mtime)
         if enqueued and self.ledger.commit(project, report_id, token):
             self._graph_dirty = True
             return
@@ -594,6 +603,39 @@ class Watcher:
         wait = self.ledger.fail(project, report_id, token)
         if not wait:
             self.log(f'[WARN] ledger に再送予定を記録できませんでした: {path} (lease 期限切れ後に再 claim)')
+
+    def _archive_copy(
+        self, path: str, report_id: str, sha: str, meta: dict[str, str], data: bytes, mtime: float
+    ) -> None:
+        """配達した report の中身を reports/archive/<task_id>__<report_id>.yaml にそのまま写す (#78).
+
+        workerN_report.yaml は次のタスクの report で上書きされるので、graph sync が結果を辿れるよう
+        配達した bytes を残す。同じ名前があれば書かない (再配達で増えない)。report_id を持たない
+        review は配達キーと同じく内容ハッシュで名前を決める。失敗しても配達は止めずログだけ残す。
+        写しの mtime は元の report に揃える。graph sync は completed_at の無い report を mtime で新旧比較
+        するので、写した時刻にすると watchd が遅れたとき古い report が再発注後の結果に見える。
+        """
+        task_id = ARCHIVE_NAME_UNSAFE_RE.sub('_', meta.get('task_id') or 'unknown')
+        rid = f'review-{sha[:16]}' if report_id.startswith('review:') else ARCHIVE_NAME_UNSAFE_RE.sub('_', report_id)
+        archive = Path(path).parent / 'archive'
+        dest = archive / f'{task_id}__{rid}.yaml'
+        if dest.exists():
+            return
+        try:
+            archive.mkdir(exist_ok=True)
+            # 書きかけの写しを残さない: 一時ファイルに書いてから link で置く (link は既存を上書きしない)
+            fd, tmp = tempfile.mkstemp(dir=archive, prefix='.tmp-')
+            try:
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(data)
+                os.utime(tmp, (mtime, mtime))
+                os.link(tmp, dest)
+            except FileExistsError:
+                pass  # 別の watcher が先に写した
+            finally:
+                os.unlink(tmp)
+        except OSError as e:
+            self.log(f'[WARN] report の写しを archive に残せません (配達は継続): {dest}: {e}')
 
     def sync_graph(self) -> None:
         """探索グラフ (queue/.graph.db) を作り直す (#55).

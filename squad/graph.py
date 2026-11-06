@@ -18,7 +18,8 @@ DB を消しても `squad graph sync` で同じ内容に戻る。report 配達 l
 
 intent の state (#57): running (tasks/ 直下にあり、それより新しい結果が無い) / blocked (最新 report の
 status が completed 以外) / done / verified (done のうち verify_status が pass で、最新の cross-review が
-approve) / unreported (archive にしか無く結果も無い)。`squad graph status` と `squad web` (#76) は
+approve) / closed (完了 (報告なし): archive にしか無く結果も無い。Dispatcher が閉じたが結果が残っていない, #78)。
+`squad graph status` と `squad web` (#76) は
 どちらもこの DB の値を読むので、2 つの画面の判定は一致する。
 
 DB には他に projects (project ごとの担当 session・最新の結果・最終更新) と meta (synced_at と、
@@ -212,7 +213,7 @@ def collect(
                 intent,
                 'intent',
                 project,
-                'unreported',
+                'closed',
                 _line(data.get('title')),
                 str(path),
                 mtime,
@@ -277,7 +278,8 @@ def collect(
                 verify_status=_s(data.get('verify_status')),
                 pr_url=_s(data.get('pr_url')),
                 worker=_s(data.get('worker')),
-                review='_review' in path.name,
+                # reports/archive/ の写し (#78) はファイル名から review と分からないので verdict でも見る
+                review='_review' in path.name or bool(_s(data.get('verdict')).strip()),
                 summary=_s(data.get('summary'))[:2000],
                 reported_at=_iso(at),
             )
@@ -308,9 +310,9 @@ def collect(
         # 発注より後ろにしかずれない (mtime は一括更新されることがあり、mesh-mem の tasks/ は 2026-07-02 に全部
         # 更新された。created_at は Dispatcher が丸めて書くので発注より後になることがある: SQUAD-257 は
         # created_at 13:10、発注 13:04、review 13:09)。created_at が無いときは task / 結果とも mtime で比べる。
-        # 結果が無く archive にしか無い task は、報告されずに外されたか、report が上書きされて残っていない
-        # (unreported のまま。実 queue では大半が後者)。archive への cp で mtime が進むことがあるので、
-        # archive の task は新旧を比べない。
+        # 結果が無く archive にしか無い task は、Dispatcher が閉じたが report が上書きされて残っていない
+        # (closed = 完了 (報告なし), #78。watchd が reports/archive/ に写すようになる前の分)。archive への cp で
+        # mtime が進むことがあるので、archive の task は新旧を比べない。
         # verified (検証済み) は done のうち、report の verify_status が pass で、その report 以後の
         # cross-review が approve のもの (#57)。どれも YAML から機械的に決まる
         for intent, (current, mtime, issued) in task_files.items():
@@ -321,8 +323,7 @@ def collect(
                 if not current or (r[0] >= issued if issued is not None else r[1] >= mtime)
             ]
             if not fresh:
-                if current:
-                    nodes[intent]['state'] = 'running'
+                nodes[intent]['state'] = 'running' if current else 'closed'
                 continue
             at, _mtime, rank, status, verify, result, pr = max(fresh, key=lambda r: (r[2], r[0]))
             # report より前の review は、やり直す前の変更へのものなので数えない
@@ -357,8 +358,9 @@ def collect(
     for goal, (project, title, ref, members) in goal_members.items():
         members = sorted(set(members))
         states = {nodes[m]['state'] for m in members}
-        # 配下の task が全部 done なら完了 (GitHub は見に行かない)。それ以外は未完了の中で一番重い状態
-        state = next((s for s in ('running', 'blocked', 'unreported') if s in states), 'done')
+        # 配下の task が全部 done / verified / closed なら完了 (GitHub は見に行かない)。それ以外は未完了の中で
+        # 一番重い状態。配下が closed だけのゴールは closed (結果が 1 件も残っていない) のまま灰色で出す
+        state = 'closed' if states == {'closed'} else next((s for s in ('running', 'blocked') if s in states), 'done')
         times = [t for m in members for t in (nodes[m]['_mtime'], nodes[m].get('_finished', 0.0))]
         add(goal, 'goal', project, state, title, ref, max(times), members=members)
         edges.update((goal, 'spawns', m) for m in members)
@@ -456,7 +458,7 @@ def sync(queue_dir: Path, db_path: Path | None = None, config_path: Path = CONFI
     return len(nodes), len(edges)
 
 
-STATES = ('running', 'blocked', 'done', 'verified', 'unreported')
+STATES = ('running', 'blocked', 'done', 'verified', 'closed')
 UNFINISHED = ('running', 'blocked')
 
 
@@ -508,14 +510,14 @@ def render_status(data: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     for pj, pj_out in data.items():
         lines += [f'## {pj}', '', '| goal | ' + ' | '.join(STATES) + ' |', '|---' * (len(STATES) + 1) + '|']
-        only_unreported = 0
+        only_closed = 0
         for goal, c in sorted(pj_out['goals'].items()):
-            if goal != '-' and sum(c.values()) == c['unreported']:
-                only_unreported += 1  # report が上書きされて追えない過去分だけの goal は畳む
+            if goal != '-' and sum(c.values()) == c['closed']:
+                only_closed += 1  # report が上書きされて追えない過去分だけの goal は畳む
                 continue
             lines.append(f'| {goal} | ' + ' | '.join(str(c[k]) for k in STATES) + ' |')
-        if only_unreported:
-            lines.append(f'| (unreported だけの goal {only_unreported} 件) |' + ' |' * len(STATES))
+        if only_closed:
+            lines.append(f'| (closed (完了・報告なし) だけの goal {only_closed} 件) |' + ' |' * len(STATES))
         lines += ['', '未完了:' if pj_out['unfinished'] else '未完了: なし']
         for u in pj_out['unfinished']:
             lines.append(

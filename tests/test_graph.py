@@ -215,8 +215,8 @@ def _status(queue: Path) -> dict:
 
 def test_status_counts_and_unfinished(status_queue: Path) -> None:
     pj = _status(status_queue)
-    assert pj['goals']['goal:pj#42'] == {'running': 1, 'blocked': 0, 'done': 1, 'verified': 0, 'unreported': 0}
-    assert pj['goals']['-'] == {'running': 0, 'blocked': 1, 'done': 1, 'verified': 0, 'unreported': 0}
+    assert pj['goals']['goal:pj#42'] == {'running': 1, 'blocked': 0, 'done': 1, 'verified': 0, 'closed': 0}
+    assert pj['goals']['-'] == {'running': 0, 'blocked': 1, 'done': 1, 'verified': 0, 'closed': 0}
     unfinished = {u['node_id']: u for u in pj['unfinished']}
     assert set(unfinished) == {'intent:pj/T2', 'intent:pj/T3'}
     blocked = unfinished['intent:pj/T3']
@@ -358,7 +358,7 @@ def _iso_utc(sec: int) -> str:
 
 def test_status_matches_db_states(real_queue: Path) -> None:
     pj = _status(real_queue)
-    assert pj['goals']['-'] == {'running': 2, 'blocked': 1, 'done': 2, 'verified': 0, 'unreported': 0}
+    assert pj['goals']['-'] == {'running': 2, 'blocked': 1, 'done': 2, 'verified': 0, 'closed': 0}
     assert {u['node_id'] for u in pj['unfinished']} == {'intent:pj/B', 'intent:pj/C', 'intent:pj/E'}
 
 
@@ -427,3 +427,43 @@ def test_issue_url_goal_merges_tasks_across_projects(tmp_path: Path) -> None:
     db = graph.default_db_path(q)
     assert set(_rows(db, "SELECT dst_id FROM edges WHERE src_id = 'goal:o/r#1'")) == {('intent:a/T',), ('intent:b/T',)}
     assert _rows(db, "SELECT state FROM nodes WHERE node_id = 'goal:o/r#1'") == [('blocked',)]
+
+
+def test_archived_task_without_result_is_closed(tmp_path: Path) -> None:
+    """#78: archive にあって結果が無い task は「完了 (報告なし)」。tasks/ 直下で結果が無いものは running のまま."""
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'pj'
+    _write(pj / 'tasks' / 'archive' / 'a.yaml', 'task_id: A-1\ncontext:\n  parent_issue: 1\n', 100)  # 報告なし
+    _write(pj / 'tasks' / 'archive' / 'b.yaml', 'task_id: B-1\ncontext:\n  parent_issue: 1\n', 100)  # done
+    _write(pj / 'reports' / 'archive' / 'b.yaml', f'report_id: "{RID1}"\ntask_id: B-1\nstatus: completed\n', 200)
+    _write(pj / 'tasks' / 'archive' / 'c.yaml', 'task_id: C-1\ncontext:\n  parent_issue: 2\n', 100)  # 報告なしだけ
+    _write(pj / 'tasks' / 'archive' / 'd.yaml', 'task_id: D-1\ncontext:\n  parent_issue: 3\n', 100)  # 報告なし
+    _write(pj / 'tasks' / 'worker1.yaml', 'task_id: D-2\ncontext:\n  parent_issue: 3\n', 300)  # 作業中
+    graph.sync(q)
+    db = graph.default_db_path(q)
+    nodes = dict(_rows(db, 'SELECT node_id, state FROM nodes'))
+    assert nodes['intent:pj/A-1'] == 'closed'
+    assert nodes['intent:pj/C-1'] == 'closed'
+    assert nodes['intent:pj/D-2'] == 'running'
+    assert nodes['goal:pj#1'] == 'done'  # 配下が closed と done だけ
+    assert nodes['goal:pj#2'] == 'closed'  # 結果が 1 件も残っていないゴールは灰色のまま
+    assert nodes['goal:pj#3'] == 'running'
+    goals = graph.status(db)['pj']['goals']
+    assert goals['goal:pj#1'] == {'running': 0, 'blocked': 0, 'done': 1, 'verified': 0, 'closed': 1}
+    assert [u['node_id'] for u in graph.status(db)['pj']['unfinished']] == ['intent:pj/D-2']
+    assert '| (closed (完了・報告なし) だけの goal 1 件) |' in '\n'.join(graph.render_status(graph.status(db)))
+
+
+def test_archive_copy_of_review_keeps_review_flag(tmp_path: Path) -> None:
+    """Watchd の写し (<task_id>__<id>.yaml) は名前に _review を含まないので verdict で review と判定する."""
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'pj'
+    _write(pj / 'tasks' / 'archive' / 'r.yaml', 'task_id: R-1\n', 100)
+    _write(
+        pj / 'reports' / 'archive' / f'R-1__{RID1}.yaml',
+        f'report_id: "{RID1}"\ntask_id: R-1\nstatus: completed\nverdict: approve\n',
+        200,
+    )
+    graph.sync(q)
+    [(payload,)] = _rows(graph.default_db_path(q), f"SELECT payload_json FROM nodes WHERE node_id = 'result:{RID1}'")
+    assert '"review": true' in payload
