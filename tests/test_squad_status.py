@@ -49,3 +49,7 @@ def test_blockquote_and_bullet_spinner_text_is_idle() -> None:
 
 def test_legacy_working_spinner_is_busy() -> None:
     assert detect_status('✻ Working (1m 2s)\n❯ ')['status'] == 'busy'
+
+
+def test_symbol_and_spinner_on_different_lines_is_idle() -> None:
+    assert detect_status('✻\nThinking… (12s\n❯ ')['status'] == 'idle'
