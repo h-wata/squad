@@ -35,6 +35,7 @@ from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 import contextlib
+import fcntl
 import glob as globmod
 import json
 import os
@@ -162,6 +163,13 @@ def _bool_env(name: str, default: bool) -> bool:
 
 # web からの指示 (#85) を pane に打ち込む前に空白へ置き換える制御文字 (改行で途中確定、ESC で端末操作をさせない)
 INSTRUCTION_CTRL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def _flat(text: str) -> str:
+    """Pane に打ち込む文字列を 1 行にする (制御文字を空白にし、空白の並びを 1 つにまとめる)."""
+    return ' '.join(INSTRUCTION_CTRL_RE.sub(' ', text).split())
+
+
 # graph sync 失敗後の再試行間隔 (秒)。最後の値を上限として使い続ける
 GRAPH_RETRY_BACKOFF = (5, 30, 300)
 
@@ -672,6 +680,29 @@ class Watcher:
         if sig != self._instructions_sig:  # 新しい指示は渡す前から活動タブに出す
             self._instructions_sig = sig
             self._graph_dirty = True
+        if not files:
+            return
+        pane = self.cfg.dispatcher
+        if self._sent_to_dispatcher or not self.tmux.pane_exists(pane):
+            return
+        # 同じ session の watchd が 2 つ動いていても (再起動で旧プロセスが残る等)、印付けと送信を 1 つずつにする。
+        # 取れなければこのサイクルは見送る。ロックの中で読み直すので、相手が印を付けた指示は送らない
+        try:
+            lock = os.open(d / '.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as e:
+            self.log(f'[WARN] 指示のロックを開けません (今回は渡さない): {e}')
+            return
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(lock)
+            return
+        try:
+            self._deliver_one_instruction(files, pane)
+        finally:
+            os.close(lock)  # flock も外れる
+
+    def _deliver_one_instruction(self, files: list[Path], pane: str) -> None:
         for path in files:
             try:
                 data = json.loads(path.read_text())
@@ -682,19 +713,16 @@ class Watcher:
                     break
         else:
             return
-        pane = self.cfg.dispatcher
-        if self._sent_to_dispatcher or not self.tmux.pane_exists(pane):
-            return
         if detect_status(self.tmux.capture(pane))['status'] != 'idle':
             return
         now = datetime.now(timezone.utc).isoformat(timespec='seconds')
         if not self._write_instruction(path, {**data, 'delivered_at': now}):
             return
-        project = data.get('project') if isinstance(data.get('project'), str) else ''
-        body = ' '.join(INSTRUCTION_CTRL_RE.sub(' ', data['body']).split())
+        project = _flat(data['project']) if isinstance(data.get('project'), str) else ''
         # 先頭を固定のタグにする: 本文が - で始まると tmux が option と読み、Enter 等の名前だけなら key と読む。
         # 末尾も固定: 引数の末尾の ; は tmux がコマンドの区切りとして食べる
-        msg = f'[squad-web 指示]{f" [project: {project}]" if project else ""} {body} [id={path.stem}]'
+        tag = f' [project: {project}]' if project else ''
+        msg = f'[squad-web 指示]{tag} {_flat(data["body"])} [id={_flat(path.stem)}]'
         self._graph_dirty = True
         if self.notify_dispatcher(msg):
             self.log(f'web からの指示を Dispatcher に渡しました: {path.name}')

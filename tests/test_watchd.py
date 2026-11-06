@@ -1767,10 +1767,10 @@ class TestInstructions:
         w, queue = watcher
         w.tmux.captures['testsess:0.0'] = [IDLE]
         b = write_instruction(queue, '20261106T000002000000Z-bbbb', body='2 件目')
-        a = write_instruction(queue, '20261106T000001000000Z-aaaa', body='PR #9 を\n見て\x1b[2J;', project='pj')
+        a = write_instruction(queue, '20261106T000001000000Z-aaaa', body='PR #9 を\n見て\x1b[2J;', project='p\nj')
         w.deliver_instructions()
         assert w.tmux.sent == [
-            ('testsess:0.0', '[squad-web 指示] [project: pj] PR #9 を 見て [2J; [id=20261106T000001000000Z-aaaa]'),
+            ('testsess:0.0', '[squad-web 指示] [project: p j] PR #9 を 見て [2J; [id=20261106T000001000000Z-aaaa]'),
             ('testsess:0.0', 'Enter'),
         ]
         assert _instr(a)['delivered_at'] and not _instr(b)['delivered_at']  # 1 サイクル 1 件
@@ -1780,7 +1780,7 @@ class TestInstructions:
         w._sent_to_dispatcher = False  # noqa: SLF001 (次のサイクル)
         w.deliver_instructions()
         assert len(w.tmux.sent) == 4  # 渡し終えたら何も送らない
-        assert sorted(p.name for p in (queue / 'instructions' / 'testsess').iterdir()) == sorted([a.name, b.name])
+        assert sorted(p.name for p in (queue / 'instructions' / 'testsess').glob('*.json')) == sorted([a.name, b.name])
 
     def test_busy_dispatcher_waits_then_gets_it_once(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
@@ -1877,3 +1877,23 @@ def test_capture_drops_blank_lines_below_the_output(monkeypatch: pytest.MonkeyPa
     screen = BUSY + '\n' * 60
     monkeypatch.setattr(subprocess, 'run', lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, screen, ''))
     assert detect_status(Tmux('s').capture('s:0.0'))['status'] == 'busy'
+
+
+def test_two_watchers_on_one_session_send_once(watcher: tuple[Watcher, Path]) -> None:
+    """同じ session の watchd が 2 つ動いていても (旧プロセスが残った再起動等)、指示は 1 回だけ打ち込む."""
+    import fcntl  # noqa: PLC0415
+
+    w, queue = watcher
+    w.tmux.captures['testsess:0.0'] = [IDLE]
+    p = write_instruction(queue, 'x')
+    other = os.open(p.parent / '.lock', os.O_RDWR | os.O_CREAT)
+    fcntl.flock(other, fcntl.LOCK_EX)  # もう 1 つの watchd が印付け〜送信の最中
+    try:
+        w.deliver_instructions()
+        assert w.tmux.sent == [] and not _instr(p)['delivered_at']
+    finally:
+        os.close(other)
+    data = _instr(p)
+    p.write_text(json.dumps({**data, 'delivered_at': '2026-11-06T00:00:00+00:00'}))  # 相手が渡し終えた
+    w.deliver_instructions()
+    assert w.tmux.sent == []

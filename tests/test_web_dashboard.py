@@ -771,3 +771,14 @@ def test_write_page_script_parses(tmp_path: Path) -> None:
     js = tmp_path / 'page.js'
     js.write_text(page[page.index('<script>\n') + 9 : page.rindex('</script>')])
     subprocess.run([node, '--check', str(js)], check=True)
+
+
+def test_does_not_write_through_symlinked_instructions_dir(write_server: tuple[str, Path]) -> None:
+    """instructions/<session> が tasks/ を指す symlink でも、そこには書かない (500)."""
+    base, q = write_server
+    (q / 'instructions').mkdir()
+    (q / 'instructions' / 'sq1').symlink_to(q / 'projects' / 'pj' / 'tasks')
+    before = sorted((q / 'projects' / 'pj' / 'tasks').iterdir())
+    code, body = _post(base, {'session': 'sq1', 'body': SECRET})
+    assert code == 500 and SECRET.encode() not in body
+    assert sorted((q / 'projects' / 'pj' / 'tasks').iterdir()) == before

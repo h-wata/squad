@@ -345,6 +345,9 @@ def write_instruction(queue_dir: Path, session: str, project: str, body: str) ->
     """
     d = queue_dir / 'instructions' / session
     d.mkdir(parents=True, exist_ok=True)
+    # instructions/ か <session>/ が symlink で他の場所 (tasks/ 等) を指していたら書かない
+    if d.resolve() != queue_dir.resolve() / 'instructions' / session:
+        raise OSError(f'instructions の置き場所が {queue_dir} の外を指しています')
     now = datetime.now(timezone.utc)
     iid = f'{now.strftime("%Y%m%dT%H%M%S%fZ")}-{secrets.token_hex(4)}'  # 名前順 = 時刻順
     data = {
