@@ -2,7 +2,8 @@
 # ruff: noqa: CPY001
 """squad/web.py (読み取り専用 Web ダッシュボード, Issue #76) のテスト.
 
-queue / dashboards / graph DB は tmp に実ファイルで作り、実際に HTTP サーバーを立てて叩く。
+queue は tmp に実ファイルの YAML で作り、本物の `graph.sync` で `.graph.db` を作ってから YAML を消す。
+web はその DB と tmux だけで描けることを、実際に HTTP サーバーを立てて叩いて確かめる。
 tmux だけは subprocess.run を差し替える (テスト環境の tmux に依存しない)。
 """
 
@@ -13,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -25,15 +27,17 @@ import pytest
 
 SQUAD_DIR = Path(__file__).resolve().parent.parent / 'squad'
 sys.path.insert(0, str(SQUAD_DIR))
+import graph  # noqa: E402
 import squad as squad_cli  # noqa: E402
 import web  # noqa: E402
 
 TOKEN = 'test-token-123'
 SECRET = 'ghp_' + 'A' * 36
-RID = '11111111-1111-4111-8111-111111111111'
+NOW = int(time.time())
+DAY = 86_400
 
 
-def _write(path: Path, text: str, mtime: int = 1_000) -> None:
+def _write(path: Path, text: str, mtime: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     os.utime(path, (mtime, mtime))
@@ -41,62 +45,68 @@ def _write(path: Path, text: str, mtime: int = 1_000) -> None:
 
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
-    """Pj に active (T2) / blocked (T3) / 完了済み (T1) のタスクと dashboard を持つ queue."""
-    q = tmp_path / 'queue' / 'projects' / 'pj'
-    _write(q / 'tasks' / 'worker1.yaml', 'task_id: T1\ntitle: "done task"\nassigned_to: worker1\n')
-    _write(q / 'tasks' / 'worker2.yaml', 'task_id: T2\ntitle: "running task"\nassigned_to: worker2\n')
-    _write(q / 'tasks' / 'worker3.yaml', 'task_id: T3\ntitle: "stuck task"\nassigned_to: worker3\n')
-    _write(q / 'tasks' / 'archive' / 'worker1_T0.yaml', 'task_id: T0\n')
-    _write(q / 'reports' / 'worker1_report.yaml', 'task_id: T1\nstatus: completed\nsummary: "ok"\n', 2_000)
-    _write(q / 'reports' / 'worker2_report.yaml', 'task_id: T_OLD\nstatus: completed\nsummary: "old"\n', 1_500)
+    """実 queue と同じ形の YAML から sync した DB を作り、YAML (projects/) を消した queue.
+
+    pj (session sq1 が担当): SQUAD-1 (archive, 今日 done) / SQUAD-1-fix1 (w1 が実行中) /
+    SQUAD-2 (w2, blocked) / OLD-1 (60 日前に done)。pj2 は別 session の担当。.ruff_cache は project ではない。
+    """
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'pj'
+    _write(pj / '.squad_session', 'sq1\n', NOW)
+    _write(pj / 'tasks' / 'archive' / 'worker1_SQUAD-1.yaml', 'task_id: SQUAD-1\ntitle: "画面を作る"\n', NOW - 600)
     _write(
-        q / 'reports' / 'worker3_report.yaml',
-        f'task_id: T3\nstatus: blocked\nsummary: "token {SECRET}"\n',
-        3_000,
+        pj / 'reports' / 'archive' / 'worker1_SQUAD-1.yaml',
+        'task_id: SQUAD-1\nstatus: completed\nsummary: |\n  作った\n  二行目\n',
+        NOW - 500,
     )
-    _write(tmp_path / 'dashboards' / 'pj.md', '# pj\n', 4_000)
-    _make_graph_db(tmp_path / 'queue' / '.graph.db')
+    _write(
+        pj / 'tasks' / 'worker1.yaml',
+        'task_id: SQUAD-1-fix1\ntitle: "見づらいので作り直す"\nassigned_to: worker1\n'
+        f'description: |\n  token {SECRET} を使う\n',
+        NOW - 400,
+    )
+    _write(pj / 'tasks' / 'worker2.yaml', 'task_id: SQUAD-2\ntitle: "詰まる"\nassigned_to: worker2\n', NOW - 300)
+    _write(
+        pj / 'reports' / 'worker2_report.yaml',
+        f'task_id: SQUAD-2\nstatus: blocked\nsummary: "権限が無い {SECRET}"\n',
+        NOW - 200,
+    )
+    old = NOW - 60 * DAY
+    _write(pj / 'tasks' / 'archive' / 'worker3_OLD-1.yaml', 'task_id: OLD-1\ntitle: "昔の"\n', old)
+    _write(pj / 'reports' / 'archive' / 'worker3_OLD-1.yaml', 'task_id: OLD-1\nstatus: completed\n', old + 10)
+    _write(q / 'projects' / 'pj2' / '.squad_session', 'other\n', NOW)
+    _write(q / 'projects' / 'pj2' / 'tasks' / 'worker1.yaml', 'task_id: P2-1\nassigned_to: worker1\n', NOW - 100)
+    (q / 'projects' / '.ruff_cache' / '0.1').mkdir(parents=True)
+    cfg = tmp_path / 'config.json'
+    cfg.write_text(json.dumps({'workers': {f'w{i}': {'agent': 'claude', 'pane': f'0.{i}'} for i in (1, 2, 3)}}))
+    graph.sync(q, config_path=cfg)
+    # web は YAML も config.json も読まない (worker 定義は sync が DB に写す) ので、消しても同じ画面が出る
+    shutil.rmtree(q / 'projects')
+    cfg.unlink()
     return tmp_path
 
 
-def _make_graph_db(path: Path) -> None:
-    conn = sqlite3.connect(path)
-    conn.execute(
-        'CREATE TABLE nodes (node_id TEXT PRIMARY KEY, kind TEXT, project TEXT, state TEXT, title TEXT, '
-        'ref TEXT, payload_json TEXT, updated_at TEXT)'
-    )
-    conn.execute('CREATE TABLE edges (src_id TEXT, rel TEXT, dst_id TEXT)')
-    rows = [
-        ('goal:pj#1', 'goal', 'pj', 'open', 'goal one'),
-        ('intent:pj/T1', 'intent', 'pj', 'done', 'done task'),
-        (f'result:{RID}', 'result', 'pj', 'completed', 'ok'),
-        (f'fact:{RID}#0', 'fact', 'pj', 'confirmed', 'a fact'),
-        ('intent:other/X', 'intent', 'other', 'running', 'other pj'),
-    ]
-    conn.executemany("INSERT INTO nodes VALUES (?, ?, ?, ?, ?, '', '{}', '')", rows)
-    conn.executemany(
-        'INSERT INTO edges VALUES (?, ?, ?)',
-        [
-            ('goal:pj#1', 'spawns', 'intent:pj/T1'),
-            ('intent:pj/T1', 'yields', f'result:{RID}'),
-            (f'result:{RID}', 'yields', f'fact:{RID}#0'),
-        ],
-    )
-    conn.commit()
-    conn.close()
-
-
 def _fake_tmux(calls: list[list[str]]) -> object:
+    screens = {
+        'sq1:0.1': 'Thinking…\n',
+        'sq1:0.2': f'export GH={SECRET}\nDo you want to proceed?\n 1. Yes\n',
+    }
+
     def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
         calls.append(cmd)
-        out = ''
         if cmd[:2] == ['tmux', 'list-sessions']:
-            out = 'squad\nother\n'
-        elif cmd[:2] == ['tmux', 'list-panes']:
-            out = 'squad:0.0\tDispatcher\nsquad:0.5\tAux-Shell\n' if 'squad' in cmd else 'other:0.0\tbash\n'
-        elif cmd[:2] == ['tmux', 'capture-pane']:
-            out = f'working...\nAuthorization: Bearer {SECRET}\nexport GH={SECRET}\n'
-        return subprocess.CompletedProcess(cmd, 0, out, '')
+            return subprocess.CompletedProcess(cmd, 0, 'sq1\nother\n', '')
+        if cmd[:2] == ['tmux', 'list-panes']:
+            out = 'Dispatcher\nAux-Shell\n' if 'sq1' in cmd else 'bash\n'
+            return subprocess.CompletedProcess(cmd, 0, out, '')
+        if cmd[:2] == ['tmux', 'capture-pane']:
+            target = cmd[cmd.index('-t') + 1]
+            if target == 'sq1:0.3':
+                return subprocess.CompletedProcess(cmd, 1, '', "can't find pane")
+            return subprocess.CompletedProcess(
+                cmd, 0, screens.get(target, f'idle\nAuthorization: Bearer {SECRET}\n'), ''
+            )
+        return subprocess.CompletedProcess(cmd, 1, '', 'unexpected')
 
     return run
 
@@ -104,9 +114,8 @@ def _fake_tmux(calls: list[list[str]]) -> object:
 @pytest.fixture
 def server(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, list[list[str]]]:
     calls: list[list[str]] = []
-    monkeypatch.setattr(web.subprocess, 'run', _fake_tmux(calls))
-    monkeypatch.setattr(squad_cli.subprocess, 'run', _fake_tmux(calls))
-    srv = web.make_server('127.0.0.1', 0, TOKEN, root / 'queue', root / 'dashboards')
+    monkeypatch.setattr(subprocess, 'run', _fake_tmux(calls))  # web と squad.probe_worker の両方
+    srv = web.make_server('127.0.0.1', 0, TOKEN, root / 'queue' / '.graph.db')
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f'http://127.0.0.1:{srv.server_address[1]}', calls
     srv.shutdown()
@@ -122,10 +131,13 @@ def _req(url: str, method: str = 'GET', headers: dict | None = None) -> tuple[in
         return e.code, e.read()
 
 
-def _get_json(base: str, path: str) -> object:
+def _get_json(base: str, path: str) -> dict:
     code, body = _req(f'{base}{path}', headers={'Authorization': f'Bearer {TOKEN}'})
     assert code == 200, body
     return json.loads(body)
+
+
+PATHS = ['/', '/api/sessions', '/api/pane?target=sq1:0.1', '/api/projects', '/api/goals', '/api/graph?goal=x']
 
 
 def test_refuses_to_start_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,10 +146,10 @@ def test_refuses_to_start_without_token(monkeypatch: pytest.MonkeyPatch) -> None
         squad_cli.main(['web', '--port', '0'])
     assert e.value.code != 0
     with pytest.raises(ValueError):
-        web.make_server('127.0.0.1', 0, '', Path('q'), Path('d'))
+        web.make_server('127.0.0.1', 0, '', Path('g.db'))
 
 
-@pytest.mark.parametrize('path', ['/', '/api/projects', '/api/panes', '/api/graph?project=pj'])
+@pytest.mark.parametrize('path', PATHS)
 def test_token_required(server: tuple[str, list], path: str) -> None:
     base, _ = server
     assert _req(base + path)[0] == 401
@@ -148,54 +160,100 @@ def test_token_required(server: tuple[str, list], path: str) -> None:
     assert _req(base + path, headers={'Authorization': f'Bearer {TOKEN}'})[0] == 200
 
 
-def test_projects(server: tuple[str, list]) -> None:
+def test_projects_come_from_db_and_match_graph_status(server: tuple[str, list], root: Path) -> None:
     base, _ = server
     data = _get_json(base, '/api/projects')
-    (pj,) = data['projects']
-    assert pj['name'] == 'pj'
-    by_id = {t['task_id']: t for t in pj['tasks']}
-    assert by_id['T1']['state'] == 'done'
-    assert by_id['T2']['state'] == 'active'  # report は別 task のもの
-    assert by_id['T2']['worker'] == 'worker2'
-    assert by_id['T3']['state'] == 'blocked'
-    assert 'T0' not in by_id  # archive は対象外
-    assert pj['latest_report']['task_id'] == 'T3'
-    assert pj['latest_report']['status'] == 'blocked'
-    assert SECRET not in json.dumps(data)  # summary もマスク済み
-    assert pj['dashboard_mtime'].startswith('1970-01-01T')
-    assert pj['dashboard_mtime'] == web.iso(4_000)
+    assert data['error'] is None
+    assert data['synced_at'].endswith('+00:00')  # 画面に出す DB の最終 sync 時刻
+    rows = {p['name']: p for p in data['projects']}
+    assert set(rows) == {'pj', 'pj2'}  # .ruff_cache は出ない
+    pj = rows['pj']
+    assert (pj['session'], pj['active'], pj['blocked'], pj['done_today']) == ('sq1', 1, 1, 1)
+    assert pj['latest_result']['task_id'] == 'SQUAD-2'
+    assert pj['latest_result']['status'] == 'blocked'
+    assert SECRET not in json.dumps(data)
+    # squad graph status と同じ DB 値: running = active、blocked = blocked
+    status = graph.status(root / 'queue' / '.graph.db')
+    for name, row in rows.items():
+        goals = status[name]['goals'].values()
+        assert row['active'] == sum(g['running'] for g in goals)
+        assert row['blocked'] == sum(g['blocked'] for g in goals)
 
 
-def test_panes_are_masked_and_only_squad_sessions(server: tuple[str, list]) -> None:
+def test_sessions_reuse_squad_ls_states(server: tuple[str, list]) -> None:
     base, calls = server
-    data = _get_json(base, '/api/panes')
-    assert [s['name'] for s in data['sessions']] == ['squad']
-    panes = data['sessions'][0]['panes']
-    assert [p['target'] for p in panes] == ['squad:0.0', 'squad:0.5']
-    assert all(p['ok'] for p in panes)
-    text = json.dumps(data)
-    assert SECRET not in text
-    assert 'working...' in text
+    data = _get_json(base, '/api/sessions')
+    (sess,) = data['sessions']  # Aux-Shell の無い other は squad セッションではない
+    assert sess['name'] == 'sq1'
+    assert sess['projects'] == ['pj']  # pj2 は other の担当
+    w = {r['worker']: r for r in sess['workers']}
+    assert [(k, v['status'], v['label']) for k, v in w.items()] == [
+        ('w1', 'busy', '作業中'),
+        ('w2', 'permission_wait', '許可待ち'),
+        ('w3', 'unreachable', '停止'),
+    ]
+    assert [(t['task_id'], t['state']) for t in w['w1']['tasks']] == [('SQUAD-1-fix1', 'running')]
+    assert [(t['task_id'], t['state']) for t in w['w2']['tasks']] == [('SQUAD-2', 'blocked')]
+    assert w['w3']['tasks'] == []
+    assert SECRET not in json.dumps(data)
     assert {c[1] for c in calls} <= {'list-sessions', 'list-panes', 'capture-pane'}
 
 
-def test_graph(server: tuple[str, list]) -> None:
+def test_pane_opens_only_squad_worker_panes(server: tuple[str, list]) -> None:
+    base, calls = server
+    data = _get_json(base, '/api/pane?target=sq1:0.2')
+    assert data['ok'] is True
+    assert 'Do you want to proceed?' in data['text']
+    assert SECRET not in data['text']
+    calls.clear()
+    for target in ('other:0.1', 'sq1:0.0', '3:0.0'):
+        refused = _get_json(base, f'/api/pane?target={target}')
+        assert refused['ok'] is False
+    assert not [c for c in calls if c[1] == 'capture-pane']
+
+
+def test_goals_default_30_days_newest_first(server: tuple[str, list]) -> None:
     base, _ = server
-    data = _get_json(base, '/api/graph?project=pj')
-    kinds = {n['node_id']: n['kind'] for n in data['nodes']}
-    assert kinds == {
-        'goal:pj#1': 'goal',
-        'intent:pj/T1': 'intent',
-        f'result:{RID}': 'result',
-        f'fact:{RID}#0': 'fact',
+    goals = _get_json(base, '/api/goals')['goals']
+    ids = [g['node_id'] for g in goals]
+    assert ids == ['goal:pj2/P2-1', 'goal:pj/SQUAD-2', 'goal:pj/SQUAD-1']  # OLD-1 は 30 日より前
+    g1 = goals[2]
+    assert (g1['state'], g1['tasks'], g1['title']) == ('running', 2, 'SQUAD-1 画面を作る')
+    assert 'goal:pj/OLD-1' in [g['node_id'] for g in _get_json(base, '/api/goals?days=0')['goals']]
+
+
+def test_graph_is_one_goal_with_detail(server: tuple[str, list]) -> None:
+    base, _ = server
+    data = _get_json(base, '/api/graph?goal=goal:pj/SQUAD-1')
+    nodes = {n['node_id']: n for n in data['nodes']}
+    assert {n['kind'] for n in nodes.values()} == {'goal', 'intent', 'result'}
+    assert {k for k in nodes if k.startswith('intent:')} == {'intent:pj/SQUAD-1', 'intent:pj/SQUAD-1-fix1'}
+    done = nodes['intent:pj/SQUAD-1']
+    assert done['state'] == 'done'
+    assert done['detail']['result_summary'] == '作った\n二行目\n'
+    fix = nodes['intent:pj/SQUAD-1-fix1']
+    assert fix['state'] == 'running'
+    assert 'ghp_<redacted>' in fix['detail']['description']
+    assert SECRET not in json.dumps(data)
+    assert {(e['src'], e['rel']) for e in data['edges']} == {
+        ('goal:pj/SQUAD-1', 'spawns'),
+        ('intent:pj/SQUAD-1', 'yields'),
     }
-    assert len(data['edges']) == 3
-    assert _get_json(base, '/api/graph?project=none') == {'nodes': [], 'edges': []}
+    assert _get_json(base, '/api/graph?goal=none')['nodes'] == []
 
 
-def test_graph_without_db(tmp_path: Path) -> None:
-    assert web.graph_data(tmp_path / 'missing.db', 'pj') == {'nodes': [], 'edges': []}
-    assert not (tmp_path / 'missing.db').exists()  # mode=ro なので作らない
+def test_without_db_or_with_old_schema(tmp_path: Path) -> None:
+    missing = tmp_path / 'missing.db'
+    data = web.projects_data(missing)
+    assert data['synced_at'] is None
+    assert 'sync' in data['error']
+    assert not missing.exists()  # mode=ro なので作らない
+    old = tmp_path / 'old.db'
+    conn = sqlite3.connect(old)
+    conn.execute('CREATE TABLE nodes (node_id TEXT)')
+    conn.commit()
+    conn.close()
+    assert 'schema' in web.goals_data(old, 30)['error']
 
 
 def _snapshot(root: Path) -> dict[str, tuple[float, str]]:
@@ -207,46 +265,51 @@ def _snapshot(root: Path) -> dict[str, tuple[float, str]]:
 
 
 @pytest.mark.parametrize('method', ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'])
-def test_write_methods_rejected_and_files_unchanged(server: tuple[str, list], root: Path, method: str) -> None:
+def test_write_methods_rejected_and_db_unchanged(server: tuple[str, list], root: Path, method: str) -> None:
     base, _ = server
     before = _snapshot(root)
-    for path in ('/', '/api/projects', '/api/panes', '/api/graph?project=pj'):
+    for path in PATHS:
         code, _ = _req(base + path, method=method, headers={'Authorization': f'Bearer {TOKEN}'})
         assert code == 405
-    for path in ('/', '/api/projects', '/api/panes', '/api/graph?project=pj'):
+    for path in PATHS:
         _req(f'{base}{path}', headers={'Authorization': f'Bearer {TOKEN}'})
-    assert _snapshot(root) == before
+    assert _snapshot(root) == before  # .graph.db にも書かない
 
 
-def test_no_send_keys_in_source() -> None:
-    """web.py が tmux に渡すサブコマンドは読み取り系だけ (send-keys 等が無い)."""
+def test_web_reads_no_yaml_and_sends_no_keys() -> None:
+    """web.py は YAML を読まず (yaml / yaml_shallow を使わない)、tmux には読み取り系だけを渡す."""
     src = (SQUAD_DIR / 'web.py').read_text()
     tree = ast.parse(src)
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
     name = lambda c: ast.unparse(c.func)  # noqa: E731
-    subcommands = {c.args[0].value for c in calls if name(c) == '_tmux_lines'}
-    assert subcommands == {'list-sessions', 'list-panes', 'capture-pane'}
-    # subprocess を呼ぶのは _tmux_lines の中の 1 箇所だけ
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    assert not {'yaml', 'graph', 'yaml_shallow'} & imported
+    assert 'yaml_shallow' not in src
+    assert {c.args[0].value for c in calls if name(c) == '_tmux_lines'} == {
+        'list-sessions',
+        'list-panes',
+        'capture-pane',
+    }
     assert [ast.unparse(c) for c in calls if name(c).startswith('subprocess.')] == [
         "subprocess.run(['tmux', *args], capture_output=True, text=True)"
     ]
     assert 'send-keys' not in src
+    assert "'?mode=ro'" in src or '?mode=ro' in src
 
 
-def test_pane_masked_before_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pane_masked_before_tail(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """末尾 PANE_LINES 行に BEGIN 行が入らない長い鍵でも本文が出ない (切ってからマスクしない)."""
     body = [f'KEYBODY{i:03d}' for i in range(web.PANE_LINES + 10)]
     screen = '\n'.join(['-----BEGIN RSA PRIVATE KEY-----', *body])  # pragma: allowlist secret
-
     calls: list[list[str]] = []
 
     def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
         calls.append(cmd)
-        out = {'list-sessions': 's\n', 'list-panes': 's:0.5\tAux-Shell\n', 'capture-pane': screen + '\n\n'}[cmd[1]]
+        out = {'list-sessions': 's\n', 'list-panes': 'Aux-Shell\n', 'capture-pane': screen + '\n\n'}[cmd[1]]
         return subprocess.CompletedProcess(cmd, 0, out, '')
 
-    monkeypatch.setattr(web.subprocess, 'run', run)
-    (pane,) = web.panes_data()['sessions'][0]['panes']
+    monkeypatch.setattr(subprocess, 'run', run)
+    pane = web.pane_data(root / 'queue' / '.graph.db', 's:0.1')
     (capture,) = [c for c in calls if c[1] == 'capture-pane']
     assert capture[capture.index('-S') + 1] == '-'  # 可視範囲でなく履歴全体を取る
     assert 'KEYBODY' not in pane['text']
@@ -254,15 +317,11 @@ def test_pane_masked_before_tail(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(pane['text'].split('\n')) == web.PANE_LINES
 
 
-def test_pane_capture_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
-    def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
-        out = {'list-sessions': 's\n', 'list-panes': 's:0.5\tAux-Shell\n', 'capture-pane': ''}[cmd[1]]
-        return subprocess.CompletedProcess(cmd, 1 if cmd[1] == 'capture-pane' else 0, out, 'no pane')
-
-    monkeypatch.setattr(web.subprocess, 'run', run)
-    (pane,) = web.panes_data()['sessions'][0]['panes']
-    assert pane['ok'] is False
-    assert pane['text'] == ''
+def test_page_pins_cytoscape_version(server: tuple[str, list]) -> None:
+    base, _ = server
+    _code, body = _req(f'{base}/?token={TOKEN}')
+    assert b'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js' in body
+    assert b"name: 'breadthfirst'" in body
 
 
 def test_yaml_shallow_reads_block_scalar(tmp_path: Path) -> None:
@@ -277,110 +336,3 @@ def test_yaml_shallow_reads_block_scalar(tmp_path: Path) -> None:
     assert meta['status'] == 'completed'
     assert meta['task_id'] == 'X'
     assert 'issues' not in meta
-
-
-def test_projects_match_results_by_task_id(tmp_path: Path) -> None:
-    """実 queue と同じ名前の結果ファイル (worker4_review*.yaml / workerN_verdict.yaml) を task_id で突き合わせる."""
-    pj = tmp_path / 'queue' / 'projects' / 'pj'
-    t, r = pj / 'tasks', pj / 'reports'
-    # cross-review: 結果は worker4_review_<id>.yaml と worker4_review.yaml にだけある
-    _write(t / 'worker4.yaml', 'task_id: X-1\nassigned_to: worker4\n', 1_000)
-    _write(r / 'worker4_review_X-1.yaml', 'task_id: X-1\nverdict: approve\n', 1_100)
-    _write(r / 'worker4_report.yaml', 'task_id: OLD-4\nstatus: completed\n', 900)
-    # report は別 task のまま、verdict だけが pass (SQUAD-281 と同じ形)
-    _write(t / 'worker2.yaml', 'task_id: X-2\nassigned_to: worker2\n', 1_000)
-    _write(r / 'worker2_report.yaml', 'task_id: OLD-2\nstatus: completed\n', 900)
-    _write(r / 'worker2_verdict.yaml', 'task_id: X-2\nresult: pass\n', 1_200)
-    # verdict は fail でも report が completed なら report を採る
-    _write(t / 'worker3.yaml', 'task_id: X-3\n', 1_000)
-    _write(r / 'worker3_report.yaml', 'task_id: X-3\nstatus: completed\nsummary: |\n  直した\n  2 行目\n', 1_600)
-    _write(r / 'worker3_verdict.yaml', 'task_id: X-3\nresult: fail\n', 1_250)
-    # 同じ task_id で再発注された task: 発注より古い完了報告では done にしない
-    _write(t / 'worker1.yaml', 'task_id: X-4\n', 2_000)
-    _write(r / 'worker1_report.yaml', 'task_id: X-4\nstatus: completed\n', 1_500)
-    # verdict が fail だけ
-    _write(t / 'worker5.yaml', 'task_id: X-5\n', 1_000)
-    _write(r / 'worker5_verdict.yaml', 'task_id: X-5\nresult: fail\n', 1_100)
-
-    (data,) = web.projects_data(tmp_path / 'queue', tmp_path / 'dashboards')['projects']
-    states = {x['task_id']: x['state'] for x in data['tasks']}
-    assert states == {'X-1': 'done', 'X-2': 'done', 'X-3': 'done', 'X-4': 'active', 'X-5': 'blocked'}
-    assert data['latest_report']['file'] == 'worker3_report.yaml'
-    assert data['latest_report']['summary'] == '直した 2 行目'
-
-
-@pytest.fixture
-def tokyo_tz() -> None:
-    """Naive 時刻のローカル解釈を固定する (UTC と読むと 9 時間ずれるのを検出できるように)."""
-    old = os.environ.get('TZ')
-    os.environ['TZ'] = 'Asia/Tokyo'
-    time.tzset()
-    yield
-    if old is None:
-        os.environ.pop('TZ', None)
-    else:
-        os.environ['TZ'] = old
-    time.tzset()
-
-
-def _states(tmp_path: Path) -> dict[str, str]:
-    (data,) = web.projects_data(tmp_path / 'queue', tmp_path / 'dashboards')['projects']
-    return {x['task_id']: x['state'] for x in data['tasks']}
-
-
-def test_freshness_uses_created_at_and_completed_at(tmp_path: Path) -> None:
-    """mesh-mem と同じ形: task の mtime だけが後から一括更新され、report より新しく見える."""
-    pj = tmp_path / 'queue' / 'projects' / 'pj'
-    t, r = pj / 'tasks', pj / 'reports'
-    _write(t / 'worker3.yaml', 'task_id: Y-1\ncreated_at: "2026-05-22T17:18:00+09:00"\n', 2_000_000_000)
-    _write(
-        r / 'worker3_report.yaml',
-        'task_id: Y-1\nstatus: completed\ncompleted_at: "2026-05-22T17:25:00+09:00"\n',
-        3_000,
-    )
-    # 再発注: created_at が completed_at より新しければ done にしない
-    _write(t / 'worker2.yaml', 'task_id: Y-2\ncreated_at: "2026-05-23T09:00:00+09:00"\n', 2_000_000_000)
-    _write(
-        r / 'worker2_report.yaml',
-        'task_id: Y-2\nstatus: completed\ncompleted_at: "2026-05-22T21:25:00+09:00"\n',
-        3_000,
-    )
-    # created_at はあるが completed_at が無い review: report 側は mtime で比べる
-    _write(t / 'worker4.yaml', 'task_id: Y-3\ncreated_at: "1970-01-01T00:30:00+00:00"\n', 9_000)
-    _write(r / 'worker4_review.yaml', 'task_id: Y-3\nverdict: approve\n', 3_000)  # 00:50Z
-    # Dispatcher が created_at を丸めて先の時刻を書いた (SQUAD-257 と同じ形): mtime の方が早ければそちらで比べる
-    _write(t / 'worker5.yaml', 'task_id: Y-4\ncreated_at: "1970-01-01T01:00:00+00:00"\n', 3_000)  # 00:50Z
-    _write(r / 'worker5_review.yaml', 'task_id: Y-4\nverdict: approve\nchecked_at: "x"\n', 3_300)  # 00:55Z
-    assert _states(tmp_path) == {'Y-1': 'done', 'Y-2': 'active', 'Y-3': 'done', 'Y-4': 'done'}
-
-
-def test_freshness_falls_back_to_mtime_without_created_at(tmp_path: Path) -> None:
-    """created_at が無ければ task / report とも mtime (report の completed_at も使わない)."""
-    pj = tmp_path / 'queue' / 'projects' / 'pj'
-    t, r = pj / 'tasks', pj / 'reports'
-    _write(t / 'worker1.yaml', 'task_id: Z-1\n', 2_000)
-    _write(r / 'worker1_report.yaml', 'task_id: Z-1\nstatus: completed\ncompleted_at: "2099-01-01T00:00:00Z"\n', 1_000)
-    _write(t / 'worker2.yaml', 'task_id: Z-2\n', 2_000)
-    _write(r / 'worker2_report.yaml', 'task_id: Z-2\nstatus: completed\ncompleted_at: "1970-01-01T00:00:00Z"\n', 3_000)
-    assert _states(tmp_path) == {'Z-1': 'active', 'Z-2': 'done'}
-
-
-@pytest.mark.usefixtures('tokyo_tz')
-def test_freshness_naive_is_local_time(tmp_path: Path) -> None:
-    """Naive はローカル時刻 (ここでは JST)。UTC と読むと 4 件とも逆の判定になる組み合わせ."""
-    pj = tmp_path / 'queue' / 'projects' / 'pj'
-    t, r = pj / 'tasks', pj / 'reports'
-    cases = {
-        # task naive 17:18 JST = 08:18Z < report 12:00Z
-        'N-1': ('"2026-05-22T17:18:00"', '"2026-05-22T12:00:00Z"'),
-        # task naive 17:18 JST = 08:18Z < report 08:30Z
-        'N-2': ('"2026-05-22T17:18:00"', '"2026-05-22T08:30:00+00:00"'),
-        # task 12:00Z > report naive 17:25 JST = 08:25Z
-        'N-3': ('"2026-05-22T12:00:00Z"', '"2026-05-22T17:25:00"'),
-        # task 08:20Z > report naive 08:25 JST = 前日 23:25Z
-        'N-4': ('"2026-05-22T08:20:00Z"', '"2026-05-22T08:25:00"'),
-    }
-    for i, (tid, (created, completed)) in enumerate(cases.items()):
-        _write(t / f'worker{i}.yaml', f'task_id: {tid}\ncreated_at: {created}\n', 2_000_000_000)
-        _write(r / f'worker{i}_report.yaml', f'task_id: {tid}\nstatus: completed\ncompleted_at: {completed}\n', 2_000)
-    assert _states(tmp_path) == {'N-1': 'done', 'N-2': 'done', 'N-3': 'active', 'N-4': 'active'}

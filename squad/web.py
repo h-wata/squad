@@ -2,24 +2,32 @@
 # ruff: noqa: CPY001
 """全 project の進捗を 1 画面で見る読み取り専用 Web ダッシュボード (Issue #76, stdlib only).
 
-正本は YAML (ADR 0007) なので、画面は読むだけ:
-  - YAML / dashboards/*.md は読むだけ、graph DB は `mode=ro` で開く (無ければ作らない)
-  - tmux は list-sessions / list-panes / capture-pane だけを呼ぶ (キー入力は送らない)
+読むのは `queue/.graph.db` と tmux だけ。task / report YAML は読まない:
+  - 状態 (running / blocked / done ...)、ゴールの組み分け、project 一覧は `squad graph sync` が DB に
+    入れたものをそのまま出す。`squad graph status` と同じ DB の値なので、2 つの判定は一致する
+  - DB は `mode=ro` で開く (無ければ作らない、書かない)。sync は今どおり watchd の仕事
+  - tmux は list-sessions / list-panes / capture-pane だけを呼ぶ (キー入力は送らない)。worker の状態は
+    `squad ls` と同じ squad.probe_worker で判定する
   - GET 以外は 405。全リクエストでトークンを検査する (未設定なら起動しない)
-  - pane の中身と YAML 由来の文字列は squad/mask.py を通してから返す
+  - pane の中身と DB 由来の文字列は squad/mask.py を通してから返す
 
 squad セッションの判定: start.sh が pane 0.5 に付けるタイトル "Aux-Shell" を持つセッション。
+worker の pane は squad/config.json の pane サフィックス (例 "0.1") をセッション名に付けたもの (squad ls と同じ)。
+config.json は graph sync が DB (meta.workers) に写したものを読む (web 自身はファイルを開かない)。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 import hmac
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 from typing import Any
@@ -27,14 +35,24 @@ from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
 from mask import mask
-from squad import yaml_shallow
+import squad
 
 SQUAD_PANE_TITLE = 'Aux-Shell'
-PANE_LINES = 40
-
-
-def iso(mtime: float) -> str:
-    return datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec='seconds')
+PANE_LINES = 300
+STATUS_LABEL = {'busy': '作業中', 'idle': '待機中', 'permission_wait': '許可待ち', 'unreachable': '停止'}
+DONE = ('done', 'verified')
+DETAIL_KEYS = (
+    'assigned_to',
+    'created_at',
+    'finished_at',
+    'description',
+    'verify_status',
+    'review',
+    'summary',
+    'pr_url',
+    'worker',
+    'evidence',
+)
 
 
 def _masked(obj: Any) -> Any:  # noqa: ANN401
@@ -47,106 +65,170 @@ def _masked(obj: Any) -> Any:  # noqa: ANN401
     return obj
 
 
-# ---------- project 一覧 ----------
+# ---------- graph DB (read-only) ----------
 
 
-def parse_iso8601(value: str) -> datetime | None:
-    """ISO8601 を UTC の aware datetime にする. scripts/measure_task_cost.py の同名関数と同じ扱い.
+class NotSyncedError(Exception):
+    """DB が無い、または schema が古い (squad graph sync がまだ)."""
 
-    Z 終端は +00:00、オフセット無し (naive) は worker が手元の時計で書いた値なのでローカル時刻として読む。
-    """
-    text = (value or '').strip()
-    if text.endswith('Z'):
-        text = text[:-1] + '+00:00'
+
+def _open(db_path: Path) -> sqlite3.Connection:
+    if not db_path.exists():
+        raise NotSyncedError(f'{db_path.name} がありません (squad graph sync が必要)')
+    conn = sqlite3.connect(f'{db_path.resolve().as_uri()}?mode=ro', uri=True)
     try:
-        return datetime.fromisoformat(text).astimezone(timezone.utc)
+        conn.execute('SELECT 1 FROM projects, meta LIMIT 0')
+    except sqlite3.Error as e:
+        conn.close()
+        raise NotSyncedError(f'{db_path.name} の schema が古い (squad graph sync が必要): {e}') from e
+    return conn
+
+
+def _query(db_path: Path, fn: Callable[[sqlite3.Connection], dict[str, Any]]) -> dict[str, Any]:
+    """DB を読み、synced_at を添えてマスクして返す。DB が使えなければ error を返す (画面に出す)."""
+    try:
+        conn = _open(db_path)
+    except NotSyncedError as e:
+        return {'synced_at': None, 'error': str(e)}
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'synced_at'").fetchone()
+        return _masked({'synced_at': row[0] if row else None, 'error': None, **fn(conn)})
+    finally:
+        conn.close()
+
+
+def _payload(text: str) -> dict[str, Any]:
+    try:
+        return json.loads(text)
     except ValueError:
-        return None
+        return {}
 
 
-# 同じ task_id に複数の結果があるときの優先順: worker の report > cross-review > verifier の verdict
-_RESULT_RANK = {'status': 2, 'verdict': 1, 'result': 0}
+def _worker_key(name: str) -> str:
+    """'w1' / 'worker1' / 'W1' を同じ worker として比べる."""
+    m = re.search(r'(\d+)$', name or '')
+    return f'w{m.group(1)}' if m else (name or '').lower()
 
 
-def _result_state(meta: dict[str, str]) -> tuple[int, str] | None:
-    """結果ファイル 1 つから (優先度, state)。report / review / verdict のどれでもなければ None."""
-    if 'status' in meta:
-        return _RESULT_RANK['status'], 'done' if meta['status'] == 'completed' else 'blocked'
-    if 'verdict' in meta:  # cross-review は approve でも request_changes でも、書いた時点で task は終わり
-        return _RESULT_RANK['verdict'], 'done'
-    if 'result' in meta:
-        return _RESULT_RANK['result'], 'done' if meta['result'] == 'pass' else 'blocked'
-    return None
+def _is_today(iso: str) -> bool:
+    try:
+        return datetime.fromisoformat(iso).astimezone().date() == datetime.now().astimezone().date()
+    except ValueError:
+        return False
 
 
-def projects_data(queue_dir: Path, dashboards_dir: Path) -> dict[str, Any]:
-    """tasks/ 直下の task と reports/ の結果を task_id で突き合わせて active / blocked / done を決める.
+def projects_data(db_path: Path) -> dict[str, Any]:
+    """1 project 1 行: active / blocked / 今日終わった件数、最新の結果、最終更新."""
 
-    結果は `<task>_report.yaml` に限らず worker4_review*.yaml や workerN_verdict.yaml にもあるので、
-    reports/*.yaml を全部読む。task より古い結果は数えない (同じ task_id の再発注を done にしない)。
-    新旧は task の発注時刻と report の completed_at (無ければ report の mtime) で比べる。発注時刻は task の
-    created_at と mtime の早い方。どちらも実際の発注より後ろにしかずれないため: mtime は一括更新される
-    ことがあり (mesh-mem の tasks/ は 2026-07-02 に全部更新された)、created_at は Dispatcher が丸めて
-    書くので実際の発注より後になることがある (SQUAD-257 は created_at 13:10、発注 13:04、review 13:09)。
-    created_at が無いときは task / report とも mtime で比べる。
-    """
-    out = []
-    for pj_dir in sorted(p for p in (queue_dir / 'projects').glob('*') if p.is_dir()):
-        reports = {p.name: p for p in (pj_dir / 'reports').glob('*.yaml')}
-        results: dict[str, list[tuple[datetime, datetime, int, str]]] = {}
-        for rep_path in reports.values():
-            rep = yaml_shallow(rep_path)
-            if rep.get('task_id') and (st := _result_state(rep)):
-                mtime = datetime.fromtimestamp(rep_path.stat().st_mtime, timezone.utc)
-                completed = parse_iso8601(rep.get('completed_at', '')) or mtime
-                results.setdefault(rep['task_id'], []).append((mtime, completed, *st))
-        tasks = []
-        for task in sorted((pj_dir / 'tasks').glob('*.yaml')):
-            meta = yaml_shallow(task)
-            worker = meta.get('assigned_to') or task.stem
-            issued = task.stat().st_mtime
-            task_mtime = datetime.fromtimestamp(issued, timezone.utc)
-            created = parse_iso8601(meta.get('created_at', ''))
-            created = min(created, task_mtime) if created else None
-            found = [
-                (rank, mtime, st)
-                for mtime, completed, rank, st in results.get(meta.get('task_id', ''), [])
-                if (completed >= created if created else mtime >= task_mtime)
-            ]
-            state = max(found)[2] if found else 'active'
-            tasks.append(
+    def fn(conn: sqlite3.Connection) -> dict[str, Any]:
+        counts: dict[str, dict[str, int]] = {}
+        for pj, state, payload in conn.execute("SELECT project, state, payload_json FROM nodes WHERE kind = 'intent'"):
+            c = counts.setdefault(pj, {'active': 0, 'blocked': 0, 'done_today': 0})
+            if state == 'running':
+                c['active'] += 1
+            elif state == 'blocked':
+                c['blocked'] += 1
+            elif state in DONE and _is_today(_payload(payload).get('finished_at', '')):
+                c['done_today'] += 1
+        out = []
+        for pj, session, latest, updated_at in conn.execute(
+            'SELECT project, session, latest_result, updated_at FROM projects ORDER BY updated_at DESC, project'
+        ):
+            row = conn.execute('SELECT state, title, payload_json FROM nodes WHERE node_id = ?', (latest,)).fetchone()
+            result = None
+            if row:
+                p = _payload(row[2])
+                result = {
+                    'node_id': latest,
+                    'task_id': p.get('task_id', ''),
+                    'status': row[0],
+                    'summary': row[1],
+                    'at': p.get('reported_at', ''),
+                }
+            out.append(
                 {
-                    'task_id': meta.get('task_id', ''),
-                    'title': meta.get('title', ''),
-                    'worker': worker,
-                    'state': state,
-                    'issued_at': iso(issued),
+                    'name': pj,
+                    'session': session,
+                    **counts.get(pj, {'active': 0, 'blocked': 0, 'done_today': 0}),
+                    'latest_result': result,
+                    'updated_at': updated_at,
                 }
             )
-        latest = max(reports.values(), key=lambda p: p.stat().st_mtime, default=None)
-        latest_report = None
-        if latest:
-            rep = yaml_shallow(latest)
-            latest_report = {
-                'file': latest.name,
-                'task_id': rep.get('task_id', ''),
-                'status': rep.get('status', ''),
-                'summary': mask(rep.get('summary', ''))[:200],  # 切ってからだと token の一部が残る
-                'mtime': iso(latest.stat().st_mtime),
-            }
-        dash = dashboards_dir / f'{pj_dir.name}.md'
-        out.append(
-            {
-                'name': pj_dir.name,
-                'tasks': tasks,
-                'latest_report': latest_report,
-                'dashboard_mtime': iso(dash.stat().st_mtime) if dash.exists() else None,
-            }
+        return {'projects': out}
+
+    return _query(db_path, fn)
+
+
+def goals_data(db_path: Path, days: int) -> dict[str, Any]:
+    """ゴール一覧 (新しい順)。days > 0 なら最終更新がその日数以内のものだけ."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec='seconds') if days > 0 else ''
+
+    def fn(conn: sqlite3.Connection) -> dict[str, Any]:
+        rows = conn.execute(
+            'SELECT node_id, project, state, title, payload_json, updated_at FROM nodes '
+            "WHERE kind = 'goal' AND updated_at >= ? ORDER BY updated_at DESC, node_id",
+            (since,),
         )
-    return _masked({'projects': out})
+        goals = [
+            {
+                'node_id': node_id,
+                'project': project,
+                'state': state,
+                'title': title,
+                'tasks': len(_payload(payload).get('members', [])),
+                'updated_at': updated_at,
+            }
+            for node_id, project, state, title, payload, updated_at in rows
+        ]
+        return {'days': days, 'goals': goals}
+
+    return _query(db_path, fn)
 
 
-# ---------- tmux pane ----------
+def graph_data(db_path: Path, goal: str) -> dict[str, Any]:
+    """ゴール 1 つ分: goal -> intent -> result -> fact。ノードはクリック時の横パネル用の中身を持つ."""
+
+    def fn(conn: sqlite3.Connection) -> dict[str, Any]:
+        ids, frontier = {goal}, {goal}
+        edges: set[tuple[str, str, str]] = set()
+        while frontier:  # spawns / yields を下る。derived_from は辿らない (他のゴールへ広がるため)
+            marks = ','.join('?' * len(frontier))
+            rows = conn.execute(
+                f"SELECT src_id, rel, dst_id FROM edges WHERE rel != 'derived_from' AND src_id IN ({marks})",  # noqa: S608
+                sorted(frontier),
+            ).fetchall()
+            edges.update(rows)
+            frontier = {r[2] for r in rows} - ids
+            ids |= frontier
+        marks = ','.join('?' * len(ids))
+        found: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}  # node_id -> (画面用, payload)
+        for node_id, kind, state, title, payload, updated_at in conn.execute(
+            f'SELECT node_id, kind, state, title, payload_json, updated_at FROM nodes WHERE node_id IN ({marks})',  # noqa: S608
+            sorted(ids),
+        ):
+            p = _payload(payload)
+            node = {'node_id': node_id, 'kind': kind, 'state': state, 'title': title, 'updated_at': updated_at}
+            found[node_id] = (node | {'detail': {k: p[k] for k in DETAIL_KEYS if p.get(k)}}, p)
+        for node, p in found.values():  # intent の横パネルに最新 result の要約も出す
+            latest = found.get(p.get('latest_result', ''))
+            if node['kind'] == 'intent' and latest and latest[1].get('summary'):
+                node['detail']['result_summary'] = latest[1]['summary']
+        edges.update(
+            conn.execute(
+                f"SELECT src_id, rel, dst_id FROM edges WHERE rel = 'derived_from' AND src_id IN ({marks})",  # noqa: S608
+                sorted(ids),
+            ).fetchall()
+        )
+        return {
+            'goal': goal,
+            'nodes': [found[k][0] for k in sorted(found)],
+            'edges': [{'src': s, 'rel': r, 'dst': d} for s, r, d in sorted(edges) if s in found and d in found],
+        }
+
+    return _query(db_path, fn)
+
+
+# ---------- tmux ----------
 
 
 def _tmux_lines(*args: str) -> list[str] | None:
@@ -155,62 +237,85 @@ def _tmux_lines(*args: str) -> list[str] | None:
     return r.stdout.splitlines() if r.returncode == 0 else None
 
 
-def panes_data() -> dict[str, Any]:
+def _workers(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    """squad/config.json の worker 定義 (graph sync が meta.workers に写したもの)."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'workers'").fetchone()
+    return _payload(row[0]) if row else {}
+
+
+def squad_sessions() -> list[str]:
+    return [
+        name
+        for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []
+        if SQUAD_PANE_TITLE in (_tmux_lines('list-panes', '-s', '-t', name, '-F', '#{pane_title}') or [])
+    ]
+
+
+def _pane(session: str, suffix: str) -> str:
+    return suffix if ':' in suffix else f'{session}:{suffix}'
+
+
+def sessions_data(db_path: Path) -> dict[str, Any]:
+    """起動中の squad セッションごとに、担当 project と各 worker の状態・担当タスク."""
+
+    def fn(conn: sqlite3.Connection) -> dict[str, Any]:
+        return {
+            'workers': _workers(conn),
+            'owners': conn.execute('SELECT project, session FROM projects').fetchall(),
+            'tasks': conn.execute(
+                "SELECT node_id, project, state, title, payload_json FROM nodes WHERE kind = 'intent'"
+            ).fetchall(),
+        }
+
+    db = _query(db_path, fn)
+    current = {}  # (project, worker) -> tasks/ 直下にある task (= その worker が今持っている task)
+    for node_id, project, state, title, payload in db.pop('tasks', []):
+        p = _payload(payload)
+        if p.get('current'):
+            current[project, _worker_key(p.get('assigned_to', ''))] = {
+                'node_id': node_id,
+                'task_id': node_id.split('/', 1)[-1],
+                'project': project,
+                'state': state,
+                'title': title,
+            }
+    owners = db.pop('owners', [])
+    workers = db.pop('workers', {})
     sessions = []
-    for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []:
-        rows = [
-            ln.split('\t', 1)
-            for ln in _tmux_lines(
-                'list-panes', '-s', '-t', name, '-F', '#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}'
-            )
-            or []
-        ]
-        if not any(len(r) == 2 and r[1] == SQUAD_PANE_TITLE for r in rows):
-            continue
-        panes = []
-        for target, title in (r for r in rows if len(r) == 2):
-            # 履歴全体 (-S -) をマスクしてから末尾を切る。可視範囲や末尾だけをマスクすると、PRIVATE KEY の
-            # BEGIN 行が範囲外に出て本文が素通しになる。ponytail: history-limit を超えて捨てられた BEGIN 行は救えない
-            lines = _tmux_lines('capture-pane', '-p', '-S', '-', '-t', target)
-            text = mask('\n'.join(lines or []).rstrip('\n'))
-            panes.append(
+    for name in squad_sessions():
+        projects = sorted(pj for pj, s in owners if s == name)
+        rows = []
+        for w, meta in workers.items():
+            pane = _pane(name, meta.get('pane', ''))
+            st = squad.probe_worker(pane)
+            rows.append(
                 {
-                    'target': target,
-                    'title': title,
-                    'ok': lines is not None,
-                    'text': '\n'.join(text.split('\n')[-PANE_LINES:]),
+                    'worker': w,
+                    'pane': pane,
+                    'agent': meta.get('agent', ''),
+                    'status': st['status'],
+                    'label': STATUS_LABEL.get(st['status'], st['status']),
+                    'model': st.get('model'),
+                    'context_pct': st.get('context_pct'),
+                    'last_line': st.get('last_line', ''),
+                    'tasks': [current[pj, _worker_key(w)] for pj in projects if (pj, _worker_key(w)) in current],
                 }
             )
-        sessions.append({'name': name, 'panes': panes})
-    return _masked({'sessions': sessions})
+        sessions.append({'name': name, 'projects': projects, 'workers': rows})
+    return _masked({**db, 'sessions': sessions})
 
 
-# ---------- 探索グラフ ----------
-
-
-def graph_data(db_path: Path, project: str) -> dict[str, Any]:
-    if not db_path.exists():
-        return {'nodes': [], 'edges': []}
-    conn = sqlite3.connect(f'{db_path.resolve().as_uri()}?mode=ro', uri=True)
-    try:
-        nodes = [
-            dict(zip(('node_id', 'kind', 'state', 'title', 'updated_at'), r))
-            for r in conn.execute(
-                'SELECT node_id, kind, state, title, updated_at FROM nodes WHERE project = ? ORDER BY node_id',
-                (project,),
-            )
-        ]
-        ids = {n['node_id'] for n in nodes}
-        edges = [
-            dict(zip(('src', 'rel', 'dst'), r))
-            for r in conn.execute('SELECT src_id, rel, dst_id FROM edges ORDER BY src_id, dst_id')
-            if r[0] in ids and r[2] in ids
-        ]
-    except sqlite3.Error:
-        return {'nodes': [], 'edges': []}
-    finally:
-        conn.close()
-    return _masked({'nodes': nodes, 'edges': edges})
+def pane_data(db_path: Path, target: str) -> dict[str, Any]:
+    """Squad セッションの worker pane 1 つの中身 (クリックで広く開く用)。それ以外の pane は返さない."""
+    workers = _query(db_path, lambda conn: {'workers': _workers(conn)}).get('workers', {})
+    allowed = {_pane(s, m.get('pane', '')) for s in squad_sessions() for m in workers.values()}
+    if target not in allowed:
+        return {'target': target, 'ok': False, 'text': '(squad の worker pane ではありません)'}
+    # 履歴全体 (-S -) をマスクしてから末尾を切る。可視範囲や末尾だけをマスクすると、PRIVATE KEY の
+    # BEGIN 行が範囲外に出て本文が素通しになる。ponytail: history-limit を超えて捨てられた BEGIN 行は救えない
+    lines = _tmux_lines('capture-pane', '-p', '-S', '-', '-t', target)
+    text = mask('\n'.join(lines or []).rstrip('\n'))
+    return {'target': target, 'ok': lines is not None, 'text': '\n'.join(text.split('\n')[-PANE_LINES:])}
 
 
 # ---------- HTTP ----------
@@ -240,16 +345,25 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized(query):
             self._send(401, b'{"error": "unauthorized"}')
             return
-        srv = self.server
+        db = self.server.db_path
+
+        def arg(key: str, default: str = '') -> str:
+            return (query.get(key) or [default])[0]
+
         if url.path == '/':
             self._send(200, PAGE.encode(), 'text/html; charset=utf-8')
             return
-        if url.path == '/api/projects':
-            data = projects_data(srv.queue_dir, srv.dashboards_dir)
-        elif url.path == '/api/panes':
-            data = panes_data()
+        if url.path == '/api/sessions':
+            data = sessions_data(db)
+        elif url.path == '/api/pane':
+            data = pane_data(db, arg('target'))
+        elif url.path == '/api/projects':
+            data = projects_data(db)
+        elif url.path == '/api/goals':
+            days = arg('days', '30')
+            data = goals_data(db, int(days) if days.isdigit() else 30)
         elif url.path == '/api/graph':
-            data = graph_data(srv.queue_dir / '.graph.db', (query.get('project') or [''])[0])
+            data = graph_data(db, arg('goal'))
         else:
             self._send(404, b'{"error": "not found"}')
             return
@@ -267,101 +381,200 @@ class Handler(BaseHTTPRequestHandler):
         super().log_message(fmt, *args)
 
 
-def make_server(host: str, port: int, token: str, queue_dir: Path, dashboards_dir: Path) -> ThreadingHTTPServer:
+def make_server(host: str, port: int, token: str, db_path: Path) -> ThreadingHTTPServer:
     if not token:
         raise ValueError('token is required')
     srv = ThreadingHTTPServer((host, port), Handler)
     srv.token = token
-    srv.queue_dir = queue_dir
-    srv.dashboards_dir = dashboards_dir
+    srv.db_path = db_path
     return srv
 
 
-PAGE = """<!DOCTYPE html>
+# Cytoscape.js は版を URL に固定する。階層レイアウトは同梱の breadthfirst を使う (拡張を足さない)
+CYTOSCAPE_URL = 'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js'
+
+PAGE = (
+    """<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>squad dashboard</title>
+<script src="CYTOSCAPE_URL"></script>
 <style>
-body{font-family:sans-serif;margin:0;background:#f4f4f4;color:#222}
-nav{background:#222;padding:.4em}nav button{margin-right:.3em}
-section{padding:.6em}.row{display:flex;gap:.6em;overflow-x:auto;align-items:flex-start}
-.card{background:#fff;border-radius:6px;padding:.6em;min-width:260px;max-width:340px;flex:0 0 auto}
-.card h3{margin:.2em 0}.small{font-size:.8em;color:#666}
-.active{color:#06c}.blocked{color:#c00;font-weight:bold}.done{color:#888}
-pre{background:#111;color:#ddd;padding:.4em;font-size:11px;overflow:auto;max-height:22em;white-space:pre}
-svg text{font-size:11px}
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;margin:0;background:#f5f6f8;color:#1f2328;font-size:14px}
+nav{display:flex;align-items:center;gap:.4em;background:#24292f;padding:.5em .8em;color:#fff}
+nav button{background:none;border:1px solid transparent;color:#d0d7de;padding:.35em .9em;border-radius:6px;
+  cursor:pointer;font-size:14px}
+nav button.on{background:#fff;color:#24292f}
+#sync{margin-left:auto;font-size:12px;color:#d0d7de}
+main{padding:1em}
+.err{background:#ffebe9;color:#82071e;padding:.5em .8em;border-radius:6px;margin-bottom:1em}
+.sess{background:#fff;border:1px solid #d0d7de;border-radius:8px;margin-bottom:1em;overflow:hidden}
+.sess h2{font-size:16px;margin:0;padding:.6em .8em;border-bottom:1px solid #d0d7de}
+.sess h2 small{font-weight:normal;color:#57606a;margin-left:.8em}
+table{border-collapse:collapse;width:100%;background:#fff}
+th,td{text-align:left;padding:.45em .7em;border-bottom:1px solid #eaeef2;vertical-align:top}
+th{font-size:12px;color:#57606a;font-weight:600;background:#f6f8fa}
+tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
+.badge{display:inline-block;padding:.1em .6em;border-radius:10px;font-size:12px;white-space:nowrap}
+.busy,.running{background:#ddf4ff;color:#0550ae}.idle{background:#eaeef2;color:#57606a}
+.permission_wait{background:#fff8c5;color:#7d4e00}.unreachable,.blocked{background:#ffebe9;color:#82071e}
+.done,.completed{background:#dafbe1;color:#116329}.verified{background:#116329;color:#fff}
+.unreported,.unknown{background:#eaeef2;color:#57606a}
+.mono{font-family:ui-monospace,monospace;font-size:12px;color:#57606a}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.sum{max-width:48em;color:#424a53}
+#modal{position:fixed;inset:3%;background:#0d1117;color:#e6edf3;border-radius:8px;display:none;flex-direction:column}
+#modal header{display:flex;justify-content:space-between;padding:.5em .8em;border-bottom:1px solid #30363d}
+#modal pre{flex:1;margin:0;padding:.8em;overflow:auto;font-size:12px;white-space:pre-wrap}
+#graph:not([hidden]){display:flex;gap:1em;height:calc(100vh - 5em)}
+#goals{width:320px;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px}
+#goals .g{padding:.5em .7em;border-bottom:1px solid #eaeef2;cursor:pointer}
+#goals .g:hover{background:#f6f8fa}#goals .g.on{background:#ddf4ff}
+#goals .g .t{margin:.2em 0}
+#cy{flex:1;background:#fff;border:1px solid #d0d7de;border-radius:8px}
+#side{width:380px;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.8em}
+#side pre{white-space:pre-wrap;font-size:12px;background:#f6f8fa;padding:.5em;border-radius:6px}
 </style></head><body>
-<nav><button data-v="projects">Projects</button><button data-v="panes">Workers</button>
-<button data-v="graph">Graph</button> <select id="pj"></select> <span id="ts" class="small"></span></nav>
-<section id="projects"></section><section id="panes" hidden></section><section id="graph" hidden></section>
+<nav><button data-v="sessions" class="on">稼働状況</button><button data-v="projects">Projects</button>
+<button data-v="graph">Graph</button><span id="sync"></span></nav>
+<main><div id="err" class="err" hidden></div>
+<section id="sessions"></section><section id="projects" hidden></section>
+<section id="graph" hidden><div id="goals"></div><div id="cy"></div>
+<div id="side"><p class="mono">ノードをクリックすると内容が出ます</p></div></section></main>
+<div id="modal"><header><span id="mtitle" class="mono"></span><button onclick="closeModal()">閉じる</button></header>
+<pre id="mtext"></pre></div>
 <script>
-const token = new URLSearchParams(location.search).get('token') || '';
-const H = {headers: {Authorization: 'Bearer ' + token}};
-const api = p => fetch(p, H).then(r => r.json());
+const params = new URLSearchParams(location.search), token = params.get('token') || '';
+const api = p => fetch(p, {headers: {Authorization: 'Bearer ' + token}}).then(r => r.json());
 const el = (tag, cls, text) => { const e = document.createElement(tag);
-  if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
-let view = 'projects';
-document.querySelectorAll('nav button').forEach(b => b.onclick = () => { view = b.dataset.v;
-  for (const s of document.querySelectorAll('section')) s.hidden = s.id !== view; refresh(); });
-document.getElementById('pj').onchange = () => refresh();
-
-async function projects() {
-  const d = await api('/api/projects'), root = document.getElementById('projects');
-  const sel = document.getElementById('pj');
-  const row = el('div', 'row');
-  const cur = sel.value; sel.replaceChildren();
-  for (const p of d.projects) {
-    sel.append(new Option(p.name, p.name, false, p.name === cur));
-    const c = el('div', 'card'); c.append(el('h3', '', p.name));
-    for (const t of p.tasks.filter(t => t.state !== 'done'))
-      c.append(el('div', t.state, `[${t.state}] ${t.worker} ${t.task_id} ${t.title}`));
-    const r = p.latest_report;
-    if (r) c.append(el('div', 'small', `report: ${r.task_id} ${r.status} (${r.mtime}) ${r.summary}`));
-    c.append(el('div', 'small', `dashboard: ${p.dashboard_mtime || '-'}`));
-    row.append(c);
-  }
-  root.replaceChildren(row);
+  if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = text; return e; };
+const badge = (s, label) => el('span', 'badge ' + s, label || s);
+const local = iso => iso ? new Date(iso).toLocaleString('ja-JP', {hour12: false}) : '-';
+const row = cells => { const tr = el('tr'); for (const c of cells) { const td = el('td');
+  if (c instanceof Node) td.append(c); else td.textContent = c ?? ''; tr.append(td); } return tr; };
+const table = (heads, rows) => { const t = el('table'), h = el('tr');
+  for (const x of heads) h.append(el('th', '', x)); t.append(h); for (const r of rows) t.append(r); return t; };
+let view = params.get('view') || 'sessions', goal = params.get('goal') || '', goalDays = '30', cy = null;
+function show(v) { view = v;
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x.dataset.v === v));
+  for (const s of document.querySelectorAll('section')) s.hidden = s.id !== v; refresh(); }
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => show(b.dataset.v));
+function meta(d) {
+  document.getElementById('sync').textContent = 'DB 最終 sync: ' + local(d.synced_at);
+  const e = document.getElementById('err'); e.hidden = !d.error; e.textContent = d.error || '';
+}
+function closeModal() { document.getElementById('modal').style.display = 'none'; }
+async function openPane(target) {
+  const d = await api('/api/pane?target=' + encodeURIComponent(target));
+  document.getElementById('mtitle').textContent = target;
+  const pre = document.getElementById('mtext'); pre.textContent = d.ok ? d.text : '(capture-pane に失敗) ' + d.text;
+  document.getElementById('modal').style.display = 'flex'; pre.scrollTop = pre.scrollHeight;
 }
 
-async function panes() {
-  const d = await api('/api/panes'), root = document.getElementById('panes');
+async function sessions() {
+  const d = await api('/api/sessions'), root = document.getElementById('sessions'); meta(d);
   root.replaceChildren();
   if (!d.sessions.length) root.append(el('p', '', 'squad セッションが見つかりません'));
   for (const s of d.sessions) {
-    root.append(el('h3', '', s.name)); const row = el('div', 'row');
-    for (const p of s.panes) { const c = el('div', 'card'); c.append(el('div', 'small', `${p.target} ${p.title}`));
-      c.append(el('pre', '', p.ok ? p.text : '(capture-pane に失敗)')); row.append(c); }
-    root.append(row);
+    const box = el('div', 'sess'), h = el('h2', '', s.name);
+    h.append(el('small', '', '担当 project: ' + (s.projects.join(', ') || 'なし'))); box.append(h);
+    box.append(table(['worker', '状態', '担当タスク', 'model / ctx', '最終行'], s.workers.map(w => {
+      const task = el('div');
+      for (const t of w.tasks) { const x = el('div'); x.append(badge(t.state), ' ',
+        el('span', 'mono', t.task_id + ' '), el('span', '', t.title)); task.append(x); }
+      if (!w.tasks.length) task.textContent = '-';
+      const tr = row([el('span', '', w.worker + ' (' + w.agent + ')'), badge(w.status, w.label), task,
+        (w.model || '-') + ' / ' + (w.context_pct == null ? '-' : w.context_pct + '%'),
+        el('span', 'mono', w.last_line)]);
+      tr.className = 'click'; tr.title = 'クリックで pane を開く'; tr.onclick = () => openPane(w.pane); return tr;
+    })));
+    root.append(box);
   }
 }
 
-const KINDS = ['goal', 'intent', 'result', 'fact'];
-async function graph() {
-  const pj = document.getElementById('pj').value, root = document.getElementById('graph');
-  if (!pj) return;
-  const d = await api('/api/graph?project=' + encodeURIComponent(pj));
-  const NS = 'http://www.w3.org/2000/svg', W = 260, RH = 18, pos = {}, cnt = [0, 0, 0, 0];
-  for (const n of d.nodes) { const k = KINDS.indexOf(n.kind); if (k < 0) continue;
-    pos[n.node_id] = [k * W + 10, cnt[k]++ * RH + 30, n]; }
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('width', KINDS.length * W); svg.setAttribute('height', Math.max(...cnt) * RH + 40);
-  const add = (tag, attrs, text) => { const e = document.createElementNS(NS, tag);
-    for (const k in attrs) e.setAttribute(k, attrs[k]); if (text) e.textContent = text; svg.append(e); return e; };
-  KINDS.forEach((k, i) => add('text', {x: i * W + 10, y: 14, 'font-weight': 'bold'}, k));
-  for (const e of d.edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b) continue;
-    add('line', {x1: a[0] + W - 20, y1: a[1] - 4, x2: b[0], y2: b[1] - 4, stroke: '#aaa'}); }
-  for (const id in pos) { const [x, y, n] = pos[id];
-    add('text', {x, y, class: n.state}, `${id.split(/[:/]/).pop().slice(0, 24)} ${n.state}`)
-      .append(Object.assign(document.createElementNS(NS, 'title'), {textContent: `${id}\\n${n.title}`})); }
-  root.replaceChildren(svg);
+async function projects() {
+  const d = await api('/api/projects'), root = document.getElementById('projects'); meta(d);
+  root.replaceChildren(table(['project', 'session', 'active', 'blocked', '今日終わった', '最新の結果', '最終更新'],
+    (d.projects || []).map(p => { const r = p.latest_result, res = el('div', 'sum');
+      if (r) res.append(badge(r.status), ' ', el('span', 'mono', r.task_id + ' '), r.summary);
+      else res.textContent = '-';
+      return row([el('b', '', p.name), p.session || '-', el('span', 'num', String(p.active)),
+        el('span', 'num', String(p.blocked)), el('span', 'num', String(p.done_today)), res,
+        local(p.updated_at)]); })));
+}
+
+async function goals() {
+  const d = await api('/api/goals?days=' + goalDays), root = document.getElementById('goals'); meta(d);
+  root.replaceChildren();
+  const sel = el('select'); for (const [v, t] of [['30', '直近 30 日'], ['90', '直近 90 日'], ['0', 'すべて']])
+    sel.append(new Option(t, v, false, v === goalDays));
+  sel.onchange = () => { goalDays = sel.value; goals(); };
+  const head = el('div', 'g'); head.append(sel, el('span', 'mono', ' ' + (d.goals || []).length + ' 件'));
+  root.append(head);
+  if (!goal && d.goals && d.goals.length) goal = d.goals[0].node_id;
+  for (const g of d.goals || []) {
+    const x = el('div', 'g' + (g.node_id === goal ? ' on' : '')); x.append(badge(g.state), ' ',
+      el('span', 'mono', g.project + ' / ' + g.tasks + ' task / ' + local(g.updated_at)), el('div', 't', g.title));
+    x.onclick = () => { goal = g.node_id; goals(); drawGraph(); }; root.append(x);
+  }
+}
+
+const COLOR = {running: '#0969da', blocked: '#cf222e', done: '#1a7f37', verified: '#116329', completed: '#1a7f37',
+  confirmed: '#1a7f37', falsified: '#cf222e'};
+const SHAPE = {goal: 'round-rectangle', intent: 'round-rectangle', result: 'ellipse', fact: 'diamond'};
+function label(n) {
+  const id = n.kind === 'intent' ? n.node_id.split('/').pop() : n.kind === 'goal' ? '' : n.kind;
+  const t = n.title.length > 18 ? n.title.slice(0, 18) + '…' : n.title;
+  return id ? id + '\\n' + t : t;
+}
+async function drawGraph() {
+  if (!goal) return;
+  if (typeof cytoscape === 'undefined') { const e = document.getElementById('err'); e.hidden = false;
+    e.textContent = 'Cytoscape.js を CDN から読めませんでした'; return; }
+  const d = await api('/api/graph?goal=' + encodeURIComponent(goal)); meta(d);
+  const els = d.nodes.map(n => ({data: {id: n.node_id, label: label(n), kind: n.kind,
+    color: COLOR[n.state] || '#8c959f', n}}));
+  for (const e of d.edges) els.push({data: {id: e.src + '>' + e.dst, source: e.src, target: e.dst, rel: e.rel}});
+  if (cy) cy.destroy();
+  cy = cytoscape({container: document.getElementById('cy'), elements: els, wheelSensitivity: 0.3,
+    layout: {name: 'breadthfirst', directed: true, roots: [goal], spacingFactor: 1.1, padding: 20},
+    style: [
+      {selector: 'node', style: {label: 'data(label)', 'text-wrap': 'wrap', 'text-valign': 'center',
+        'font-size': 12, shape: e => SHAPE[e.data('kind')], width: 150, height: 44,
+        'background-color': '#fff', 'border-width': 2, 'border-color': 'data(color)', color: '#1f2328'}},
+      {selector: 'node[kind = "goal"]', style: {'background-color': '#24292f', color: '#fff', width: 170}},
+      {selector: 'node[kind = "fact"]', style: {width: 90, height: 50}},
+      {selector: 'node:selected', style: {'border-width': 4, 'border-color': '#bf8700'}},
+      {selector: 'edge', style: {width: 1.5, 'line-color': '#afb8c1', 'target-arrow-color': '#afb8c1',
+        'target-arrow-shape': 'triangle', 'curve-style': 'bezier'}},
+      {selector: 'edge[rel = "derived_from"]', style: {'line-style': 'dashed'}}]});
+  cy.on('tap', 'node', ev => side(ev.target.data('n')));
+  const pick = params.get('node');
+  const first = d.nodes.find(n => n.node_id === pick) || d.nodes.find(n => n.node_id === goal);
+  if (pick && cy.getElementById(pick).length) cy.getElementById(pick).select();
+  side(first);
+}
+const NAMES = {result_summary: '結果の要約', description: '内容', summary: '要約', evidence: '根拠',
+  assigned_to: '担当', created_at: '作成', finished_at: '終了', verify_status: 'verify', review: 'review',
+  pr_url: 'PR', worker: 'worker'};
+function side(n) {
+  const root = document.getElementById('side'); root.replaceChildren();
+  if (!n) return;
+  root.append(el('div', 'mono', n.node_id)); const h = el('h3', '', ''); h.append(badge(n.state), ' ', n.title);
+  root.append(h, el('div', 'mono', '更新: ' + local(n.updated_at)));
+  for (const k in NAMES) {
+    const v = n.detail[k]; if (!v) continue; root.append(el('h4', '', NAMES[k]));
+    root.append(String(v).length > 60 || String(v).includes('\\n') ? el('pre', '', v) : el('div', '', v));
+  }
 }
 
 async function refresh() {
-  try { if (view === 'projects' || !document.getElementById('pj').value) await projects();
-    if (view === 'panes') await panes(); if (view === 'graph') await graph();
-    document.getElementById('ts').textContent = new Date().toLocaleTimeString();
-  } catch (e) { document.getElementById('ts').textContent = 'error: ' + e; }
+  try { if (view === 'sessions') await sessions(); if (view === 'projects') await projects();
+    if (view === 'graph') { await goals(); if (!cy) await drawGraph(); }
+  } catch (e) { const x = document.getElementById('err'); x.hidden = false; x.textContent = 'error: ' + e; }
 }
-refresh(); setInterval(refresh, 5000);
+show(view); setInterval(() => { if (view !== 'graph') refresh(); }, 5000);
 </script></body></html>
 """
+).replace('CYTOSCAPE_URL', CYTOSCAPE_URL)

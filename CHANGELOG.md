@@ -4,10 +4,21 @@
 
 ### Added
 
-- `squad web`: 全 project の進捗 (active / blocked のタスク、担当、直近の report、
-  dashboard の最終更新)、squad セッションの各 pane の内容、探索グラフを 1 画面で見る
-  読み取り専用の Web ダッシュボード (#76)。stdlib のみ。トークン (`SQUAD_WEB_TOKEN`
-  か `--token`) が無いと起動しない。pane の中身は `squad/mask.py` を通してから返す。
+- `squad web`: 読み取り専用の Web ダッシュボード (#76)。最初の画面はセッション別の稼働状況
+  (担当 project、worker ごとの状態と担当タスク。状態は `squad ls` と同じ判定、pane はクリックで
+  開く)。ほかに Projects の縦表 (active / blocked / 今日終わった件数、最新の結果、最終更新) と、
+  ゴール単位の Graph (Cytoscape.js 3.30.2、既定は直近 30 日のゴール一覧) を持つ。読むのは
+  `queue/.graph.db` (read-only) と tmux だけで、YAML は読まない。画面に DB の最終 sync 時刻を出す。
+  stdlib のみ。トークン (`SQUAD_WEB_TOKEN` か `--token`) が無いと起動しない。DB と pane の文字列は
+  `squad/mask.py` を通してから返す。
+
+### Changed
+
+- `squad graph sync` の状態判定 (#76): task と結果の新旧を `created_at` / `completed_at` で比べる
+  (無ければ mtime)、cross-review の verdict だけの report と verifier の verdict も結果として数える。
+  task はゴールに組み分ける (parent_issue の Issue、無ければ task_id の頭が同じ派生 task をまとめる)。
+  ゴールは配下が全部 done なら done。DB に project 一覧 (担当 session・最新の結果・最終更新) と
+  sync 時刻を持つ。schema を 2 に上げたので、古い DB は次の sync で作り直される。
 
 ### Removed
 

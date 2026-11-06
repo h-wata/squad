@@ -213,26 +213,20 @@ def yaml_shallow(path: Path) -> dict[str, str]:
 # ---------- subcommands ----------
 
 
+def probe_worker(pane: str) -> dict:
+    """Pane 1 つの状態 (idle / busy / permission_wait / unreachable)。squad ls と squad web が共有する."""
+    reachable, tail = tmux_capture(pane)
+    if not reachable:
+        return {'status': 'unreachable', 'context_pct': None, 'model': None, 'last_line': tail[:200]}
+    return detect_status(tail)
+
+
 def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec='seconds')
     rows = []
     for w, meta in cfg.get('workers', {}).items():
         pane = meta['pane']
-        reachable, tail = tmux_capture(pane)
-        if not reachable:
-            entry = {
-                'worker': w,
-                'pane': pane,
-                'agent': meta.get('agent'),
-                'status': 'unreachable',
-                'context_pct': None,
-                'model': None,
-                'last_line': tail[:200],
-                'updated_at': now,
-            }
-        else:
-            det = detect_status(tail)
-            entry = {'worker': w, 'pane': pane, 'agent': meta.get('agent'), **det, 'updated_at': now}
+        entry = {'worker': w, 'pane': pane, 'agent': meta.get('agent'), **probe_worker(pane), 'updated_at': now}
         # 既存 state があり、hook 由来の last_event があれば保持
         prev = load_state(w)
         if prev and prev.get('last_event'):
@@ -518,7 +512,7 @@ def cmd_web(args: argparse.Namespace, _cfg: dict) -> int:
             'squad web: トークンが必要です (SQUAD_WEB_TOKEN か --token)。LAN に公開するため未設定では起動しません'
         )
     queue_dir = Path(args.queue_dir) if args.queue_dir else REPO_ROOT / 'queue'
-    srv = web.make_server(args.host, args.port, token, queue_dir, REPO_ROOT / 'dashboards')
+    srv = web.make_server(args.host, args.port, token, queue_dir / '.graph.db')
     print(f'squad web: http://{args.host}:{srv.server_address[1]}/?token=<token> (読み取り専用, Ctrl-C で停止)')
     try:
         srv.serve_forever()
@@ -614,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     p_web.add_argument('--host', default='0.0.0.0', help='既定 0.0.0.0 (LAN から開ける)')  # noqa: S104
     p_web.add_argument('--port', type=int, default=8765)
     p_web.add_argument('--token', help='アクセストークン (既定: env SQUAD_WEB_TOKEN。未設定なら起動しない)')
-    p_web.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})')
+    p_web.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})。読むのは .graph.db だけ')
     p_web.set_defaults(func=cmd_web)
 
     args = ap.parse_args(argv)

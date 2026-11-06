@@ -217,7 +217,7 @@ SQUAD_DISPATCHER_MODEL=sonnet ./start.sh <workspace_path>
 | `squad/squad.py` | worker 状態確認・タスク割当・dashboard 生成用の軽量 CLI (stdlib only) |
 | `squad/graph.py` | task / report YAML から探索グラフの派生索引 `queue/.graph.db` を作る (`squad graph sync / why / show / status`) |
 | `squad/trace_search.py` / `squad/mask.py` | worker の Claude Code transcript を横断検索する `squad trace search / get`。出力は `pi-log-triage.sh` と同じ規則で secret をマスクする |
-| `squad/web.py` | 全 project の進捗・pane・探索グラフを見る読み取り専用 Web ダッシュボード。`SQUAD_WEB_TOKEN=<token> python3 squad/squad.py web` で起動し、LAN の別端末から `http://<host>:8765/?token=<token>` で開く。トークン必須、GET のみ |
+| `squad/web.py` | セッション別の稼働状況・Projects の表・ゴール単位の探索グラフを見る読み取り専用 Web ダッシュボード (`queue/.graph.db` と tmux だけを読む)。`SQUAD_WEB_TOKEN=<token> python3 squad/squad.py web` で起動し、LAN の別端末から `http://<host>:8765/?token=<token>` で開く。トークン必須、GET のみ |
 | `instructions/dispatcher.md` / `worker.md` / `worker-codex.md` | 各エージェントの役割定義。Claude には `--append-system-prompt`、Codex (W4) には同等フラグが無いため初期プロンプトとして渡す |
 | `queue/projects/<project>/` | PJ 単位のタスク/報告 YAML 置き場 |
 | `dashboard.md` / `dashboards/<project>.md` | 全体 index / PJ 別の進捗ダッシュボード |
