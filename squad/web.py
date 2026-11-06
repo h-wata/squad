@@ -472,12 +472,19 @@ const badge = (s, label) => el('span', 'badge ' + s, label || s);
 // marked で HTML にしたものを必ず DOMPurify に通す。どちらかが無い・例外のときはプレーンテキスト
 if (window.DOMPurify && window.DOMPurify.addHook) window.DOMPurify.addHook('afterSanitizeAttributes', n => {
   if (n.tagName === 'A') { n.setAttribute('target', '_blank'); n.setAttribute('rel', 'noopener noreferrer'); } });
+// 画像・media・埋め込みは落とす (report の中身でブラウザに内部 URL を GET させない)。id / name は DOM
+// clobbering (document.getElementById('side') 等の乗っ取り) を防ぐため落とす。リンクは http(s) / mailto だけ
+const PURIFY = {
+  FORBID_TAGS: ['style', 'form', 'input', 'img', 'picture', 'source', 'video', 'audio', 'track', 'svg', 'math',
+    'iframe', 'object', 'embed'],
+  FORBID_ATTR: ['id', 'name', 'style', 'src', 'srcset', 'poster'], SANITIZE_NAMED_PROPS: true,
+  ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i};
 function renderMarkdown(e, text, inline) {
   text = text === undefined || text === null ? '' : String(text);
   try {
     if (window.marked && window.DOMPurify) {
       const html = inline ? window.marked.parseInline(text) : window.marked.parse(text, {breaks: true});
-      e.innerHTML = window.DOMPurify.sanitize(html, {FORBID_TAGS: ['style', 'form', 'input']});
+      e.innerHTML = window.DOMPurify.sanitize(html, PURIFY);
       e.classList.add('md'); return e;
     }
   } catch (err) { /* 下のプレーンテキストに落とす */ }

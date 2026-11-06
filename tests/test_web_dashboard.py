@@ -431,6 +431,18 @@ def test_every_body_field_goes_through_render_markdown() -> None:
     assert "const BODY = ['result_summary', 'description', 'summary', 'evidence'];" in script
     assert "BODY.includes(k) ? renderMarkdown(el('div'), v) : el('div', '', v)" in script
     assert script.count('innerHTML') == 1
-    assert 'DOMPurify.sanitize(' in _md_script()
+    assert 'DOMPurify.sanitize(html, PURIFY)' in _md_script()
     for call in ("renderMarkdown(el('span', ''), t.title, true)", 'r.summary', 'g.title', 'n.title, true'):
         assert call in script, call
+
+
+def test_purify_forbids_remote_loads_and_dom_clobbering() -> None:
+    """本文から画像等で外へ GET させない、id / name で画面の要素を乗っ取らせない、リンクは http(s) / mailto だけ."""
+    md = _md_script()
+    config = md[md.index('const PURIFY = {') : md.index('};', md.index('const PURIFY = {'))]
+    for tag in ('img', 'svg', 'video', 'audio', 'iframe', 'object', 'embed', 'picture', 'source', 'style'):
+        assert f"'{tag}'" in config.split('FORBID_ATTR')[0], tag
+    for attr in ('id', 'name', 'src', 'srcset', 'style'):
+        assert f"'{attr}'" in config.split('FORBID_ATTR')[1], attr
+    assert 'SANITIZE_NAMED_PROPS: true' in config
+    assert 'ALLOWED_URI_REGEXP: /^(?:https?:|mailto:)/i' in config
