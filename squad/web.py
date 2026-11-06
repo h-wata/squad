@@ -14,8 +14,8 @@
     トークンは Authorization ヘッダだけ、Origin は自分自身だけ、本文は MAX_BODY_CHARS まで
   - pane の中身と DB 由来の文字列は squad/mask.py を通してから返す
 
-squad セッションの判定: start.sh が作る window "aux" を持つセッション (#95)。window に分ける前の旧構成は
-pane タイトル "Aux-Shell" で見分ける。
+squad セッションの判定: start.sh が作る window "aux" があり、その pane タイトルが "Aux-Shell" のセッション (#95)。
+window に分ける前の旧構成 (aux window が無い) は pane タイトル "Aux-Shell" だけで見分ける。
 worker の pane は squad/config.json の window 名 (例 "w1") をセッション名に付けたもの (squad ls と同じ)。
 旧構成のセッションでは squad.tmux_target が "0.1" 等に読み替える。
 config.json は graph sync が DB (meta.workers) に写したものを読む (web 自身はファイルを開かない)。
@@ -46,7 +46,7 @@ from mask import mask
 import squad
 
 SQUAD_WINDOW = 'aux'
-LEGACY_PANE_TITLE = 'Aux-Shell'  # window に分ける前の旧構成 (#95)
+PANE_TITLE = 'Aux-Shell'  # start.sh が aux window (旧構成は pane 0.5) に付けるタイトル
 PANE_LINES = 300
 STATUS_LABEL = {'busy': '作業中', 'idle': '待機中', 'permission_wait': '許可待ち', 'unreachable': '停止'}
 DONE = ('done', 'verified')
@@ -439,9 +439,15 @@ def squad_sessions() -> dict[str, list[str]]:
     """Squad セッション名 -> その window 名一覧."""
     out = {}
     for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []:
-        rows = _tmux_lines('list-panes', '-s', '-t', f'={name}', '-F', '#{window_name}\t#{pane_title}') or []
-        windows = [r.split('\t', 1)[0] for r in rows]
-        if SQUAD_WINDOW in windows or any(r.endswith('\t' + LEGACY_PANE_TITLE) for r in rows):
+        rows = [
+            r.split('\t', 1)
+            for r in _tmux_lines('list-panes', '-s', '-t', f'={name}', '-F', '#{window_name}\t#{pane_title}') or []
+        ]
+        windows = [r[0] for r in rows]
+        titles = [r[-1] for r in rows]
+        # window 名だけだと、aux や w1 という window を持つ無関係なセッションの pane まで開けてしまう。
+        # start.sh が aux window に付けるタイトルも揃っていることを求める。旧構成は window 名が無いのでタイトルだけ
+        if [SQUAD_WINDOW, PANE_TITLE] in rows or (SQUAD_WINDOW not in windows and PANE_TITLE in titles):
             out[name] = list(dict.fromkeys(windows))
     return out
 

@@ -118,7 +118,8 @@ def _fake_tmux(calls: list[list[str]], layout: str = SQ1_PANES, prefix: str = 's
         if cmd[:2] == ['tmux', 'list-sessions']:
             return subprocess.CompletedProcess(cmd, 0, 'sq1\nother\n', '')
         if cmd[:2] == ['tmux', 'list-panes']:
-            out = layout if '=sq1' in cmd else 'bash\tbash\n'
+            # other は aux / w1 window を持つが start.sh が付けるタイトルが無い無関係なセッション
+            out = layout if '=sq1' in cmd else 'aux\tbash\nw1\tbash\n'
             return subprocess.CompletedProcess(cmd, 0, out, '')
         if cmd[:2] == ['tmux', 'capture-pane']:
             target = cmd[cmd.index('-t') + 1]
@@ -212,7 +213,7 @@ def test_projects_come_from_db_and_match_graph_status(server: tuple[str, list], 
 def test_sessions_reuse_squad_ls_states(server: tuple[str, list]) -> None:
     base, calls = server
     data = _get_json(base, '/api/sessions')
-    (sess,) = data['sessions']  # aux window の無い other は squad セッションではない
+    (sess,) = data['sessions']  # aux window があってもタイトル Aux-Shell の無い other は squad セッションではない
     assert sess['name'] == 'sq1'
     assert sess['projects'] == ['pj']  # pj2 は other の担当
     w = {r['worker']: r for r in sess['workers']}
@@ -349,7 +350,9 @@ def test_pane_masked_before_tail(root: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
         calls.append(cmd)
-        out = {'list-sessions': 's\n', 'list-panes': 'w1\tbash\naux\tbash\n', 'capture-pane': screen + '\n\n'}[cmd[1]]
+        out = {'list-sessions': 's\n', 'list-panes': 'w1\tbash\naux\tAux-Shell\n', 'capture-pane': screen + '\n\n'}[
+            cmd[1]
+        ]
         return subprocess.CompletedProcess(cmd, 0, out, '')
 
     monkeypatch.setattr(subprocess, 'run', run)
