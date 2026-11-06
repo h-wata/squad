@@ -10,6 +10,7 @@ FakeTmux (subprocess を使わない) に差し替えて検証する。旧 test_
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -1738,3 +1739,131 @@ class TestGraphSyncRetry:
         assert any('回復' in m for m in logs)
         w.sync_graph()  # 成功後は dirty が落ちる
         assert len(calls) == 3
+
+
+# ---------- web からの指示 (#85) ----------
+
+IDLE = '╭───╮\n│ > │\n╰───╯\n  ⏵⏵ auto mode on\n'
+BUSY = '✶ Thinking… (12s · esc to interrupt)\n'
+
+
+def write_instruction(
+    queue: Path, name: str, body: str = '見て', project: str = 'pj', session: str = 'testsess'
+) -> Path:
+    p = queue / 'instructions' / session / f'{name}.json'
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({'id': name, 'session': session, 'project': project, 'body': body, 'delivered_at': ''}))
+    return p
+
+
+def _instr(p: Path) -> dict:
+    return json.loads(p.read_text())
+
+
+class TestInstructions:
+    """squad web が queue/instructions/<session>/ に書いた指示を、Dispatcher が待機中のときだけ 1 回渡す."""
+
+    def test_idle_dispatcher_gets_oldest_once_with_delivered_at(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        b = write_instruction(queue, '20261106T000002000000Z-bbbb', body='2 件目')
+        a = write_instruction(queue, '20261106T000001000000Z-aaaa', body='PR #9 を\n見て\x1b[2J;', project='pj')
+        w.deliver_instructions()
+        assert w.tmux.sent == [
+            ('testsess:0.0', '[squad-web 指示] [project: pj] PR #9 を 見て [2J; [id=20261106T000001000000Z-aaaa]'),
+            ('testsess:0.0', 'Enter'),
+        ]
+        assert _instr(a)['delivered_at'] and not _instr(b)['delivered_at']  # 1 サイクル 1 件
+        w._sent_to_dispatcher = False  # noqa: SLF001 (次のサイクル)
+        w.deliver_instructions()
+        assert [m for _, m in w.tmux.sent if m != 'Enter'][1].startswith('[squad-web 指示] [project: pj] 2 件目')
+        w._sent_to_dispatcher = False  # noqa: SLF001 (次のサイクル)
+        w.deliver_instructions()
+        assert len(w.tmux.sent) == 4  # 渡し終えたら何も送らない
+        assert sorted(p.name for p in (queue / 'instructions' / 'testsess').iterdir()) == sorted([a.name, b.name])
+
+    def test_busy_dispatcher_waits_then_gets_it_once(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        p = write_instruction(queue, 'x')
+        for screen in (BUSY, 'Do you want to proceed?\n 1. Yes\n'):  # 作業中 / 許可待ち
+            w.tmux.captures['testsess:0.0'] = [screen]
+            w.deliver_instructions()
+            assert w.tmux.sent == [] and not _instr(p)['delivered_at']
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.deliver_instructions()
+        assert len(w.tmux.sent) == 2 and _instr(p)['delivered_at']
+
+    def test_restart_does_not_send_again(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        write_instruction(queue, 'x')
+        w.deliver_instructions()
+        again = Watcher(cfg=w.cfg, tmux=w.tmux)  # watchd の再起動
+        again.sleep = lambda _s: None
+        again.deliver_instructions()
+        assert len(w.tmux.sent) == 2
+
+    def test_not_stacked_on_a_report_sent_in_the_same_cycle(self, watcher: tuple[Watcher, Path]) -> None:
+        """同じサイクルで pane 0 に送った直後は、作業中の表示が出る前でも重ねて打ち込まない."""
+        w, queue = watcher
+        w.cfg.notify_queue_enabled = False  # report は pane 0 へ直送
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d)
+        p = write_instruction(queue, 'x')
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.cycle()
+        assert not _instr(p)['delivered_at'] and all('squad-web' not in m for _, m in w.tmux.sent)
+        n = len(w.tmux.sent)
+        w.cycle()  # 次のサイクル (report は配達済み) で渡す
+        assert _instr(p)['delivered_at'] and w.tmux.sent[n][1].startswith('[squad-web 指示]')
+
+    def test_send_failure_marks_failed_and_is_not_retried(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.fail_send = True
+        p = write_instruction(queue, 'x')
+        w.deliver_instructions()
+        assert _instr(p)['failed_at'] and not _instr(p)['delivered_at']
+        w.tmux.fail_send = False
+        w._sent_to_dispatcher = False  # noqa: SLF001 (次のサイクル)
+        w.deliver_instructions()
+        assert w.tmux.sent == []
+
+    def test_other_sessions_and_broken_files_are_left_alone(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        other = write_instruction(queue, 'x', session='other')
+        broken = queue / 'instructions' / 'testsess' / 'a.json'
+        broken.parent.mkdir(parents=True)
+        broken.write_text('{not json')
+        (queue / 'instructions' / 'testsess' / 'b.json').write_text('{"body": "  "}')
+        w.deliver_instructions()
+        assert w.tmux.sent == [] and not _instr(other)['delivered_at'] and broken.read_text() == '{not json'
+
+    def test_new_instruction_marks_graph_dirty_and_log_has_no_body(
+        self, watcher: tuple[Watcher, Path], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        w, queue = watcher
+        w.deliver_instructions()
+        w._graph_dirty = False  # noqa: SLF001
+        w.tmux.captures['testsess:0.0'] = [BUSY]
+        write_instruction(queue, 'x', body='ひみつの本文')
+        w.deliver_instructions()  # 渡す前でも活動タブに出すため sync し直す
+        assert w._graph_dirty  # noqa: SLF001
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.deliver_instructions()
+        assert 'ひみつの本文' not in capsys.readouterr().out
+
+    def test_unwritable_dir_skips_without_sending(self, watcher: tuple[Watcher, Path]) -> None:
+        """delivered_at を書けないなら送らない (書けないまま送ると再起動で二重に送る). 実ファイルシステムで再現."""
+        if os.geteuid() == 0:
+            pytest.skip('root では権限で書き込みを止められない')
+        w, queue = watcher
+        w.tmux.captures['testsess:0.0'] = [IDLE]
+        p = write_instruction(queue, 'x')
+        os.chmod(p.parent, 0o500)
+        try:
+            w.deliver_instructions()
+        finally:
+            os.chmod(p.parent, 0o700)
+        assert w.tmux.sent == [] and not _instr(p)['delivered_at']

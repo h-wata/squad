@@ -517,8 +517,9 @@ def cmd_web(args: argparse.Namespace, _cfg: dict) -> int:
             'squad web: トークンが必要です (SQUAD_WEB_TOKEN か --token)。LAN に公開するため未設定では起動しません'
         )
     queue_dir = Path(args.queue_dir) if args.queue_dir else REPO_ROOT / 'queue'
-    srv = web.make_server(args.host, args.port, token, queue_dir / '.graph.db')
-    print(f'squad web: http://{args.host}:{srv.server_address[1]}/?token=<token> (読み取り専用, Ctrl-C で停止)')
+    srv = web.make_server(args.host, args.port, token, queue_dir / '.graph.db', allow_write=args.allow_write)
+    mode = f'指示の投入あり: {queue_dir / "instructions"}' if args.allow_write else '読み取り専用'
+    print(f'squad web: http://{args.host}:{srv.server_address[1]}/?token=<token> ({mode}, Ctrl-C で停止)')
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -614,6 +615,11 @@ def main(argv: list[str] | None = None) -> int:
     p_web.add_argument('--port', type=int, default=8765)
     p_web.add_argument('--token', help='アクセストークン (既定: env SQUAD_WEB_TOKEN。未設定なら起動しない)')
     p_web.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})。読むのは .graph.db だけ')
+    p_web.add_argument(
+        '--allow-write',
+        action='store_true',
+        help='Dispatcher への指示の投入 (POST /api/instructions -> queue/instructions/<session>/) を許す (#85)',
+    )
     p_web.set_defaults(func=cmd_web)
 
     args = ap.parse_args(argv)

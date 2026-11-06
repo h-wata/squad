@@ -24,6 +24,8 @@ approve) / closed (完了 (報告なし): archive にしか無く結果も無い
 
 DB には他に projects (project ごとの担当 session・最新の結果・最終更新) と meta (synced_at と、
 squad/config.json の worker 定義 workers) を持つ。squad web は DB と tmux だけを読むため。
+instructions は squad web から Dispatcher へ出した指示 (queue/instructions/<session>/*.json, #85)。
+ノードにはせず別の表にする (goal / intent とはつながらない。活動タブに時系列で並べるだけ)。
 
 YAML のネスト (context / decision_bearing_claims / derived_from) を読むため PyYAML を使う。
 squad.py / watchd.py の stdlib only を崩さないよう、import はこのモジュールの中だけで行い、
@@ -44,7 +46,7 @@ from typing import Any
 import yaml
 
 # 派生索引なので migration は持たない。schema を変えたら番号を上げ、古い DB は作り直す
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = (
     'CREATE TABLE nodes ('
     'node_id TEXT PRIMARY KEY, '
@@ -67,8 +69,17 @@ SCHEMA = (
     'latest_result TEXT NOT NULL, '
     'updated_at TEXT NOT NULL)',
     'CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    'CREATE TABLE instructions ('
+    'session TEXT NOT NULL, '
+    'id TEXT NOT NULL, '
+    'project TEXT NOT NULL, '
+    'body TEXT NOT NULL, '
+    'created_at TEXT NOT NULL, '
+    'delivered_at TEXT NOT NULL, '
+    'failed_at TEXT NOT NULL, '
+    'PRIMARY KEY (session, id))',
 )
-TABLES = ('edges', 'nodes', 'projects', 'meta')
+TABLES = ('edges', 'nodes', 'projects', 'meta', 'instructions')
 # 同じ task に複数の結果があるときの優先順: worker の report > cross-review の verdict > verifier の verdict
 _RANK_REPORT, _RANK_REVIEW, _RANK_VERIFIER = 2, 1, 0
 # libyaml があれば C 実装を使う (pure Python の SafeLoader だと実 queue 約 700 件で 18 秒かかった)
@@ -400,6 +411,32 @@ def _group_goals(
     return out
 
 
+def collect_instructions(queue_dir: Path) -> list[tuple[str, ...]]:
+    """queue/instructions/<session>/*.json (squad web が書き watchd が delivered_at を足す, #85) を読む.
+
+    session はファイルの中身でなくディレクトリ名を正とする。読めない・形が違うものは索引しない。
+    """
+    out = []
+    for path in sorted((queue_dir / 'instructions').glob('*/*.json')):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and _s(data.get('body')).strip():
+            out.append(
+                (
+                    path.parent.name,
+                    path.stem,
+                    _s(data.get('project')),
+                    _s(data.get('body'))[:4000],
+                    _s(data.get('created_at')),
+                    _s(data.get('delivered_at')),
+                    _s(data.get('failed_at')),
+                )
+            )
+    return out
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     """DB を開く。schema が古ければ作り直す (派生索引なので消してよい)."""
     conn = sqlite3.connect(db_path, timeout=30)
@@ -419,6 +456,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def sync(queue_dir: Path, db_path: Path | None = None, config_path: Path = CONFIG_PATH) -> tuple[int, int]:
     """YAML から索引を作り直す。(ノード数, エッジ数) を返す. YAML は一切書き換えない."""
     nodes, edges, projects = collect(queue_dir)
+    instructions = collect_instructions(queue_dir)
     try:
         workers = json.loads(config_path.read_text()).get('workers', {})
     except (OSError, ValueError):
@@ -456,6 +494,7 @@ def sync(queue_dir: Path, db_path: Path | None = None, config_path: Path = CONFI
                     ('workers', json.dumps(workers, ensure_ascii=False)),
                 ],
             )
+            conn.executemany('INSERT INTO instructions VALUES (?, ?, ?, ?, ?, ?, ?)', instructions)
     finally:
         conn.close()
     return len(nodes), len(edges)
