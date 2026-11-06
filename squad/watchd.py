@@ -16,7 +16,7 @@
             WATCH_QUEUE_DIR / WATCH_LEDGER_FILE / WATCH_LEDGER_LEASE / WATCH_WORKTREE_GLOB
             SQUAD_SESSION / SQUAD_DEFAULT_OWNER
             WATCH_APPROVAL_DENY (自動承認しない操作の正規表現。既定は APPROVAL_DENY_DEFAULT)
-            WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Pane 0 直送。1 で durable queue 経路)
+            WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Dispatcher window 直送。1 で durable queue 経路)
             WATCH_CRITICAL_FALLBACK_SECONDS / WATCH_NORMAL_FALLBACK_SECONDS / WATCH_LOW_FALLBACK_SECONDS
 
 複数セッション並行運用 (SQUAD_SESSION を変えて start.sh を複数起動する場合):
@@ -62,6 +62,8 @@ from notify_queue import NotificationQueue  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
 from notify_queue import QueueUnreadableError  # noqa: E402
 from squad import detect_status  # noqa: E402 (squad ls / squad web と同じ作業中判定, #79)
+from squad import tmux_target  # noqa: E402
+from squad import tmux_windows  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
@@ -84,7 +86,7 @@ TODO_RE = re.compile(r'TODO|FIXME|XXX')
 WORKER_NUM_RE = re.compile(r'worker(\d+)')
 # reports/archive/ の写しのファイル名に使えない文字 (task_id に / 等が混ざっても archive の外に書かない)
 ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
-PANE_SUFFIX = {1: '0.1', 2: '0.2', 3: '0.3', 4: '0.6'}
+WORKER_WINDOW = {1: 'w1', 2: 'w2', 3: 'w3', 4: 'w4'}
 CAPTURE_TAIL_LINES = 40
 HOOK_FRESH_SECONDS = 300
 
@@ -197,14 +199,10 @@ class Config:
     critical_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_CRITICAL_FALLBACK_SECONDS', 300))
     normal_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_NORMAL_FALLBACK_SECONDS', 900))
     low_fallback_seconds: int = field(default_factory=lambda: _int_env('WATCH_LOW_FALLBACK_SECONDS', 3600))
-    # 段階導入 flag (SQUAD-226)。既定は従来動作 = Pane 0 へ直送。WATCH_NOTIFY_QUEUE=1 で
+    # 段階導入 flag (SQUAD-226)。既定は従来動作 = Dispatcher window へ直送。WATCH_NOTIFY_QUEUE=1 で
     # durable queue 経路を opt-in する。flag を外せば (既定に戻せば) 即座に従来動作へ rollback。
     notify_queue_enabled: bool = field(default_factory=lambda: _bool_env('WATCH_NOTIFY_QUEUE', False))
     approval_deny: str = field(default_factory=lambda: os.environ.get('WATCH_APPROVAL_DENY') or APPROVAL_DENY_DEFAULT)
-
-    @property
-    def dispatcher(self) -> str:
-        return f'{self.session}:0.0'
 
     @property
     def notify_dir(self) -> Path:
@@ -255,8 +253,22 @@ class Tmux:
     def has_session(self) -> bool:
         return self._run(['has-session', '-t', self.session]).returncode == 0
 
+    def target(self, name: str) -> str:
+        """役割名 (dispatcher / w1 等) の宛先。旧構成 (window 0 に 7 pane) のセッションなら "<session>:0.<n>" (#95)."""
+        return tmux_target(self.session, name, tmux_windows(self.session))
+
     def pane_exists(self, pane: str) -> bool:
-        r = self._run(['list-panes', '-t', self.session, '-F', '#{session_name}:#{window_index}.#{pane_index}'])
+        # 宛先は window 名 ("s:w1") と旧構成の pane 番号 ("s:0.1") の両方がありうる (#95)
+        r = self._run(
+            [
+                'list-panes',
+                '-s',
+                '-t',
+                f'={self.session}',
+                '-F',
+                '#{session_name}:#{window_index}.#{pane_index} #{session_name}:#{window_name}',
+            ]
+        )
         if r.returncode != 0:
             return False
         return pane in r.stdout.split()
@@ -367,7 +379,7 @@ class Watcher:
         本文と Enter を 1 回の send-keys にまとめない: tmux 側で Enter が届かず次の
         メッセージと連結される事象があるため、間に sleep を挟んで別々に送る。
         """
-        pane = self.cfg.dispatcher
+        pane = self.tmux.target('dispatcher')
         self._sent_to_dispatcher = True
         if not self.tmux.send_keys(pane, msg):
             return False
@@ -380,7 +392,7 @@ class Watcher:
     def _enqueue_notification(
         self, *, project: str, source: str, priority: str, message: str, dedupe_key: str
     ) -> bool:
-        """通知を session-local durable queue へ積む (flag off なら従来どおり Pane 0 へ直送).
+        """通知を session-local durable queue へ積む (flag off なら従来どおり Dispatcher window へ直送).
 
         書込みに失敗 (disk full 等)、または既存 queue が破損して読めない場合は False を
         返す。呼び出し元は「未配達」として扱い、ledger の backoff / 次サイクルで再試行する。
@@ -402,10 +414,10 @@ class Watcher:
             return False
 
     def _process_queue_fallbacks(self, now: float) -> None:
-        """未 ack event が priority 別閾値を超えたら、Pane 0 へ 1 行だけ fallback する.
+        """未 ack event が priority 別閾値を超えたら、Dispatcher window へ 1 行だけ fallback する.
 
         本文そのものではなく件数だけを送る (queue を読みに行かせるための安全弁)。
-        以後は指数 backoff で再送する。これ以外の経路では Pane 0 へ何も直接書かない。
+        以後は指数 backoff で再送する。これ以外の経路では Dispatcher window へ何も直接書かない。
         critical だけでなく normal / low も age で昇格するため、Dispatcher が pull を
         忘れても永久に沈黙しない (SQUAD-226 critical 2)。
         queue 自体が読めないときは、件数の代わりに「queue 異常」を直送する
@@ -441,7 +453,7 @@ class Watcher:
         )
 
     def _send_queue_alert(self, now: float, msg: str) -> None:
-        """Fallback / queue 異常の 1 行を Pane 0 へ送り、backoff を進める.
+        """Fallback / queue 異常の 1 行を Dispatcher window へ送り、backoff を進める.
 
         Backoff は fallback.json (events とは別ファイル) だけで判定するので、queue 本体が
         破損していても指数 backoff は効く (毎サイクル鳴り続けない)。
@@ -667,7 +679,7 @@ class Watcher:
     def deliver_instructions(self) -> None:
         """Squad web が queue/instructions/<session>/ に書いた指示を Dispatcher へ 1 件渡す (#85).
 
-        Dispatcher (pane 0) が待機中のときだけ、古い順に 1 サイクル 1 件。このサイクルで既に pane 0 へ
+        Dispatcher (window dispatcher) が待機中のときだけ、古い順に 1 サイクル 1 件。このサイクルで既に Dispatcher へ
         何か送ったときは次のサイクルに回す (送った直後は作業中の表示がまだ出ていない)。
         二重に送らないよう、打ち込む前に delivered_at を書く (at-most-once)。書いた後に watchd が落ちても
         再起動後に送り直さない。送れなかったら delivered_at を消して failed_at を書き、活動タブに
@@ -682,7 +694,7 @@ class Watcher:
             self._graph_dirty = True
         if not files:
             return
-        pane = self.cfg.dispatcher
+        pane = self.tmux.target('dispatcher')
         if self._sent_to_dispatcher or not self.tmux.pane_exists(pane):
             return
         # 同じ session の watchd が 2 つ動いていても (再起動で旧プロセスが残る等)、印付けと送信を 1 つずつにする。
@@ -799,7 +811,7 @@ class Watcher:
 
     def check_workers(self) -> None:
         for n in (1, 2, 3, 4):
-            pane = f'{self.cfg.session}:{PANE_SUFFIX[n]}'
+            pane = self.tmux.target(WORKER_WINDOW[n])
             task_path = self.newest_file(f'tasks/worker{n}.yaml')
             task_m = mtime_str(task_path) if task_path else ''
             rep_m = self.newest_mtime(f'reports/worker{n}_report.yaml')
@@ -827,7 +839,7 @@ class Watcher:
 
             self._check_budget(n, task_path, task_meta, project or 'unknown', task_id)
 
-            # pane が存在しない場合 (例: SQUAD_ENABLE_CODEX=0 で Pane 6/W4 が無い) は
+            # pane が存在しない場合 (例: SQUAD_ENABLE_CODEX=0 で w4 window が無い) は
             # capture が空を返し続けて停止通報ループに入るため、このサイクルはスキップする。
             if not self.tmux.pane_exists(pane):
                 continue
@@ -1321,7 +1333,7 @@ class Watcher:
             self.last_gc = now
 
         # age-based fallback は flag の on/off に関わらず毎サイクル回す。flag on 時に
-        # enqueue 済みの未 ack event は、flag off (rollback) 後もこの経路でしか Pane 0 へ
+        # enqueue 済みの未 ack event は、flag off (rollback) 後もこの経路でしか Dispatcher window へ
         # 届かないため、ここを flag でガードすると rollback 後に永久に沈黙する
         # (SQUAD-228, PR #29 事後 cross-review)。新規通知の enqueue 自体は
         # _enqueue_notification() 側で引き続き flag により直送/queue を切り替える。

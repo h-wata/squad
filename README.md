@@ -6,7 +6,7 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
 ## Prerequisites
 
 - **git** — このリポジトリの clone・worker のブランチ操作に必須。
-- **tmux** — 各エージェントの pane を管理する。ディストリのパッケージマネージャで
+- **tmux** — 各エージェントの window を管理する。ディストリのパッケージマネージャで
   インストール可（例: `apt install tmux`）。公式: https://github.com/tmux/tmux
 - **GitHub CLI (`gh`)** — worker が PR 作成・レビュー・`watch.sh` の Issue/PR/CI
   discovery を行うために必須。https://cli.github.com/ 。`gh auth login` で認証済みで
@@ -14,7 +14,7 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
 - **Claude Code CLI (`claude`)** — Dispatcher / Worker 1-3 に必須。
   https://docs.claude.com/en/docs/claude-code
 - **Codex CLI (`codex`)** — Worker 4 (Codex 担当) を使う場合のみ必須。使わない場合は
-  `SQUAD_ENABLE_CODEX=0` を指定して起動すれば Pane 6 (Codex) を起動せずに済む
+  `SQUAD_ENABLE_CODEX=0` を指定して起動すれば w4 window (Codex) を作らずに済む
   （詳細は下記「起動 / 終了」参照）。
 - **Python 3 + PyYAML** — task / report の検査スクリプト (`scripts/check_*.py`) と
   `squad graph` が PyYAML を使う (例: `apt install python3-yaml` か `pip install pyyaml`)。
@@ -52,15 +52,21 @@ YAML で振り分けて進捗を回すマルチエージェント開発環境。
 ## 構成
 
 ```
-tmux session: ros-agents
-  Pane 0: Dispatcher (Claude)         — タスク分配・進捗管理
-  Pane 1-3: Worker 1-3 (Claude)       — 実装・調査全般
-  Pane 4: Opencode (Flash-Next)       — 既定モデル local/qwen38-flash-next
-  Pane 5: Aux-Shell                   — SSH 等の汎用利用
-  Pane 6: Worker 4 (Codex)            — 設計・cross-review 担当
+tmux session: ros-agents   (エージェントごとに 1 window。prefix + w で一覧)
+  dispatcher : Dispatcher (Claude)    — タスク分配・進捗管理
+  w1 / w2 / w3: Worker 1-3 (Claude)   — 実装・調査全般
+  w4         : Worker 4 (Codex)       — 設計・cross-review 担当
+  term       : Terminal               — 汎用シェル (SQUAD_ENABLE_OPENCODE=1 で Opencode)
+  aux        : Aux-Shell              — SSH 等の汎用利用
 ```
 
-Pane 4 は既定で汎用ターミナル (`Terminal`)。`SQUAD_ENABLE_OPENCODE=1` で Opencode (Flash-Next) として起動できる。
+宛先は window 名で `ros-agents:w1` のように指す。`term` は既定で汎用ターミナル。
+`SQUAD_ENABLE_OPENCODE=1` で Opencode (Flash-Next, 既定モデル local/qwen38-flash-next) として起動できる。
+全員の様子を一度に見るときは `squad web` の稼働状況タブを使う。
+
+以前は 1 つの window を 7 pane に分けていた。その構成で起動したままのセッションも、
+`notify-worker.sh` / watcher / `squad ls` / `squad web` は従来の pane (`0.1` 等) で扱う。
+新しい構成にするには `./stop.sh <session>` → `./start.sh -s <session> ...` で作り直す。
 
 Dispatcher はコードを書かない。ユーザー指示を受けて `queue/projects/<project>/tasks/worker{N}.yaml`
 にタスクを書き、Worker に通知し、`queue/projects/<project>/reports/worker{N}_report.yaml` の
@@ -70,7 +76,7 @@ Dispatcher はコードを書かない。ユーザー指示を受けて `queue/p
 
 ```bash
 ./start.sh <workspace_path>   # tmux session 起動 + watch.sh をバックグラウンド起動
-./stop.sh                     # 全 pane 終了 + watch.sh 停止
+./stop.sh                     # 全 window 終了 + watch.sh 停止
 tmux attach -t ros-agents     # 再アタッチ
 ```
 
@@ -87,7 +93,7 @@ tmux attach -t ros-agents     # 再アタッチ
 project を指定した場合は、`queue/projects/<project>/{tasks,reports}` を自動で作成する
 (手動 `mkdir` を忘れて担当 0 件のまま watcher が idle 起動するのを防ぐため)。
 
-Codex CLI を使わない場合は Pane 6 (Worker 4/Codex) の起動自体をスキップできる:
+Codex CLI を使わない場合は w4 window (Worker 4/Codex) の起動自体をスキップできる:
 
 ```bash
 SQUAD_ENABLE_CODEX=0 ./start.sh <workspace_path>   # 既定は 1 (Codex を起動する)
@@ -120,7 +126,7 @@ tmux attach -t myproj
 ```
 
 `squad` CLI (`squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
-`squad/config.json` の pane 番号 (0.1/0.2/0.3/0.6) も変わらない。
+`squad/config.json` の宛先 (window 名 w1/w2/w3/w4) も変わらない。
 
 report を Dispatcher に通知したかどうかは、セッションをまたいで共有する永続 ledger
 `queue/.report_ledger.db` (sqlite3, 更新は `BEGIN IMMEDIATE` で直列化) が
@@ -166,7 +172,7 @@ content_sha256、state、lease、attempt_count、next_attempt_at) で、排他�
 
 ## Dispatcher 起動モデルのカスタマイズ
 
-Dispatcher (Pane 0) の起動モデルは既定で `opus`（曖昧な指示の明確化・複雑な判断を担うため）。
+Dispatcher (dispatcher window) の起動モデルは既定で `opus`（曖昧な指示の明確化・複雑な判断を担うため）。
 token 節約は report のスリム化等、他の手段で行う方針。`SQUAD_DISPATCHER_MODEL` 環境変数で
 変更できる。
 

@@ -93,3 +93,33 @@ def test_codex_quoted_working_text_is_idle() -> None:
 
 def test_codex_permission_wins_over_working() -> None:
     assert detect_status(CODEX_WORKING + 'Do you want to proceed?\n 1. Yes')['status'] == 'permission_wait'
+
+
+def test_tall_window_busy_screen_is_not_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """背の高い window で出力が画面の上にあり末尾が空行だらけでも、作業中を待機中と読まない (#95)."""
+    import subprocess  # noqa: PLC0415
+
+    import squad  # noqa: PLC0415
+
+    screen = 'out\n✶ Nucleating… (4m 52s · ↓ 18.4k tokens)\n❯ \n' + '\n' * 60  # 縦 63 行の pane
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, screen, ''))
+    assert squad.probe_worker('s:w1')['status'] == 'busy'
+
+
+@pytest.mark.parametrize(
+    ('name', 'windows', 'want'),
+    [
+        ('w1', ['dispatcher', 'w1', 'w2', 'w3', 'w4', 'term', 'aux'], 's:w1'),
+        ('0.1', ['dispatcher', 'w1', 'w2', 'w3', 'w4', 'term', 'aux'], 's:w1'),  # 旧 config.json の値
+        ('dispatcher', ['dispatcher', 'w1'], 's:dispatcher'),
+        ('w1', ['claude'], 's:0.1'),  # 旧構成 (window 0 に 7 pane) は従来の pane
+        ('w4', ['claude'], 's:0.6'),
+        ('0.6', ['claude'], 's:0.6'),
+        ('w1', None, 's:w1'),  # セッションが無い
+        ('custom', ['claude'], 's:custom'),
+    ],
+)
+def test_tmux_target_resolves_window_or_legacy_pane(name: str, windows: list[str] | None, want: str) -> None:
+    from squad import tmux_target  # noqa: PLC0415
+
+    assert tmux_target('s', name, windows) == want

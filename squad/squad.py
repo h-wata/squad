@@ -64,12 +64,13 @@ def load_config() -> dict:
         sys.exit(f'config not found: {CONFIG_PATH}')
     cfg = json.loads(CONFIG_PATH.read_text())
     session = resolve_session(cfg)
-    # pane は config.json 上 session 非依存のサフィックス (例 "0.1") で持つ。ここで
-    # 解決済み session 名と結合し、以降の呼び出し元は meta['pane'] をそのまま使える。
+    # pane は config.json 上 session 非依存の window 名 (例 "w1") で持つ。ここで解決済み session 名と
+    # 結合し、以降の呼び出し元は meta['pane'] をそのまま使える。旧構成のセッションなら "0.1" 等になる
+    windows = tmux_windows(session)
     for meta in cfg.get('workers', {}).values():
         pane = meta.get('pane', '')
         if pane and ':' not in pane:
-            meta['pane'] = f'{session}:{pane}'
+            meta['pane'] = tmux_target(session, pane, windows)
     return cfg
 
 
@@ -83,12 +84,43 @@ def resolve_worker(cfg: dict, name: str) -> dict:
 # ---------- tmux primitives ----------
 
 
+# start.sh はエージェントごとに window を作り、役割の名前を付ける (#95)。旧構成は window 0 を 7 pane に
+# 分けていた。マージ前から動いているセッションは旧構成のままなので、window が無ければ旧 pane に落とす
+LEGACY_PANES = {'dispatcher': '0.0', 'w1': '0.1', 'w2': '0.2', 'w3': '0.3', 'term': '0.4', 'aux': '0.5', 'w4': '0.6'}
+_LEGACY_WINDOWS = {v: k for k, v in LEGACY_PANES.items()}
+
+
+def tmux_windows(session: str) -> list[str] | None:
+    """Session の window 名一覧。セッションが無い・tmux が無ければ None."""
+    try:
+        r = subprocess.run(
+            ['tmux', 'list-windows', '-t', f'={session}', '-F', '#{window_name}'], capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    return r.stdout.splitlines() if r.returncode == 0 else None
+
+
+def tmux_target(session: str, name: str, windows: list[str] | None) -> str:
+    """役割名 (w1 / dispatcher 等) か旧 pane ("0.1") を、そのセッションの構成に合った宛先にする.
+
+    旧構成 (セッションはあるがその名前の window が無い) なら "<session>:0.1"、それ以外は "<session>:w1"。
+    windows は tmux_windows(session) の結果 (1 回の list-windows を呼び出し元で使い回す)。
+    """
+    window = _LEGACY_WINDOWS.get(name, name)
+    if windows is None or window in windows or window not in LEGACY_PANES:
+        return f'{session}:{window}'
+    return f'{session}:{LEGACY_PANES[window]}'
+
+
 def tmux_capture(pane: str, lines: int = CAPTURE_TAIL_LINES) -> tuple[bool, str]:
     """Return (reachable, tail_text)."""
     r = subprocess.run(['tmux', 'capture-pane', '-t', pane, '-p'], capture_output=True, text=True)
     if r.returncode != 0:
         return False, r.stderr.strip()
-    text = r.stdout
+    # 画面の下の空行を落としてから末尾を取る (watchd の Tmux.capture と同じ)。背の高い window で出力が
+    # 画面の上にあると、空行だけの末尾になってスピナー行が範囲外に出て、作業中を待機中と読む (#95)
+    text = r.stdout.rstrip()
     if lines and lines > 0:
         text = '\n'.join(text.splitlines()[-lines:])
     return True, text

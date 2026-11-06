@@ -9,7 +9,7 @@
 # 送信後に「届いたか (submitted)」と「走り出したか (started)」を別々に確認して報告する。
 #
 # 使い方:
-#   scripts/notify-worker.sh <W1|W2|W3|W4|pane> "<message>" [--model <opus|sonnet|haiku>] [--clear] [--no-new]
+#   scripts/notify-worker.sh <W1|W2|W3|W4|window|pane> "<message>" [--model <opus|sonnet|haiku>] [--clear] [--no-new]
 #
 # 例:
 #   scripts/notify-worker.sh W2 "新しいタスクがあります。.../worker2.yaml を確認してください。"
@@ -65,25 +65,39 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# worker ラベル → pane 番号 (start.sh の構成に追従)
-#   W1=0.1 W2=0.2 W3=0.3  Codex W4=0.6  (0.4=Terminal, 0.5=Aux-Shell は worker ではない)
+# worker ラベル → window 名 (start.sh がエージェントごとに作る window, #95)
+#   W1=w1 W2=w2 W3=w3 Codex W4=w4。旧構成の pane 番号 (0.1 等) も受け付ける
 case "${WORKER,,}" in
-  w1) PANE="0.1"; IS_CODEX=0 ;;
-  w2) PANE="0.2"; IS_CODEX=0 ;;
-  w3) PANE="0.3"; IS_CODEX=0 ;;
-  w4) PANE="0.6"; IS_CODEX=1 ;;
-  0.[0-9]) PANE="$WORKER"; IS_CODEX=$([ "$WORKER" = "0.6" ] && echo 1 || echo 0) ;;
-  *) echo "unknown worker/pane: $WORKER (expected W1..W4 or pane like 0.1)" >&2; exit 1 ;;
+  w[1-4] | dispatcher | term | aux) WIN="${WORKER,,}" ;;
+  0.0) WIN=dispatcher ;;
+  0.[1-3]) WIN="w${WORKER#0.}" ;;
+  0.4) WIN=term ;;
+  0.5) WIN=aux ;;
+  0.6) WIN=w4 ;;
+  *) echo "unknown worker/window: $WORKER (expected W1..W4, a window name like w1, or pane like 0.1)" >&2; exit 1 ;;
+esac
+IS_CODEX=$([ "$WIN" = "w4" ] && echo 1 || echo 0)
+# WORKER_NUM は Opencode の「W{N} 待機中」用。旧構成の pane (window 0 を 7 pane に分けていた頃) は
+# マージ前から動いているセッション用
+case "$WIN" in
+  dispatcher) LEGACY_PANE=0.0; WORKER_NUM=0 ;;
+  w1 | w2 | w3) WORKER_NUM="${WIN#w}"; LEGACY_PANE="0.$WORKER_NUM" ;;
+  term) LEGACY_PANE=0.4; WORKER_NUM=4 ;;
+  aux) LEGACY_PANE=0.5; WORKER_NUM=5 ;;
+  w4) LEGACY_PANE=0.6; WORKER_NUM=4 ;;
 esac
 
-TARGET="${SESSION}:${PANE}"
-
-# pane の存在確認
-if ! tmux list-panes -t "$SESSION" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null | grep -qx "$TARGET"; then
+# 宛先の解決: その名前の window があれば window、無ければ旧構成の pane
+if tmux list-windows -t "=$SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$WIN"; then
+  TARGET="${SESSION}:${WIN}"
+elif tmux list-panes -s -t "=$SESSION" -F '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null \
+  | grep -qxF "${SESSION}:${LEGACY_PANE}"; then
+  TARGET="${SESSION}:${LEGACY_PANE}"
+else
   if [ "$IS_CODEX" -eq 1 ]; then
     echo "W4 は無効化されています (SQUAD_ENABLE_CODEX=0 で起動された可能性があります)。設計レビュー / cross-review は Claude W1-W3 に振ってください。" >&2
   else
-    echo "pane not found: $TARGET (session=$SESSION)。tmux 起動済みか確認してください。" >&2
+    echo "window not found: ${SESSION}:${WIN} (session=$SESSION)。tmux 起動済みか確認してください。" >&2
   fi
   exit 1
 fi
@@ -96,7 +110,6 @@ case "$(tmux display-message -p -t "$TARGET" '#{pane_current_command}|#{pane_tit
   opencode\|* | *"(Opencode)"*) IS_OPENCODE=1 ;;
 esac
 NOTIFY_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-WORKER_NUM="${PANE#0.}"
 # bootstrap の後、worker が「W{N} 待機中」とだけ出すまで待つ秒数
 BOOTSTRAP_WAIT="${SQUAD_BOOTSTRAP_WAIT:-120}"
 

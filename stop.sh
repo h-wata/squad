@@ -52,21 +52,19 @@ fi
 [ "$watcher_stopped" -eq 1 ] && echo "watcher を停止しました。"
 
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    # エージェント Pane (Dispatcher + Worker 1-3 + Codex Worker 4)
-    for pane in 0 1 2 3 6; do
-        echo "Pane $pane (Agent) を終了中..."
-        tmux send-keys -t "$SESSION_NAME:0.$pane" C-c
+    # window ごとに Ctrl-C → exit を送る (#95)。window 名が無い旧構成 (window 0 を 7 pane) は pane 番号で送る
+    windows=$(tmux list-windows -t "=$SESSION_NAME" -F '#{window_name}' 2>/dev/null)
+    for spec in dispatcher:0 w1:1 w2:2 w3:3 w4:6 term:4 aux:5; do
+        win="${spec%%:*}"
+        if printf '%s\n' "$windows" | grep -qxF "$win"; then
+            target="$SESSION_NAME:$win"
+        else
+            target="$SESSION_NAME:0.${spec##*:}"
+        fi
+        echo "$target を終了中..."
+        tmux send-keys -t "$target" C-c 2>/dev/null || continue
         sleep 0.5
-        tmux send-keys -t "$SESSION_NAME:0.$pane" "exit" Enter
-        sleep 0.2
-    done
-
-    # Terminal / Aux-Shell
-    for pane in 4 5; do
-        echo "Pane $pane (Aux) を終了中..."
-        tmux send-keys -t "$SESSION_NAME:0.$pane" C-c
-        sleep 0.2
-        tmux send-keys -t "$SESSION_NAME:0.$pane" "exit" Enter
+        tmux send-keys -t "$target" "exit" Enter 2>/dev/null
         sleep 0.2
     done
 

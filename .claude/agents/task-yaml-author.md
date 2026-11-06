@@ -323,7 +323,7 @@ description に「W1 が並列で #X を進めるので、必ず worktree 分離
 - 並列タスク: W1 が #51 を my-app-wt-issue51 で実装中
 
 Dispatcher への次アクション:
-- W2 (pane 2) に tmux 通知を送る
+- W2 (window w2) に tmux 通知を送る
 - dashboard.md / dashboards/my-app.md の W2 行を「実装中」に更新
 ```
 

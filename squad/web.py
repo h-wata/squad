@@ -14,8 +14,10 @@
     トークンは Authorization ヘッダだけ、Origin は自分自身だけ、本文は MAX_BODY_CHARS まで
   - pane の中身と DB 由来の文字列は squad/mask.py を通してから返す
 
-squad セッションの判定: start.sh が pane 0.5 に付けるタイトル "Aux-Shell" を持つセッション。
-worker の pane は squad/config.json の pane サフィックス (例 "0.1") をセッション名に付けたもの (squad ls と同じ)。
+squad セッションの判定: start.sh が作る window "aux" を持つセッション (#95)。window に分ける前の旧構成は
+pane タイトル "Aux-Shell" で見分ける。
+worker の pane は squad/config.json の window 名 (例 "w1") をセッション名に付けたもの (squad ls と同じ)。
+旧構成のセッションでは squad.tmux_target が "0.1" 等に読み替える。
 config.json は graph sync が DB (meta.workers) に写したものを読む (web 自身はファイルを開かない)。
 """
 
@@ -43,7 +45,8 @@ from urllib.parse import urlsplit
 from mask import mask
 import squad
 
-SQUAD_PANE_TITLE = 'Aux-Shell'
+SQUAD_WINDOW = 'aux'
+LEGACY_PANE_TITLE = 'Aux-Shell'  # window に分ける前の旧構成 (#95)
 PANE_LINES = 300
 STATUS_LABEL = {'busy': '作業中', 'idle': '待機中', 'permission_wait': '許可待ち', 'unreachable': '停止'}
 DONE = ('done', 'verified')
@@ -432,16 +435,19 @@ def _workers(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
     return _payload(row[0]) if row else {}
 
 
-def squad_sessions() -> list[str]:
-    return [
-        name
-        for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []
-        if SQUAD_PANE_TITLE in (_tmux_lines('list-panes', '-s', '-t', name, '-F', '#{pane_title}') or [])
-    ]
+def squad_sessions() -> dict[str, list[str]]:
+    """Squad セッション名 -> その window 名一覧."""
+    out = {}
+    for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []:
+        rows = _tmux_lines('list-panes', '-s', '-t', f'={name}', '-F', '#{window_name}\t#{pane_title}') or []
+        windows = [r.split('\t', 1)[0] for r in rows]
+        if SQUAD_WINDOW in windows or any(r.endswith('\t' + LEGACY_PANE_TITLE) for r in rows):
+            out[name] = list(dict.fromkeys(windows))
+    return out
 
 
-def _pane(session: str, suffix: str) -> str:
-    return suffix if ':' in suffix else f'{session}:{suffix}'
+def _pane(session: str, suffix: str, windows: list[str]) -> str:
+    return suffix if ':' in suffix else squad.tmux_target(session, suffix, windows)
 
 
 def sessions_data(db_path: Path) -> dict[str, Any]:
@@ -471,11 +477,11 @@ def sessions_data(db_path: Path) -> dict[str, Any]:
     owners = db.pop('owners', [])
     workers = db.pop('workers', {})
     sessions = []
-    for name in squad_sessions():
+    for name, windows in squad_sessions().items():
         projects = sorted(pj for pj, s in owners if s == name)
         rows = []
         for w, meta in workers.items():
-            pane = _pane(name, meta.get('pane', ''))
+            pane = _pane(name, meta.get('pane', ''), windows)
             st = squad.probe_worker(pane)
             rows.append(
                 {
@@ -498,7 +504,7 @@ def sessions_data(db_path: Path) -> dict[str, Any]:
 def pane_data(db_path: Path, target: str) -> dict[str, Any]:
     """Squad セッションの worker pane 1 つの中身 (クリックで広く開く用)。それ以外の pane は返さない."""
     workers = _query(db_path, lambda conn: {'workers': _workers(conn)}).get('workers', {})
-    allowed = {_pane(s, m.get('pane', '')) for s in squad_sessions() for m in workers.values()}
+    allowed = {_pane(s, m.get('pane', ''), ws) for s, ws in squad_sessions().items() for m in workers.values()}
     if target not in allowed:
         return {'target': target, 'ok': False, 'text': '(squad の worker pane ではありません)'}
     # 履歴全体 (-S -) をマスクしてから末尾を切る。可視範囲や末尾だけをマスクすると、PRIVATE KEY の

@@ -47,7 +47,7 @@
    opt-in してから off に戻した (rollback) 場合**: `squad notify pull --health` で未 ack
    通知を読む（→「通知 queue の pull / ack 規約」）。rollback 後も
    `queue/notifications/<session>/events.json` に未 ack event が残っていれば watcher が
-   age-based fallback で最終的に Pane 0 へ 1 行アラートを出すが、内容そのものは pull
+   age-based fallback で最終的に Dispatcher window へ 1 行アラートを出すが、内容そのものは pull
    しないと読めない (SQUAD-228)。一度も opt-in したことが無ければこの項目は不要
 
 これらから「**仕掛かり中のタスク / 未処理 inbox / blocked(要人間判断) の有無**」を
@@ -57,17 +57,20 @@
 
 ## 利用可能なワーカー
 
-| Worker | Pane | Agent | 用途 |
-|--------|------|-------|------|
-{SQUAD_WORKER_ROWS}| Worker 4 | 6 | Codex (codex-cli) | 設計・実装 Codex 担当 |
+| Worker | Window | Agent | 用途 |
+|--------|--------|-------|------|
+{SQUAD_WORKER_ROWS}| Worker 4 | w4 | Codex (codex-cli) | 設計・実装 Codex 担当 |
 {SQUAD_ENABLE_CODEX_NOTE}
 {SQUAD_OPENCODE_WORKER_NOTE}
-**補助 Pane**
+**補助 window**
 
-| Pane | 用途 |
-|------|------|
-| 4 | Terminal (汎用シェル) |
-| 5 | Aux-Shell (汎用 SSH 等) |
+| Window | 用途 |
+|--------|------|
+| term | Terminal (汎用シェル) |
+| aux | Aux-Shell (汎用 SSH 等) |
+
+tmux はエージェントごとに window を分けている (`prefix + w` で一覧)。宛先は window 名で
+`{SQUAD_SESSION}:w1` のように指す。自分 (Dispatcher) は `{SQUAD_SESSION}:dispatcher`。
 
 ## マルチプロジェクト運用
 
@@ -292,8 +295,10 @@ task-yaml-author に渡した場合はその値を、task-yaml-author に選ば�
   同一コマンドに `"text" Enter` とまとめるとバグる。
 - `/model` 切替直後にタスク通知を送ると **drop する**。切替の Enter 後に
   **`sleep 2.5` 以上**を入れてから本文を送る (`sleep 1` では足りない)。
-- pane: W1=`{SQUAD_SESSION}:0.1` W2=`0.2` W3=`0.3` Codex W4=`0.6` (0.4/0.5 は worker ではない)。
-  自分の tmux session は `{SQUAD_SESSION}`。**他の session (別 Squad) の pane には絶対に send-keys しない。**
+- 宛先: W1=`{SQUAD_SESSION}:w1` W2=`:w2` W3=`:w3` Codex W4=`:w4` (term / aux は worker ではない)。
+  自分の tmux session は `{SQUAD_SESSION}`。**他の session (別 Squad) の window には絶対に send-keys しない。**
+  window に分ける前に起動したままのセッション (window 0 を 7 pane に分けた旧構成) では
+  W1=`0.1` W2=`0.2` W3=`0.3` W4=`0.6`。`notify-worker.sh` / watcher はどちらの構成でも自動で宛先を選ぶ。
 - Codex (W4) には `/model` も `/clear` も無い。タスク通知のみ。
 - **W4 (Codex) はタスクが一段落するたびに `/new` でリセットする**。report 受領 →
   dashboard 更新後、次タスクを振る前に送る（レビュー実行中には送らない）。古いコンテキストの
@@ -369,20 +374,20 @@ report YAML に含まれる必須フィールド (worker 側責務):
 
 ### 通知 queue の pull / ack 規約 (SQUAD-220 / SQUAD-226)
 
-**既定 (`WATCH_NOTIFY_QUEUE` 未設定) では watcher は従来どおり Pane 0 へ直送する。**
+**既定 (`WATCH_NOTIFY_QUEUE` 未設定) では watcher は従来どおり Dispatcher window へ直送する。**
 この節は queue 経路を opt-in (`WATCH_NOTIFY_QUEUE=1` を付けて `start.sh` / `watch.sh` を
 起動) したときの規約。一度も opt-in したことが無ければ pull は不要（何もしなくても通知は
 届く）。
 
 **rollback (opt-in 後に `WATCH_NOTIFY_QUEUE` を外して off に戻す) した場合の注意**:
 flag off に戻した時点で queue に残っていた未 ack event は、watcher が age-based fallback
-で従来どおり Pane 0 へ「未確認通知 N 件」を送り続ける（flag off でもこの経路は止まらない、
+で従来どおり Dispatcher window へ「未確認通知 N 件」を送り続ける（flag off でもこの経路は止まらない、
 SQUAD-228）。ただしこれは件数だけの 1 行サマリで、本文は `notify pull` しないと読めない。
 rollback した直後は `notify pull --health` で `unacked_*` が全て 0 になるまで pull/ack を
 続けること。0 になれば以後は pull しなくてよい（新規通知は flag off なので直送に戻る）。
 
 queue が有効なとき、watcher は通知を `queue/notifications/<session>/` へ永続化する。
-Pane 0 へ直送されるのは「未 ack 通知が閾値を超えた」ときの 1 行サマリだけなので、
+Dispatcher window へ直送されるのは「未 ack 通知が閾値を超えた」ときの 1 行サマリだけなので、
 **以下の 4 タイミングで必ず pull する**:
 
 1. セッション開始時（状態復元の一部として）
@@ -405,14 +410,14 @@ python3 squad/squad.py notify ack all --by dispatcher
 - **critical (blocked report / REPORT-INVALID) を先に処理してユーザーへ報告する。**
   normal (通常 report) → low (stall / discovery / sweep) の順。
 - ack は「読んで対応を決めた」もののみ。**未対応のまま ack しない**（ack した通知は
-  二度と Pane に出ない）。判断保留なら ack せず残す。
+  二度と Dispatcher の画面に出ない）。判断保留なら ack せず残す。
 - ack し忘れても消えない: 未 ack のまま critical 300s / normal 900s / low 3600s を超えると
-  watcher が Pane 0 へ「未確認通知 N 件」を再送する（以後は指数 backoff）。
+  watcher が Dispatcher window へ「未確認通知 N 件」を再送する（以後は指数 backoff）。
   **つまり pull を忘れても永久に沈黙することはない。**
 
 **queue が読めないときの報告手順**:
 
-- `[QUEUE-ERROR] 通知 queue を読めません` が Pane 0 に出た、または `notify pull` が
+- `[QUEUE-ERROR] 通知 queue を読めません` が Dispatcher window に出た、または `notify pull` が
   `QueueUnreadable` で落ちた場合、**未 ack 通知が見えない = 最も危険な状態**。
 - この場合は queue の自動復旧を待たず、**ユーザーへ明示的に報告する**（VOICEVOX 通知も）。
 - 応急処置: 破損ファイル (`queue/notifications/<session>/events.json`) を
@@ -613,7 +618,7 @@ Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 /
 **Sonnet worker は auto mode が使えない**ため、Bash の permission prompt や確認ダイアログで
 停止する。Dispatcher が覗かないと何時間も止まったままになる (2026-05-21 ユーザー指示)。
 タスクを降ろしたら 3-5 分おきに
-`tmux capture-pane -t "$SQUAD_SESSION:0.{N}" -p | tail -15` で確認し、
+`tmux capture-pane -t "$SQUAD_SESSION:w{N}" -p | tail -15` で確認し、
 ①`Permission rule ... requires confirmation` ②`Do you want to proceed?` 系
 ③同じ "Thinking..." が 5 分以上 ④コンテキスト枯渇 を検知したら send-keys でガイダンスを送る。
 1 度に複数連投せず、1 つ送って状態確認してから次へ。
@@ -686,7 +691,7 @@ Codex (W4) のコンテキスト管理は Codex 側のセッション再開機�
 ### 単一タスク (Claude)
 ```
 1. queue/projects/<pj>/tasks/worker1.yaml にタスク作成 (agent: claude)
-2. Worker 1 (Pane 1) に通知
+2. Worker 1 (window w1) に通知
 3. dashboard.md と dashboards/<pj>.md を更新
 4. 報告受領 → dashboard 更新 → ユーザー報告
 ```

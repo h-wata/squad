@@ -38,10 +38,10 @@ if [ -z "${SQUAD_SESSION:-}" ] && [ -t 0 ]; then
 fi
 SESSION_NAME="${SQUAD_SESSION:-ros-agents}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# SQUAD_ENABLE_CODEX=0 で Pane 6 (Worker 4 / Codex) の起動を丸ごとスキップできる
+# SQUAD_ENABLE_CODEX=0 で w4 window (Worker 4 / Codex) の起動を丸ごとスキップできる
 # (codex CLI を使わない環境向け)。既定は 1 (従来通り Codex を起動)。
 ENABLE_CODEX="${SQUAD_ENABLE_CODEX:-1}"
-# SQUAD_ENABLE_OPENCODE=1 で Pane 4 (Opencode) を起動できる。既定は 0 (汎用ターミナル)。
+# SQUAD_ENABLE_OPENCODE=1 で term window に Opencode を起動できる。既定は 0 (汎用ターミナル)。
 # narrow pane で opentui キャンバス描画が SIGILL クラッシュする不具合があり、
 # 常用の必要性も薄いため既定オフに変更。
 ENABLE_OPENCODE="${SQUAD_ENABLE_OPENCODE:-0}"
@@ -183,9 +183,9 @@ fi
 mkdir -p "$SCRIPT_DIR/queue/projects" "$SCRIPT_DIR/queue/templates"
 mkdir -p "$SCRIPT_DIR/dashboards"
 if [ "$ENABLE_CODEX" = "1" ]; then
-    WORKER4_ROW="| Worker 4 | 6 | Codex | - | 待機 | - |"
+    WORKER4_ROW="| Worker 4 | w4 | Codex | - | 待機 | - |"
 else
-    WORKER4_ROW="| Worker 4 | 6 | Codex | - | 無効 (SQUAD_ENABLE_CODEX=0) | - |"
+    WORKER4_ROW="| Worker 4 | w4 | Codex | - | 無効 (SQUAD_ENABLE_CODEX=0) | - |"
 fi
 # worker ごとの Agent 表記 (dashboard / dispatcher.md の両方で使う)
 worker_agent_label() {
@@ -197,7 +197,7 @@ worker_agent_label() {
 }
 WORKER_ROWS=""
 for n in 1 2 3; do
-    WORKER_ROWS="${WORKER_ROWS}| Worker $n | $n | $(worker_agent_label "$n") | - | 待機 | - |
+    WORKER_ROWS="${WORKER_ROWS}| Worker $n | w$n | $(worker_agent_label "$n") | - | 待機 | - |
 "
 done
 if [ ! -f "$SCRIPT_DIR/dashboard.md" ]; then
@@ -209,7 +209,7 @@ squad 起動時に自動生成された初期ファイルです。Dispatcher が
 
 ## Worker ステータス
 
-| Worker | Pane | Agent | 現在のPJ | 状態 | 直近の完了タスク |
+| Worker | Window | Agent | 現在のPJ | 状態 | 直近の完了タスク |
 |--------|------|-------|----------|------|------------|
 ${WORKER_ROWS}$WORKER4_ROW
 DASHEOF
@@ -340,7 +340,7 @@ DISPATCHER_MODEL="${SQUAD_DISPATCHER_MODEL:-opus}"
 DISPATCHER_MODEL_Q="$(printf '%q' "$DISPATCHER_MODEL")"
 
 # dispatcher.md の {SQUAD_ENABLE_CODEX_NOTE} プレースホルダ用。
-# SQUAD_ENABLE_CODEX=0 のときのみ、Pane 6 (W4) が存在しない旨を Dispatcher の
+# SQUAD_ENABLE_CODEX=0 のときのみ、w4 window (W4) が存在しない旨を Dispatcher の
 # system prompt に埋め込む (既定=1 の場合は空文字で何も追記しない)。
 if [ "$ENABLE_CODEX" = "1" ]; then
     DISPATCHER_CODEX_NOTE=""
@@ -408,73 +408,65 @@ fi
 
 echo "マルチエージェントシステムを起動します..."
 
-# 新しいセッションを作成（Pane 0: Dispatcher）
-tmux new-session -d -s "$SESSION_NAME" -x 220 -y 60
-
-# Pane を追加して 7 pane 構成を作る (Codex 無効時は 6 pane)
-# 配置は tiled レイアウトが決める。ペイン番号はレイアウト上の並び順
-# (左上から右へ、次の行へ) に一致する:
-#   Pane 0: Dispatcher | Pane 1: Worker 1 | Pane 2: Worker 2
-#   Pane 3: Worker 3   | Pane 4: Opencode/Terminal | Pane 5: Aux-Shell
-#   Pane 6: Worker 4 (Codex)
-#
-# 重要: 分割ごとに tiled を掛け直すこと。tmux は分割のたびにペイン番号を
-# レイアウト順で振り直すため、"0.1" のようなインデックス指定は狙ったペインを
-# 指さず、実際には同じ列を半分ずつ割り続ける。60 行から 6 回半分にすると
-# 2 行まで縮んで 6 個目の分割が "no space for new pane" で失敗する。
-# 1 分割ごとに tiled で均等化すれば、どの pane も分割可能な高さを保てる。
-if [ "$ENABLE_CODEX" = "1" ]; then
-    SPLIT_COUNT=6
-else
-    SPLIT_COUNT=5
-fi
-for _ in $(seq 1 "$SPLIT_COUNT"); do
-    tmux split-window -v -t "$SESSION_NAME:0"
-    tmux select-layout -t "$SESSION_NAME:0" tiled >/dev/null
+# エージェントごとに window を作る (#95)。名前は prefix + w の一覧に出る。
+#   dispatcher / w1 / w2 / w3 / w4 (Codex, 無効時は作らない) / term / aux
+# 以前は 1 window を 7 pane に分けていたが、端末によっては pane が 56 桁 × 26 行しかなく
+# 出力の折り返しで読めなかった。全員を一度に見るのは squad web の稼働状況タブが担う。
+# 宛先は "<session>:w1" のように window 名で指す (window の番号は base-index で変わるため使わない)。
+tmux new-session -d -s "$SESSION_NAME" -n dispatcher -x 220 -y 60
+WINDOWS="w1 w2 w3"
+[ "$ENABLE_CODEX" = "1" ] && WINDOWS="$WINDOWS w4"
+for _w in $WINDOWS term aux; do
+    tmux new-window -d -t "$SESSION_NAME:" -n "$_w"
+done
+# Claude Code / Codex のエスケープシーケンスやプロセス名で window 名が変わると宛先が外れるので止める
+for _w in dispatcher $WINDOWS term aux; do
+    tmux set-option -w -t "$SESSION_NAME:$_w" automatic-rename off
+    tmux set-option -w -t "$SESSION_NAME:$_w" allow-rename off
 done
 
-# Pane タイトル
-tmux select-pane -t "$SESSION_NAME:0.0" -T "Dispatcher"
+# Pane タイトル (notify-worker.sh が Opencode worker を見分けるのに使う)
+tmux select-pane -t "$SESSION_NAME:dispatcher" -T "Dispatcher"
 for n in 1 2 3; do
     case "${WORKER_AGENTS[$n]}" in
         opencode) _t="Worker$n (Opencode)" ;;
         claude-local) _t="Worker$n (CC+local)" ;;
         *) _t="Worker$n (Claude)" ;;
     esac
-    tmux select-pane -t "$SESSION_NAME:0.$n" -T "$_t"
+    tmux select-pane -t "$SESSION_NAME:w$n" -T "$_t"
 done
 if [ "$ENABLE_OPENCODE" = "1" ]; then
-    tmux select-pane -t "$SESSION_NAME:0.4" -T "Opencode (Flash-Next)"
+    tmux select-pane -t "$SESSION_NAME:term" -T "Opencode (Flash-Next)"
 else
-    tmux select-pane -t "$SESSION_NAME:0.4" -T "Terminal"
+    tmux select-pane -t "$SESSION_NAME:term" -T "Terminal"
 fi
-tmux select-pane -t "$SESSION_NAME:0.5" -T "Aux-Shell"
+tmux select-pane -t "$SESSION_NAME:aux" -T "Aux-Shell"
 if [ "$ENABLE_CODEX" = "1" ]; then
-    tmux select-pane -t "$SESSION_NAME:0.6" -T "Worker4 (Codex)"
+    tmux select-pane -t "$SESSION_NAME:w4" -T "Worker4 (Codex)"
 fi
 
-# Pane 4: Opencode (既定モデル Flash-Next) か汎用 Terminal のいずれか
+# term window: Opencode (既定モデル Flash-Next) か汎用 Terminal のいずれか
 # Opencode は --add-dir / --append-system-prompt を持たないため、project 位置引数に
 # ワークスペースを渡し、カレントディレクトリもワークスペースに合わせる。system prompt
 # 注入は不要 (対話 / send-keys での指示受け取り方式)。
 if [ "$ENABLE_OPENCODE" = "1" ]; then
-    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && opencode -m $OPENCODE_MODEL_Q --mini $WORKSPACE_Q" Enter
+    tmux send-keys -t "$SESSION_NAME:term" "cd $WORKSPACE_Q && opencode -m $OPENCODE_MODEL_Q --mini $WORKSPACE_Q" Enter
 else
-    tmux send-keys -t "$SESSION_NAME:0.4" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
+    tmux send-keys -t "$SESSION_NAME:term" "cd $WORKSPACE_Q && echo Terminal ready - $WORKSPACE_Q" Enter
 fi
 
-# Aux-Shell (Pane 5) は汎用シェル
-tmux send-keys -t "$SESSION_NAME:0.5" "cd $WORKSPACE_Q && echo 'Aux-Shell ready (SSH 等の汎用利用)'" Enter
+# aux window は汎用シェル
+tmux send-keys -t "$SESSION_NAME:aux" "cd $WORKSPACE_Q && echo 'Aux-Shell ready (SSH 等の汎用利用)'" Enter
 
-# Pane 0: Dispatcher (Claude, スクリプトディレクトリで起動)
+# dispatcher window: Dispatcher (Claude, スクリプトディレクトリで起動)
 # instructions/*.md 内の {SQUAD_ROOT} プレースホルダは起動時に実パスへ展開する
 # PONYTAIL_DEFAULT_MODE: ponytail プラグイン導入済み環境でロール別に制御する。
 #   Dispatcher は YAML 管理のみでコードを書かないため off、Worker 1-3 は実装担当のため
 #   full。プラグイン未導入なら無視されるだけで無害。レベルを変えたい場合はここを編集
 #   (lite/full/ultra)。導入手順は README の「Ponytail 連携 (任意)」参照。
-tmux send-keys -t "$SESSION_NAME:0.0" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:dispatcher" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\"" Enter
 
-# Pane 1-3: Worker 1-3 (Claude, ワークスペースで起動)
+# w1-w3 window: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
 # 無指定でも $TMUX_PANE → config.json 逆引きで動くが、明示する方が確実。
 # --settings: worker の cwd が任意の WORKSPACE のため、project hooks が読まれない。
@@ -484,7 +476,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
@@ -500,20 +492,20 @@ for n in 1 2 3; do
         # --mini: フルTUI (opentui キャンバス描画) が narrow pane で SIGILL クラッシュ
         # するのを確認したため、軽量な最小インタラクティブUIに切り替えて回避。
         # --auto --prompt での起動と send-keys での対話継続はそのまま使える。
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q" Enter
+        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q" Enter
     else
-        tmux send-keys -t "$SESSION_NAME:0.$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     fi
 done
 
-# Pane 6: Worker 4 (Codex, ワークスペースで起動)
+# w4 window: Worker 4 (Codex, ワークスペースで起動)
 # Codex は --append-system-prompt 相当が無いため、初期 PROMPT として worker-codex.md を渡す。
 # --dangerously-bypass-approvals-and-sandbox: tmux 内の信頼環境で完全自律実行 (承認なし)。
 #   tmux send-keys / gh / git push 等が無確認で通り、毎ステップの承認待ち停止を解消する。
 # SQUAD_WORKER_ID は Codex の hook 機構があれば squad と連携するための識別子 (将来用、Claude hook には未対応)。
-# SQUAD_ENABLE_CODEX=0 の場合、codex CLI を使わない環境向けに Pane 6 自体を起動しない。
+# SQUAD_ENABLE_CODEX=0 の場合、codex CLI を使わない環境向けに w4 window 自体を作らない。
 if [ "$ENABLE_CODEX" = "1" ]; then
-    tmux send-keys -t "$SESSION_NAME:0.6" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 SQUAD_SESSION=$SESSION_NAME_Q codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+    tmux send-keys -t "$SESSION_NAME:w4" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 SQUAD_SESSION=$SESSION_NAME_Q codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
 fi
 
 # 監視デーモン (watcher) をバックグラウンド起動
@@ -533,26 +525,26 @@ echo ""
 echo "セッション名: $SESSION_NAME"
 echo "ワークスペース: $WORKSPACE"
 echo ""
-echo "Pane構成:"
-echo "  Pane 0: Dispatcher (Claude $DISPATCHER_MODEL, タスク分配)"
+echo "window 構成 (prefix + w で一覧、宛先は $SESSION_NAME:<window 名>):"
+echo "  dispatcher: Dispatcher (Claude $DISPATCHER_MODEL, タスク分配)"
 for n in 1 2 3; do
     case "${WORKER_AGENTS[$n]}" in
-        opencode) echo "  Pane $n: Worker $n (Opencode, $OPENCODE_MODEL) ← SQUAD_W${n}_AGENT=opencode" ;;
-        claude-local) echo "  Pane $n: Worker $n (Claude Code + $LOCAL_MODEL) ← SQUAD_W${n}_AGENT=claude-local" ;;
-        *) echo "  Pane $n: Worker $n (Claude)" ;;
+        opencode) echo "  w$n: Worker $n (Opencode, $OPENCODE_MODEL) ← SQUAD_W${n}_AGENT=opencode" ;;
+        claude-local) echo "  w$n: Worker $n (Claude Code + $LOCAL_MODEL) ← SQUAD_W${n}_AGENT=claude-local" ;;
+        *) echo "  w$n: Worker $n (Claude)" ;;
     esac
 done
-if [ "$ENABLE_OPENCODE" = "1" ]; then
-    echo "  Pane 4: Opencode (Flash-Next, デフォルトモデル local/qwen38-flash-next)"
-else
-    echo "  Pane 4: Terminal (汎用シェル)"
-fi
-echo "  Pane 5: Aux-Shell (汎用 SSH 等)"
 if [ "$ENABLE_CODEX" = "1" ]; then
-    echo "  Pane 6: Worker 4 (Codex, 設計・cross-review 担当)"
+    echo "  w4: Worker 4 (Codex, 設計・cross-review 担当)"
 else
-    echo "  Pane 6: (無効 — SQUAD_ENABLE_CODEX=0。設計・cross-review は Claude W1-W3 に振ってください)"
+    echo "  w4: (作らない — SQUAD_ENABLE_CODEX=0。設計・cross-review は Claude W1-W3 に振ってください)"
 fi
+if [ "$ENABLE_OPENCODE" = "1" ]; then
+    echo "  term: Opencode (Flash-Next, デフォルトモデル local/qwen38-flash-next)"
+else
+    echo "  term: Terminal (汎用シェル)"
+fi
+echo "  aux: Aux-Shell (汎用 SSH 等)"
 echo ""
 echo "接続コマンド: tmux attach -t $SESSION_NAME"
 echo "終了コマンド: ./stop.sh"
