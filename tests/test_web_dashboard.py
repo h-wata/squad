@@ -341,7 +341,7 @@ def test_page_pins_cytoscape_version(server: tuple[str, list]) -> None:
     base, _ = server
     _code, body = _req(f'{base}/?token={TOKEN}')
     assert b'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js" integrity="sha384-' in body
-    assert b"name: 'breadthfirst'" in body
+    assert b"name: 'preset'" in body
 
 
 def test_yaml_shallow_reads_block_scalar(tmp_path: Path) -> None:
@@ -617,3 +617,57 @@ def test_page_script_parses(tmp_path: Path) -> None:
     js = tmp_path / 'page.js'
     js.write_text(web.PAGE[web.PAGE.index('<script>\n') + 9 : web.PAGE.rindex('</script>')])
     subprocess.run([node, '--check', str(js)], check=True)
+
+
+def _node(node_id: str, kind: str, issued: str = '') -> tuple[dict, dict]:
+    return {'node_id': node_id, 'kind': kind, 'detail': {}}, {'issued_at': issued}
+
+
+def test_place_orders_columns_by_derived_from_and_rows_by_issue_time() -> None:
+    """実装 -> レビュー -> 修正 -> 再レビューが左から右、同じ列は発注時刻の順 (#93)."""
+    found = {
+        'goal:p#1': _node('goal:p#1', 'goal'),
+        'intent:p/impl': _node('intent:p/impl', 'intent', '2026-01-01T00:00:00+00:00'),
+        'intent:p/review': _node('intent:p/review', 'intent', '2026-01-01T01:00:00+00:00'),
+        'intent:p/fix': _node('intent:p/fix', 'intent', '2026-01-01T02:00:00+00:00'),
+        'intent:p/other': _node('intent:p/other', 'intent', '2026-01-01T00:30:00+00:00'),
+        'result:r1': _node('result:r1', 'result'),
+    }
+    edges = [
+        {'src': 'goal:p#1', 'rel': 'spawns', 'dst': 'intent:p/impl'},
+        {'src': 'intent:p/impl', 'rel': 'yields', 'dst': 'result:r1'},
+        {'src': 'intent:p/review', 'rel': 'derived_from', 'dst': 'intent:p/impl'},
+        {'src': 'intent:p/fix', 'rel': 'derived_from', 'dst': 'intent:p/review'},
+    ]
+    web.place_nodes(found, edges, 'goal:p#1')
+    pos = {k: (v[0]['col'], v[0]['row']) for k, v in found.items()}
+    assert pos['goal:p#1'] == (0, 0)
+    assert [pos[k][0] for k in ('intent:p/impl', 'intent:p/review', 'intent:p/fix')] == [1, 2, 3]
+    assert pos['intent:p/other'] == (1, 2)  # impl (row 0) と、その結果 (row 1) の下
+    assert pos['result:r1'] == (1, 1)
+
+
+def test_place_survives_derived_from_cycle() -> None:
+    found = {k: _node(k, 'intent', k) for k in ('intent:a', 'intent:b')}
+    edges = [{'src': 'intent:a', 'rel': 'derived_from', 'dst': 'intent:b'}] * 1 + [
+        {'src': 'intent:b', 'rel': 'derived_from', 'dst': 'intent:a'}
+    ]
+    web.place_nodes(found, edges, 'goal:x')
+    assert all('col' in v[0] for v in found.values())
+
+
+def test_graph_gives_positions_and_one_task_goal_is_a_card(server: tuple[str, list]) -> None:
+    base, _ = server
+    multi = _get_json(base, '/api/graph?goal=goal:pj/SQUAD-1')
+    assert multi['card'] is None
+    assert all('col' in n and 'row' in n for n in multi['nodes'])
+    single = _get_json(base, '/api/graph?goal=goal:pj/SQUAD-2')
+    assert single['card']['node_id'] == 'intent:pj/SQUAD-2'
+    assert single['card']['detail']['result_summary']  # 結果の要約もカードに入る
+    assert SECRET not in json.dumps(single)
+
+
+def test_page_has_readable_labels_and_card_renderer() -> None:
+    page = web.PAGE
+    assert "layout: {name: 'preset'" in page and 'drawCard' in page
+    assert "'font-size': 17" in page

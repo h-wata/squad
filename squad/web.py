@@ -220,13 +220,59 @@ def graph_data(db_path: Path, goal: str) -> dict[str, Any]:
                 sorted(ids),
             ).fetchall()
         )
-        return {
-            'goal': goal,
-            'nodes': [found[k][0] for k in sorted(found)],
-            'edges': [{'src': s, 'rel': r, 'dst': d} for s, r, d in sorted(edges) if s in found and d in found],
-        }
+        out_edges = [{'src': s, 'rel': r, 'dst': d} for s, r, d in sorted(edges) if s in found and d in found]
+        place_nodes(found, out_edges, goal)
+        intents = [n for n, _ in found.values() if n['kind'] == 'intent']
+        # task が 1 件のゴールは図にせずカードで出す (内容 + 結果の要約は detail にある)
+        card = intents[0] if len(intents) == 1 else None
+        return {'goal': goal, 'nodes': [found[k][0] for k in sorted(found)], 'edges': out_edges, 'card': card}
 
     return _query(db_path, fn)
+
+
+def place_nodes(
+    found: dict[str, tuple[dict[str, Any], dict[str, Any]]], edges: list[dict[str, str]], goal: str
+) -> None:
+    """Graph の位置 (col = 左から何列目, row = 上から何段目) を node に入れる (#93).
+
+    列は derived_from の深さ (親より必ず右)、同じ列の中は発注時刻の順。ゴールは左端 (col 0)、
+    result / fact は持ち主の task の真下に積む。発注時刻は issued_at (UTC)、無ければ created_at。
+    """
+    intents = sorted(
+        (n for n, _ in found.values() if n['kind'] == 'intent'),
+        key=lambda n: (found[n['node_id']][1].get('issued_at') or n['detail'].get('created_at') or '', n['node_id']),
+    )
+    parents: dict[str, list[str]] = {}
+    for e in edges:
+        if e['rel'] == 'derived_from' and e['src'] in found and e['dst'] in found:
+            parents.setdefault(e['src'], []).append(e['dst'])
+    col = {n['node_id']: 1 for n in intents}
+    for _ in range(len(intents)):  # 深さが落ち着くまで (循環があっても件数回で止める)
+        changed = False
+        for n in intents:
+            want = max([col[p] + 1 for p in parents.get(n['node_id'], []) if p in col], default=1)
+            if want > col[n['node_id']] and want <= len(intents) + 1:
+                col[n['node_id']], changed = want, True
+        if not changed:
+            break
+    owned: dict[str, list[str]] = {}
+    for e in edges:
+        if e['rel'] == 'yields' and e['src'] in col:
+            owned.setdefault(e['src'], []).append(e['dst'])
+    cursor: dict[int, int] = {}
+    for n in intents:
+        c = col[n['node_id']]
+        row = cursor.get(c, 0)
+        n['col'], n['row'] = c, row
+        for i, r in enumerate(sorted(owned.get(n['node_id'], [])), 1):
+            if r in found:
+                found[r][0]['col'], found[r][0]['row'] = c, row + i
+        cursor[c] = row + 1 + len(owned.get(n['node_id'], []))
+    if goal in found:
+        found[goal][0]['col'], found[goal][0]['row'] = 0, 0
+    for node, _ in found.values():
+        node.setdefault('col', 0)
+        node.setdefault('row', 0)
 
 
 def _first_line(text: str) -> str:
@@ -510,7 +556,8 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 #goals .g{padding:.5em .7em;border-bottom:1px solid #eaeef2;cursor:pointer}
 #goals .g:hover{background:#f6f8fa}#goals .g.on{background:#ddf4ff}
 #goals .g .t{margin:.2em 0}
-#cy{flex:1;background:#fff;border:1px solid #d0d7de;border-radius:8px}
+#cy{flex:1;background:#fff;border:1px solid #d0d7de;border-radius:8px;overflow:auto}
+#cy .card{padding:1em;max-width:60em}
 #side{width:380px;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.8em}
 #side pre{white-space:pre-wrap;font-size:12px;background:#f6f8fa;padding:.5em;border-radius:6px}
 .md p,.md ul,.md ol,.md pre{margin:.3em 0}.md ul,.md ol{padding-left:1.4em}
@@ -639,30 +686,49 @@ const COLOR = {running: '#0969da', blocked: '#cf222e', done: '#1a7f37', verified
 const SHAPE = {goal: 'round-rectangle', intent: 'round-rectangle', result: 'ellipse', fact: 'diamond'};
 function label(n) {
   const id = n.kind === 'intent' ? n.node_id.split('/').pop() : n.kind === 'goal' ? '' : n.kind;
-  const t = n.title.length > 18 ? n.title.slice(0, 18) + '…' : n.title;
+  const t = n.title.length > 16 ? n.title.slice(0, 16) + '…' : n.title;
   return id ? id + '\\n' + t : t;
+}
+const CELL_X = 250, CELL_Y = 84;  // 列幅 / 段の高さ (ノードは 210 x 62)
+function drawCard(d) {  // task が 1 件のゴール: 図にせず、内容と結果の要約を出す
+  const root = document.getElementById('cy'), n = d.card; root.replaceChildren();
+  const box = el('div', 'card'); box.append(el('div', 'mono', n.node_id));
+  const h = el('h3', '', ''); h.append(badge(n.state), ' ', renderMarkdown(el('span', ''), n.title, true));
+  box.append(h);
+  for (const k of ['result_summary', 'description']) {
+    const v = n.detail[k]; if (!v) continue;
+    box.append(el('h4', '', NAMES[k])); box.append(renderMarkdown(el('div'), v));
+  }
+  root.append(box); side(n);
 }
 async function drawGraph() {
   if (!goal) return;
   const d = await api('/api/graph?goal=' + encodeURIComponent(goal)); meta(d);
   const pick = pickNode;
   const first = d.nodes.find(n => n.node_id === pick) || d.nodes.find(n => n.node_id === goal);
+  if (cy) { cy.destroy(); cy = null; }
+  document.getElementById('cy').replaceChildren();
+  if (d.card) { drawCard(d); return; }
   if (typeof cytoscape === 'undefined') { const e = document.getElementById('err'); e.hidden = false;
     e.textContent = 'Cytoscape.js を CDN から読めませんでした (右の詳細だけ出します)'; side(first); return; }
   const els = d.nodes.map(n => ({data: {id: n.node_id, label: label(n), kind: n.kind,
-    color: COLOR[n.state] || '#8c959f', n}}));
-  for (const e of d.edges) els.push({data: {id: e.src + '>' + e.dst, source: e.src, target: e.dst, rel: e.rel}});
-  if (cy) cy.destroy();
+    color: COLOR[n.state] || '#8c959f', n}, position: {x: n.col * CELL_X, y: n.row * CELL_Y}}));
+  const derivedTo = new Set(d.edges.filter(e => e.rel === 'derived_from').map(e => e.src));
+  // ゴールからの spawns 線は、他の task から派生していない task (左端の列) にだけ引く
+  for (const e of d.edges) if (!(e.rel === 'spawns' && derivedTo.has(e.dst)))
+    els.push({data: {id: e.src + '>' + e.dst, rel: e.rel,  // 派生は親 -> 子 (時間の向き) に描く
+      source: e.rel === 'derived_from' ? e.dst : e.src, target: e.rel === 'derived_from' ? e.src : e.dst}});
   cy = cytoscape({container: document.getElementById('cy'), elements: els, wheelSensitivity: 0.3,
-    layout: {name: 'breadthfirst', directed: true, roots: [goal], spacingFactor: 1.1, padding: 20},
+    layout: {name: 'preset', fit: true, padding: 30},
     style: [
       {selector: 'node', style: {label: 'data(label)', 'text-wrap': 'wrap', 'text-valign': 'center',
-        'font-size': 12, shape: e => SHAPE[e.data('kind')], width: 150, height: 44,
-        'background-color': '#fff', 'border-width': 2, 'border-color': 'data(color)', color: '#1f2328'}},
-      {selector: 'node[kind = "goal"]', style: {'background-color': '#24292f', color: '#fff', width: 170}},
-      {selector: 'node[kind = "fact"]', style: {width: 90, height: 50}},
-      {selector: 'node:selected', style: {'border-width': 4, 'border-color': '#bf8700'}},
-      {selector: 'edge', style: {width: 1.5, 'line-color': '#afb8c1', 'target-arrow-color': '#afb8c1',
+        'font-size': 17, shape: e => SHAPE[e.data('kind')], width: 210, height: 62,
+        'background-color': '#fff', 'border-width': 3, 'border-color': 'data(color)', color: '#1f2328'}},
+      {selector: 'node[kind = "goal"]', style: {'background-color': '#24292f', color: '#fff', width: 200}},
+      {selector: 'node[kind = "result"]', style: {width: 210, height: 40, 'font-size': 14}},
+      {selector: 'node[kind = "fact"]', style: {width: 120, height: 50}},
+      {selector: 'node:selected', style: {'border-width': 5, 'border-color': '#bf8700'}},
+      {selector: 'edge', style: {width: 2, 'line-color': '#afb8c1', 'target-arrow-color': '#afb8c1',
         'target-arrow-shape': 'triangle', 'curve-style': 'bezier'}},
       {selector: 'edge[rel = "derived_from"]', style: {'line-style': 'dashed'}}]});
   cy.on('tap', 'node', ev => side(ev.target.data('n')));
