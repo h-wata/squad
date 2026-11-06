@@ -13,6 +13,13 @@
 
 ### Added
 
+- `squad web --allow-write`: 活動タブから Dispatcher に指示を出す (#85)。`POST /api/instructions` は
+  `queue/instructions/<session>/` に 1 件 1 ファイルで書くだけで、tmux には送らない。トークンは
+  `Authorization` ヘッダだけで受け付け、`Origin` が自分自身でなければ 403、本文は 4000 文字まで。
+  watchd が Dispatcher (pane 0) の待機中にだけ 1 件ずつ打ち込み、打ち込む前に `delivered_at` を書く
+  (再起動しても二重に送らない)。graph sync が指示を読み込み、活動タブに「指示」として時系列で出す。
+  フラグ無しは今と同じ読み取り専用 (POST は 405、入力欄も出ない)。graph DB の schema は 3 に上がる
+  (古い DB は次の sync で作り直される)。
 - `squad web`: 読み取り専用の Web ダッシュボード (#76)。最初の画面はセッション別の稼働状況
   (担当 project、worker ごとの状態と担当タスク。状態は `squad ls` と同じ判定、pane はクリックで
   開く)。ほかに Projects の縦表 (active / blocked / 今日終わった件数、最新の結果、最終更新) と、
