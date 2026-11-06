@@ -632,10 +632,12 @@ def test_place_orders_columns_by_derived_from_and_rows_by_issue_time() -> None:
         'intent:p/fix': _node('intent:p/fix', 'intent', '2026-01-01T02:00:00+00:00'),
         'intent:p/other': _node('intent:p/other', 'intent', '2026-01-01T00:30:00+00:00'),
         'result:r1': _node('result:r1', 'result'),
+        'fact:f1': _node('fact:f1', 'fact'),
     }
     edges = [
         {'src': 'goal:p#1', 'rel': 'spawns', 'dst': 'intent:p/impl'},
         {'src': 'intent:p/impl', 'rel': 'yields', 'dst': 'result:r1'},
+        {'src': 'result:r1', 'rel': 'yields', 'dst': 'fact:f1'},
         {'src': 'intent:p/review', 'rel': 'derived_from', 'dst': 'intent:p/impl'},
         {'src': 'intent:p/fix', 'rel': 'derived_from', 'dst': 'intent:p/review'},
     ]
@@ -643,8 +645,9 @@ def test_place_orders_columns_by_derived_from_and_rows_by_issue_time() -> None:
     pos = {k: (v[0]['col'], v[0]['row']) for k, v in found.items()}
     assert pos['goal:p#1'] == (0, 0)
     assert [pos[k][0] for k in ('intent:p/impl', 'intent:p/review', 'intent:p/fix')] == [1, 2, 3]
-    assert pos['intent:p/other'] == (1, 2)  # impl (row 0) と、その結果 (row 1) の下
     assert pos['result:r1'] == (1, 1)
+    assert pos['fact:f1'] == (1, 2)  # fact は goal と重ならず result の下
+    assert pos['intent:p/other'] == (1, 3)
 
 
 def test_place_survives_derived_from_cycle() -> None:

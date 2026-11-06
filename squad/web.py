@@ -255,19 +255,22 @@ def place_nodes(
                 col[n['node_id']], changed = want, True
         if not changed:
             break
-    owned: dict[str, list[str]] = {}
+    below: dict[str, list[str]] = {}
     for e in edges:
-        if e['rel'] == 'yields' and e['src'] in col:
-            owned.setdefault(e['src'], []).append(e['dst'])
+        if e['rel'] == 'yields':
+            below.setdefault(e['src'], []).append(e['dst'])
     cursor: dict[int, int] = {}
     for n in intents:
         c = col[n['node_id']]
-        row = cursor.get(c, 0)
-        n['col'], n['row'] = c, row
-        for i, r in enumerate(sorted(owned.get(n['node_id'], [])), 1):
-            if r in found:
-                found[r][0]['col'], found[r][0]['row'] = c, row + i
-        cursor[c] = row + 1 + len(owned.get(n['node_id'], []))
+        stack, seen = [n['node_id']], {n['node_id']}  # intent の下に result、その下に fact を順に積む
+        while stack:
+            cur = stack.pop(0)
+            found[cur][0]['col'], found[cur][0]['row'] = c, cursor.get(c, 0)
+            cursor[c] = cursor.get(c, 0) + 1
+            for nxt in sorted(below.get(cur, [])):
+                if nxt in found and nxt not in seen:
+                    seen.add(nxt)
+                    stack.insert(0, nxt)
     if goal in found:
         found[goal][0]['col'], found[goal][0]['row'] = 0, 0
     for node, _ in found.values():
@@ -699,7 +702,7 @@ function drawCard(d) {  // task が 1 件のゴール: 図にせず、内容と�
     const v = n.detail[k]; if (!v) continue;
     box.append(el('h4', '', NAMES[k])); box.append(renderMarkdown(el('div'), v));
   }
-  root.append(box); side(n);
+  root.append(box); side(d.nodes.find(x => x.node_id === pickNode) || n);
 }
 async function drawGraph() {
   if (!goal) return;
