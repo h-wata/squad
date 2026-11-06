@@ -172,7 +172,8 @@ def load_state(worker: str) -> dict | None:
 def yaml_shallow(path: Path) -> dict[str, str]:
     """top-level の `key: value` だけ拾う簡易リーダー.
 
-    block scalar (`|`, `>`) や list, nested は無視。CLI で必要な
+    block scalar (`|`, `>`) は本文を空白区切りの 1 行に畳んで返す (表示用。report の summary は
+    `summary: |` で書かれることが多い)。list, nested は無視。CLI で必要な
     task_id/project/assigned_to/agent/model/title/status/summary/completed_at
     だけ取れれば十分。
     """
@@ -180,7 +181,16 @@ def yaml_shallow(path: Path) -> dict[str, str]:
     if not path.exists():
         return out
     pat = re.compile(r'^([A-Za-z_][\w\-]*)\s*:\s*(.+?)\s*$')
+    block_key = ''  # 本文を集めている block scalar の key
+    block: list[str] = []
     for line in path.read_text(errors='replace').splitlines():
+        if block_key and (not line.strip() or line[0].isspace()):
+            if line.strip():
+                block.append(line.strip())
+            continue
+        if block_key:
+            out[block_key] = ' '.join(block)
+            block_key, block = '', []
         # top-level 行 (インデント無し) のみ対象
         if not line or line[0].isspace() or line.startswith('#'):
             continue
@@ -188,17 +198,27 @@ def yaml_shallow(path: Path) -> dict[str, str]:
         if not m:
             continue
         key, val = m.group(1), m.group(2)
-        # block scalar 開始マーカは捨てる (本文は読まない)
         if val in ('|', '>', '|-', '>-', '|+', '>+'):
+            block_key = key
             continue
         # クオート剥がし
         if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
             val = val[1:-1]
         out[key] = val
+    if block_key:
+        out[block_key] = ' '.join(block)
     return out
 
 
 # ---------- subcommands ----------
+
+
+def probe_worker(pane: str) -> dict:
+    """Pane 1 つの状態 (idle / busy / permission_wait / unreachable)。squad ls と squad web が共有する."""
+    reachable, tail = tmux_capture(pane)
+    if not reachable:
+        return {'status': 'unreachable', 'context_pct': None, 'model': None, 'last_line': tail[:200]}
+    return detect_status(tail)
 
 
 def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
@@ -206,21 +226,7 @@ def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
     rows = []
     for w, meta in cfg.get('workers', {}).items():
         pane = meta['pane']
-        reachable, tail = tmux_capture(pane)
-        if not reachable:
-            entry = {
-                'worker': w,
-                'pane': pane,
-                'agent': meta.get('agent'),
-                'status': 'unreachable',
-                'context_pct': None,
-                'model': None,
-                'last_line': tail[:200],
-                'updated_at': now,
-            }
-        else:
-            det = detect_status(tail)
-            entry = {'worker': w, 'pane': pane, 'agent': meta.get('agent'), **det, 'updated_at': now}
+        entry = {'worker': w, 'pane': pane, 'agent': meta.get('agent'), **probe_worker(pane), 'updated_at': now}
         # 既存 state があり、hook 由来の last_event があれば保持
         prev = load_state(w)
         if prev and prev.get('last_event'):
@@ -497,6 +503,26 @@ def cmd_trace(args: argparse.Namespace, _cfg: dict) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace, _cfg: dict) -> int:
+    import web  # noqa: PLC0415
+
+    token = args.token or os.environ.get('SQUAD_WEB_TOKEN', '')
+    if not token:
+        sys.exit(
+            'squad web: トークンが必要です (SQUAD_WEB_TOKEN か --token)。LAN に公開するため未設定では起動しません'
+        )
+    queue_dir = Path(args.queue_dir) if args.queue_dir else REPO_ROOT / 'queue'
+    srv = web.make_server(args.host, args.port, token, queue_dir / '.graph.db')
+    print(f'squad web: http://{args.host}:{srv.server_address[1]}/?token=<token> (読み取り専用, Ctrl-C で停止)')
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+    return 0
+
+
 # ---------- entry ----------
 
 
@@ -577,6 +603,13 @@ def main(argv: list[str] | None = None) -> int:
     p_tg.add_argument('trace_id', help='<session_id>:<行>.<block> (<行> だけならその行の全 block)')
     p_tg.add_argument('--context', type=int, default=0, help='前後に含める行数')
     p_trace.set_defaults(func=cmd_trace)
+
+    p_web = sub.add_parser('web', help='全 project の進捗を見る読み取り専用 Web ダッシュボード (Issue #76)')
+    p_web.add_argument('--host', default='0.0.0.0', help='既定 0.0.0.0 (LAN から開ける)')  # noqa: S104
+    p_web.add_argument('--port', type=int, default=8765)
+    p_web.add_argument('--token', help='アクセストークン (既定: env SQUAD_WEB_TOKEN。未設定なら起動しない)')
+    p_web.add_argument('--queue-dir', help=f'queue ルート path (既定: {REPO_ROOT / "queue"})。読むのは .graph.db だけ')
+    p_web.set_defaults(func=cmd_web)
 
     args = ap.parse_args(argv)
     cfg = load_config()

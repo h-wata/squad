@@ -67,7 +67,7 @@ def test_sync_builds_nodes_and_edges(queue: Path) -> None:
     db = graph.default_db_path(queue)
     nodes = dict(_rows(db, 'SELECT node_id, state FROM nodes'))
     assert nodes == {
-        'goal:pj#42': 'unknown',
+        'goal:pj#42': 'running',  # 配下の T2 が実行中 (#76 addendum: ゴールの状態は配下の task から決める)
         'intent:pj/T1': 'done',
         'intent:pj/T2': 'running',
         f'result:{RID1}': 'completed',
@@ -256,3 +256,174 @@ def test_verified_ignores_approve_older_than_latest_result(status_queue: Path) -
     report = pj_dir / 'reports' / 'archive' / 'worker4_T4.yaml'
     _write(report, report.read_text(), 140)  # やり直して新しい report が出た
     assert _status(status_queue)['goals']['-']['verified'] == 0  # 古い approve は新しい report を承認しない
+
+
+# ---------- #76: web と status が共有する状態判定 (実 queue と同じ形の fixture) ----------
+
+T0 = 1_780_000_000  # 2026-05-28 頃の epoch。created_at / completed_at はこれを基準に書く
+
+
+def _at(sec: int, tz: str = '+00:00') -> str:
+    from datetime import datetime  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+    from datetime import timezone  # noqa: PLC0415
+
+    hours = int(tz[:3]) if tz else 9  # tz='' は naive (fixture の TZ=Asia/Tokyo のローカル時刻)
+    text = datetime.fromtimestamp(T0 + sec, timezone(timedelta(hours=hours))).isoformat(timespec='seconds')
+    return text if tz else text[:-6]
+
+
+@pytest.fixture
+def real_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """実 queue で見た形: mtime の一括更新、naive と +09:00 の混在、別 task_id の report、verdict だけの review."""
+    import time  # noqa: PLC0415
+
+    monkeypatch.setenv('TZ', 'Asia/Tokyo')
+    time.tzset()
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'pj'
+    (pj / '.squad_session').parent.mkdir(parents=True)
+    (pj / '.squad_session').write_text('sq1\n')
+    # A: created_at (+09:00) の後に report が出て、その後 tasks/ が一括 touch された -> done
+    _write(
+        pj / 'tasks' / 'worker1.yaml',
+        f'task_id: A\ntitle: "一括 touch された完了済み"\nassigned_to: worker1\ncreated_at: "{_at(0, "+09:00")}"\n'
+        'description: |\n  画面を直す\n  二行目\n',
+        T0 + 500,
+    )
+    _write(
+        pj / 'reports' / 'worker1_report.yaml',
+        f'report_id: "{RID1}"\ntask_id: A\nstatus: completed\nverify_status: pass\n'
+        f'summary: |\n  直した\n  二行目\ncompleted_at: "{_at(100, "")}"\n',  # naive = ローカル時刻
+        T0 + 600,
+    )
+    # B: 別 task_id の新しい report しか無い -> running (task_id で突き合わせる)
+    _write(
+        pj / 'tasks' / 'worker2.yaml',
+        f'task_id: B\ntitle: "実行中"\nassigned_to: worker2\ncreated_at: "{_at(200)}"\n',
+        T0 + 200,
+    )
+    _write(pj / 'reports' / 'worker2_report.yaml', 'task_id: OLD\nstatus: completed\nsummary: "前の"\n', T0 + 300)
+    # C: created_at 無し。report の completed_at は task より新しいが mtime は古い -> mtime で比べて running
+    _write(pj / 'tasks' / 'worker3.yaml', 'task_id: C\ntitle: "再発行"\nassigned_to: worker3\n', T0 + 400)
+    _write(
+        pj / 'reports' / 'worker3_report.yaml',
+        f'task_id: C\nstatus: blocked\nsummary: "前回"\ncompleted_at: "{_at(900)}"\n',
+        T0 + 350,
+    )
+    # D: cross-review。status を持たない verdict だけの review -> done
+    _write(pj / 'tasks' / 'worker4.yaml', f'task_id: D\ntitle: "review"\ncreated_at: "{_at(700)}"\n', T0 + 700)
+    _write(pj / 'reports' / 'worker4_review.yaml', 'task_id: D\nverdict: request_changes\n', T0 + 800)
+    # E: verifier の verdict だけ (fail) -> blocked
+    _write(pj / 'tasks' / 'worker5.yaml', 'task_id: E\ntitle: "検証中"\n', T0 + 100)
+    _write(pj / 'reports' / 'worker5_verdict.yaml', 'task_id: E\nresult: fail\n', T0 + 150)
+    # project ではないディレクトリ
+    (q / 'projects' / '.ruff_cache' / 'x').mkdir(parents=True)
+    (q / 'projects' / 'empty').mkdir()
+    yield q
+    monkeypatch.delenv('TZ')
+    time.tzset()
+
+
+def _intents(queue: Path) -> dict[str, tuple[str, dict]]:
+    import json  # noqa: PLC0415
+
+    graph.sync(queue)
+    rows = _rows(graph.default_db_path(queue), "SELECT node_id, state, payload_json FROM nodes WHERE kind = 'intent'")
+    return {r[0].split('/')[-1]: (r[1], json.loads(r[2])) for r in rows}
+
+
+def test_state_uses_created_at_completed_at_task_id_and_verdicts(real_queue: Path) -> None:
+    intents = _intents(real_queue)
+    assert {k: v[0] for k, v in intents.items()} == {
+        'A': 'done',  # verify は pass だが review が無いので verified ではない
+        'B': 'running',
+        'C': 'running',
+        'D': 'done',
+        'E': 'blocked',
+    }
+    a = intents['A'][1]
+    assert a['description'] == '画面を直す\n二行目\n'
+    assert a['current'] is True
+    assert a['finished_at'] == _iso_utc(100)  # naive の completed_at を Asia/Tokyo として UTC にした値
+    assert intents['B'][1]['finished_at'] == ''
+
+
+def _iso_utc(sec: int) -> str:
+    from datetime import datetime  # noqa: PLC0415
+    from datetime import timezone  # noqa: PLC0415
+
+    return datetime.fromtimestamp(T0 + sec, timezone.utc).isoformat(timespec='seconds')
+
+
+def test_status_matches_db_states(real_queue: Path) -> None:
+    pj = _status(real_queue)
+    assert pj['goals']['-'] == {'running': 2, 'blocked': 1, 'done': 2, 'verified': 0, 'unreported': 0}
+    assert {u['node_id'] for u in pj['unfinished']} == {'intent:pj/B', 'intent:pj/C', 'intent:pj/E'}
+
+
+def test_sync_stores_projects_and_synced_at(real_queue: Path) -> None:
+    graph.sync(real_queue)
+    db = graph.default_db_path(real_queue)
+    rows = _rows(db, 'SELECT project, session, latest_result, updated_at FROM projects')
+    assert [r[:2] for r in rows] == [('pj', 'sq1')]  # .ruff_cache と空ディレクトリは出ない
+    # 最新の結果は completed_at (無ければ mtime) が一番新しい report (C の completed_at = +900)
+    latest = _rows(db, f"SELECT title FROM nodes WHERE node_id = '{rows[0][2]}'")
+    assert latest == [('前回',)]
+    assert rows[0][3] == _iso_utc(900)
+    result = _rows(db, f"SELECT payload_json FROM nodes WHERE node_id = 'result:{RID1}'")[0][0]
+    assert '"summary": "直した\\n二行目\\n"' in result
+    (synced_at,) = _rows(db, "SELECT value FROM meta WHERE key = 'synced_at'")[0]
+    assert synced_at.endswith('+00:00')
+
+
+# ---------- #76 addendum: ゴールの組み分けと完了 ----------
+
+
+def test_goals_group_derived_tasks_by_task_id_prefix(tmp_path: Path) -> None:
+    """実 queue の命名: SQUAD-284 / -fix1 / -fix2 / -rework、SQUAD-016-review、parent_issue 付きの派生、単独 task."""
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'squad'
+    t = pj / 'tasks' / 'archive'
+    _write(t / 'worker1_SQUAD-284.yaml', 'task_id: SQUAD-284\ntitle: "web dashboard"\n', 100)
+    _write(t / 'worker1_SQUAD-284-fix1.yaml', 'task_id: SQUAD-284-fix1\ntitle: "fix1"\n', 200)
+    _write(pj / 'tasks' / 'worker1.yaml', 'task_id: SQUAD-284-rework\ntitle: "作り直し"\n', 300)
+    _write(t / 'worker4_SQUAD-016-review.yaml', 'task_id: SQUAD-016-review\ntitle: "review だけ残った"\n', 100)
+    _write(t / 'worker1_SQUAD-100.yaml', 'task_id: SQUAD-100\ntitle: "親"\ncontext:\n  parent_issue: 9\n', 100)
+    _write(t / 'worker1_SQUAD-100-fix1.yaml', 'task_id: SQUAD-100-fix1\ntitle: "親の修正"\n', 200)
+    _write(t / 'worker2_issue34-bench.yaml', 'task_id: issue34-bench\ntitle: "単独"\n', 100)
+    for tid, mtime in (('SQUAD-284', 110), ('SQUAD-284-fix1', 210), ('SQUAD-016-review', 110)):
+        _write(pj / 'reports' / 'archive' / f'{tid}.yaml', f'task_id: {tid}\nstatus: completed\n', mtime)
+    for tid in ('SQUAD-100', 'SQUAD-100-fix1', 'issue34-bench'):
+        _write(pj / 'reports' / 'archive' / f'{tid}.yaml', f'task_id: {tid}\nstatus: completed\n', 150)
+    graph.sync(q)
+    db = graph.default_db_path(q)
+    spawns: dict[str, set[str]] = {}
+    for src, dst in _rows(db, "SELECT src_id, dst_id FROM edges WHERE rel = 'spawns'"):
+        spawns.setdefault(src, set()).add(dst.split('/', 1)[1])
+    assert spawns == {
+        'goal:squad/SQUAD-284': {'SQUAD-284', 'SQUAD-284-fix1', 'SQUAD-284-rework'},
+        'goal:squad/SQUAD-016': {'SQUAD-016-review'},  # 根の task が無くても頭でまとめる
+        'goal:squad#9': {'SQUAD-100', 'SQUAD-100-fix1'},  # 根が Issue を持てば派生もその Issue へ
+        'goal:squad/issue34-bench': {'issue34-bench'},  # 組めない task は 1 件で 1 ゴール
+    }
+    goals = {r[0]: r[1:] for r in _rows(db, "SELECT node_id, state, title FROM nodes WHERE kind = 'goal'")}
+    assert goals['goal:squad/SQUAD-284'] == ('running', 'SQUAD-284 web dashboard')  # 題名は根の task
+    assert goals['goal:squad#9'] == ('done', 'Issue 9 親')  # 配下が全部 done なら完了
+    assert goals['goal:squad/SQUAD-016'][0] == 'done'
+    # status は従来どおり Issue のゴールだけで集計する
+    assert set(graph.status(db)['squad']['goals']) == {'goal:squad#9', '-'}
+
+
+def test_issue_url_goal_merges_tasks_across_projects(tmp_path: Path) -> None:
+    """同じ Issue の URL を別 project の task が指しても、ゴールの配下は全部残る."""
+    q = tmp_path / 'queue'
+    url = 'https://github.com/o/r/issues/1'
+    for pj, state in (('a', 'completed'), ('b', 'blocked')):
+        task = f'task_id: T\ncontext:\n  parent_issue: {url}\n'
+        _write(q / 'projects' / pj / 'tasks' / 'archive' / 'w.yaml', task, 1)
+        _write(q / 'projects' / pj / 'reports' / 'archive' / 'w.yaml', f'task_id: T\nstatus: {state}\n', 2)
+    graph.sync(q)
+    db = graph.default_db_path(q)
+    assert set(_rows(db, "SELECT dst_id FROM edges WHERE src_id = 'goal:o/r#1'")) == {('intent:a/T',), ('intent:b/T',)}
+    assert _rows(db, "SELECT state FROM nodes WHERE node_id = 'goal:o/r#1'") == [('blocked',)]
