@@ -10,6 +10,8 @@ tmux だけは subprocess.run を差し替える (テスト環境の tmux に依
 from __future__ import annotations
 
 import ast
+from datetime import datetime
+from datetime import timezone
 import hashlib
 import json
 import os
@@ -146,7 +148,15 @@ def _get_json(base: str, path: str) -> dict:
     return json.loads(body)
 
 
-PATHS = ['/', '/api/sessions', '/api/pane?target=sq1:0.1', '/api/projects', '/api/goals', '/api/graph?goal=x']
+PATHS = [
+    '/',
+    '/api/sessions',
+    '/api/pane?target=sq1:0.1',
+    '/api/projects',
+    '/api/goals',
+    '/api/graph?goal=x',
+    '/api/activity',
+]
 
 
 def test_refuses_to_start_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -425,7 +435,7 @@ def test_page_loads_markdown_libs_pinned_with_sri() -> None:
 def test_every_body_field_goes_through_render_markdown() -> None:
     """本文 (題名・要約・内容) を textContent で直接入れている箇所が無い. innerHTML は renderMarkdown だけ."""
     script = web.PAGE[web.PAGE.index('<script>') :]
-    for expr in ('t.title', 'r.summary', 'g.title', 'n.title'):
+    for expr in ('t.title', 'r.summary', 'g.title', 'n.title', 'e.title'):
         assert not re.search(r"el\('[a-z0-9]+', '[^']*', " + re.escape(expr), script), expr
     # 横パネルの本文 4 種は renderMarkdown、日付や worker 名など短い値だけ textContent
     assert "const BODY = ['result_summary', 'description', 'summary', 'evidence'];" in script
@@ -466,3 +476,144 @@ def test_closed_task_is_gray_and_goal_counts_as_done(tmp_path: Path) -> None:
     assert '.closed,.unknown{background:#eaeef2;color:#57606a}' in web.PAGE
     assert "closed: '#8c959f'" in web.PAGE
     assert "STATE_LABEL = {closed: '完了 (報告なし)'}" in web.PAGE
+
+
+# ---------- 活動タブ (#82) ----------
+
+
+def _utc(sec: int) -> str:
+    return datetime.fromtimestamp(sec, timezone.utc).isoformat(timespec='seconds')
+
+
+RID = '3f2b1c8e-1111-4222-8333-444455556666'
+
+
+@pytest.fixture
+def activity_db(tmp_path: Path) -> Path:
+    """実 queue と同じ形で、配達済みの report が reports/ と reports/archive/ の両方にある queue.
+
+    watchd (#78) は bytes をそのまま写す。report_id を持つもの (SQUAD-5) と持たないもの (SQUAD-6) の両方。
+    pj2 は別セッション・3 日前.
+    """
+    q = tmp_path / 'queue'
+    pj = q / 'projects' / 'pj'
+    _write(pj / '.squad_session', 'sq1\n', NOW)
+    _write(
+        pj / 'tasks' / 'archive' / 'worker1.yaml',
+        f'task_id: SQUAD-5\ntitle: "画面を作る"\nassigned_to: worker1\ncreated_at: "{_utc(NOW - 3 * 3600)}"\n'
+        'context:\n  parent_issue: 82\n',
+        NOW - 3 * 3600,
+    )
+    done = (
+        f'report_id: "{RID}"\ntask_id: SQUAD-5\nworker: worker1\nstatus: completed\nverify_status: pass\n'
+        f'completed_at: "{_utc(NOW - 2 * 3600)}"\nsummary: |\n\n  作った {SECRET}\n  二行目\n'
+    )
+    _write(pj / 'reports' / 'worker1_report.yaml', done, NOW - 2 * 3600)
+    _write(pj / 'reports' / 'archive' / f'SQUAD-5__{RID}.yaml', done, NOW - 2 * 3600)
+    _write(
+        pj / 'tasks' / 'worker2.yaml',
+        f'task_id: SQUAD-6\ntitle: "詰まる"\nassigned_to: worker2\ncreated_at: "{_utc(NOW - 90 * 60)}"\n',
+        NOW - 90 * 60,
+    )
+    blocked = (
+        f'task_id: SQUAD-6\nworker: worker2\nstatus: blocked\nverify_status: fail\n'
+        f'completed_at: "{_utc(NOW - 30 * 60)}"\nsummary: "権限が無い"\n'
+    )
+    _write(pj / 'reports' / 'worker2_report.yaml', blocked, NOW - 30 * 60)
+    _write(pj / 'reports' / 'archive' / 'SQUAD-6__sha.yaml', blocked, NOW - 30 * 60)
+    pj2 = q / 'projects' / 'pj2'
+    _write(pj2 / '.squad_session', 'other\n', NOW)
+    _write(pj2 / 'tasks' / 'archive' / 'w.yaml', 'task_id: P2-1\ntitle: "昔の"\n', NOW - 3 * DAY)
+    _write(pj2 / 'reports' / 'archive' / 'w.yaml', 'task_id: P2-1\nstatus: completed\n', NOW - 3 * DAY + 60)
+    graph.sync(q, config_path=tmp_path / 'none.json')
+    shutil.rmtree(q / 'projects')  # web は YAML を読まない
+    return q / '.graph.db'
+
+
+def _events(data: dict) -> list[tuple[str, str, str]]:
+    return [(e['project'], e['task_id'], e['event']) for e in data['events']]
+
+
+def test_activity_newest_first_one_row_per_event(activity_db: Path) -> None:
+    data = web.activity_data(activity_db, 24)
+    assert data['error'] is None
+    assert _events(data) == [
+        ('pj', 'SQUAD-6', 'blocked'),
+        ('pj', 'SQUAD-6', 'order'),
+        ('pj', '', 'goal_done'),  # Issue 82 の配下 (SQUAD-5) が全部終わった時刻 = 最後の結果の時刻
+        ('pj', 'SQUAD-5', 'result'),
+        ('pj', 'SQUAD-5', 'order'),
+    ]  # reports/ と reports/archive/ の両方にある report も 1 行。pj2 は 24 時間より前
+    ats = [e['at'] for e in data['events']]
+    assert ats == sorted(ats, reverse=True)
+    ev = {(e['task_id'], e['event']): e for e in data['events']}
+    result = ev['SQUAD-5', 'result']
+    assert (result['at'], result['verify'], result['worker']) == (_utc(NOW - 2 * 3600), 'pass', 'worker1')
+    assert result['session'] == 'sq1'
+    assert result['title'] == '作った ghp_<redacted>'  # 要約の 1 行目 (空行は飛ばす)、マスク済み
+    assert ev['SQUAD-6', 'blocked']['verify'] == 'fail'
+    order = ev['SQUAD-5', 'order']
+    assert (order['at'], order['worker'], order['title']) == (_utc(NOW - 3 * 3600), 'worker1', '画面を作る')
+    assert ev['', 'goal_done']['at'] == _utc(NOW - 2 * 3600)
+    assert SECRET not in json.dumps(data)
+
+
+def test_activity_rows_point_to_graph_goal_and_node(activity_db: Path) -> None:
+    for e in web.activity_data(activity_db, 0)['events']:
+        nodes = {n['node_id'] for n in web.graph_data(activity_db, e['goal'])['nodes']}
+        assert e['node_id'] in nodes, e  # Graph でそのゴールを開くと、そのノードがある
+    ev = {(e['task_id'], e['event']): e for e in web.activity_data(activity_db, 24)['events']}
+    assert (ev['SQUAD-5', 'result']['goal'], ev['SQUAD-5', 'result']['node_id']) == ('goal:pj#82', f'result:{RID}')
+    assert ev['SQUAD-6', 'order']['node_id'] == 'intent:pj/SQUAD-6'
+
+
+def test_activity_filters_and_goes_back_further(activity_db: Path) -> None:
+    every = web.activity_data(activity_db, 0)
+    assert ('pj2', 'P2-1', 'result') in _events(every)  # 「もっと見る」で遡ると出る
+    assert ('pj2', 'P2-1', 'result') in _events(web.activity_data(activity_db, 168))
+    assert (every['projects'], every['sessions']) == (['pj', 'pj2'], ['other', 'sq1'])
+    assert {e[0] for e in _events(web.activity_data(activity_db, 0, project='pj2'))} == {'pj2'}
+    by_sess = web.activity_data(activity_db, 0, session='sq1')
+    assert {(e['project'], e['session']) for e in by_sess['events']} == {('pj', 'sq1')}
+    assert web.activity_data(activity_db, 0, session='nobody')['events'] == []
+
+
+def test_activity_api_needs_token_and_takes_filters(activity_db: Path) -> None:
+    srv = web.make_server('127.0.0.1', 0, TOKEN, activity_db)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f'http://127.0.0.1:{srv.server_address[1]}'
+    try:
+        assert _req(base + '/api/activity')[0] == 401
+        data = _get_json(base, '/api/activity?hours=0&project=pj2&session=other')
+        assert (data['hours'], _events(data)) == (
+            0,
+            [('pj2', '', 'goal_done'), ('pj2', 'P2-1', 'result'), ('pj2', 'P2-1', 'order')],
+        )
+        assert _get_json(base, '/api/activity?hours=x')['hours'] == 24  # 既定は直近 24 時間
+        assert SECRET not in json.dumps(_get_json(base, '/api/activity?hours=0'))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_activity_tab_page() -> None:
+    """活動タブ: 行クリックで Graph のゴールとノードを開く、5 秒更新は Graph 以外のタブと同じ、題名は Markdown."""
+    page = web.PAGE
+    assert '<button data-v="activity">活動</button>' in page
+    assert 'tr.onclick = () => openGoal(e.goal, e.node_id)' in page
+    assert 'function openGoal(g, n) { goal = g; pickNode = n; if (cy) { cy.destroy(); cy = null; }' in page
+    assert 'const pick = pickNode;' in page  # drawGraph はこのノードを選ぶ
+    assert "if (view === 'activity') await activity();" in page
+    assert "setInterval(() => { if (view !== 'graph') refresh(); }, 5000);" in page
+    assert 'const HOURS = [24, 168, 720, 0]' in page
+    assert "renderMarkdown(el('span', 'sum'), e.title, true)" in page
+
+
+def test_page_script_parses(tmp_path: Path) -> None:
+    """PAGE は Python の文字列なので、エスケープの書き損じで JS が構文エラーになり画面ごと止まりうる."""
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node が無い')
+    js = tmp_path / 'page.js'
+    js.write_text(web.PAGE[web.PAGE.index('<script>\n') + 9 : web.PAGE.rindex('</script>')])
+    subprocess.run([node, '--check', str(js)], check=True)

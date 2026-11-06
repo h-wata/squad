@@ -41,6 +41,7 @@ SQUAD_PANE_TITLE = 'Aux-Shell'
 PANE_LINES = 300
 STATUS_LABEL = {'busy': '作業中', 'idle': '待機中', 'permission_wait': '許可待ち', 'unreachable': '停止'}
 DONE = ('done', 'verified')
+EVENT_ORDER = {'order': 0, 'result': 1, 'blocked': 1, 'goal_done': 2}
 DETAIL_KEYS = (
     'assigned_to',
     'created_at',
@@ -228,6 +229,68 @@ def graph_data(db_path: Path, goal: str) -> dict[str, Any]:
     return _query(db_path, fn)
 
 
+def _first_line(text: str) -> str:
+    return next((line.strip() for line in (text or '').splitlines() if line.strip()), '')
+
+
+def activity_data(db_path: Path, hours: int, project: str = '', session: str = '') -> dict[str, Any]:
+    """全 project の出来事 (発注 / 結果 / blocked / ゴール完了) を新しい順に (#82). hours > 0 ならその時間以内.
+
+    出来事はノード 1 つに 1 行: result は report_id (無ければ中身のハッシュ) で決まる node_id なので、
+    reports/archive/ の写し (#78) があっても増えない。時刻は graph sync が payload に入れた UTC の ISO8601。
+    goal / node_id は行から Graph を開くためのもの。
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec='seconds') if hours > 0 else ''
+
+    def fn(conn: sqlite3.Connection) -> dict[str, Any]:
+        owners = dict(conn.execute('SELECT project, session FROM projects'))
+        goal_of = dict(conn.execute("SELECT dst_id, src_id FROM edges WHERE rel = 'spawns'"))
+        intent_of = dict(
+            conn.execute("SELECT dst_id, src_id FROM edges WHERE rel = 'yields' AND src_id LIKE 'intent:%'")
+        )
+        events = []
+        for node_id, kind, pj, state, title, payload in conn.execute(
+            "SELECT node_id, kind, project, state, title, payload_json FROM nodes WHERE kind != 'fact'"
+        ):
+            p = _payload(payload)
+            if kind == 'intent':
+                at, ev, intent, worker = p.get('issued_at', ''), 'order', node_id, p.get('assigned_to', '')
+            elif kind == 'result':
+                intent, worker = intent_of.get(node_id, ''), p.get('worker', '')
+                at, ev = p.get('reported_at', ''), 'result' if state in ('completed', 'complete') else 'blocked'
+                title = _first_line(p.get('summary', '')) or title
+            else:
+                at, ev, intent, worker = p.get('finished_at', ''), 'goal_done', '', ''
+            sess = owners.get(pj, '')
+            if not at or at < since or (project and pj != project) or (session and sess != session):
+                continue
+            events.append(
+                {
+                    'at': at,
+                    'project': pj,
+                    'session': sess,
+                    'worker': worker,
+                    'task_id': intent.split('/', 1)[-1] if intent else '',
+                    'event': ev,
+                    'state': state,
+                    'verify': p.get('verify_status', '') if kind == 'result' else '',
+                    'title': title,
+                    'goal': node_id if kind == 'goal' else goal_of.get(intent, ''),
+                    'node_id': node_id,
+                }
+            )
+        # 同じ時刻なら発注 -> 結果 -> ゴール完了の順に起きたものとして、新しい順の上にゴール完了を出す
+        events.sort(key=lambda e: (e['at'], EVENT_ORDER[e['event']], e['node_id']), reverse=True)
+        return {
+            'hours': hours,
+            'events': events,
+            'projects': sorted(owners),
+            'sessions': sorted({s for s in owners.values() if s}),
+        }
+
+    return _query(db_path, fn)
+
+
 # ---------- tmux ----------
 
 
@@ -365,6 +428,9 @@ class Handler(BaseHTTPRequestHandler):
             data = goals_data(db, int(days) if days.isdigit() else 30)
         elif url.path == '/api/graph':
             data = graph_data(db, arg('goal'))
+        elif url.path == '/api/activity':
+            hours = arg('hours', '24')
+            data = activity_data(db, int(hours) if hours.isdigit() else 24, arg('project'), arg('session'))
         else:
             self._send(404, b'{"error": "not found"}')
             return
@@ -452,13 +518,17 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 .md code{font-family:ui-monospace,monospace;font-size:12px;background:#eff1f3;padding:0 .2em;border-radius:3px}
 .md pre code{background:none;padding:0}.md pre{overflow:auto}
 .sum .md{max-height:14em;overflow:auto}.plain{white-space:pre-wrap}
+#actbar{margin-bottom:.6em}#actbar select{margin:0 .8em 0 .3em}#actmore{margin-top:.6em}
 </style></head><body>
 <nav><button data-v="sessions" class="on">稼働状況</button><button data-v="projects">Projects</button>
-<button data-v="graph">Graph</button><span id="sync"></span></nav>
+<button data-v="graph">Graph</button><button data-v="activity">活動</button><span id="sync"></span></nav>
 <main><div id="err" class="err" hidden></div>
 <section id="sessions"></section><section id="projects" hidden></section>
 <section id="graph" hidden><div id="goals"></div><div id="cy"></div>
-<div id="side"><p class="mono">ノードをクリックすると内容が出ます</p></div></section></main>
+<div id="side"><p class="mono">ノードをクリックすると内容が出ます</p></div></section>
+<section id="activity" hidden><div id="actbar">project<select id="actpj"></select>セッション<select id="actsess">
+</select><span id="actrange" class="mono"></span></div><div id="actlist"></div>
+<button id="actmore">もっと見る</button></section></main>
 <div id="modal"><header><span id="mtitle" class="mono"></span><button onclick="closeModal()">閉じる</button></header>
 <pre id="mtext"></pre></div>
 <script>
@@ -498,6 +568,7 @@ const row = cells => { const tr = el('tr'); for (const c of cells) { const td = 
 const table = (heads, rows) => { const t = el('table'), h = el('tr');
   for (const x of heads) h.append(el('th', '', x)); t.append(h); for (const r of rows) t.append(r); return t; };
 let view = params.get('view') || 'sessions', goal = params.get('goal') || '', goalDays = '30', cy = null;
+let pickNode = params.get('node') || '';  // Graph で選ぶノード (活動タブの行から来たとき等)
 function show(v) { view = v;
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x.dataset.v === v));
   for (const s of document.querySelectorAll('section')) s.hidden = s.id !== v; refresh(); }
@@ -574,7 +645,7 @@ function label(n) {
 async function drawGraph() {
   if (!goal) return;
   const d = await api('/api/graph?goal=' + encodeURIComponent(goal)); meta(d);
-  const pick = params.get('node');
+  const pick = pickNode;
   const first = d.nodes.find(n => n.node_id === pick) || d.nodes.find(n => n.node_id === goal);
   if (typeof cytoscape === 'undefined') { const e = document.getElementById('err'); e.hidden = false;
     e.textContent = 'Cytoscape.js を CDN から読めませんでした (右の詳細だけ出します)'; side(first); return; }
@@ -614,9 +685,40 @@ function side(n) {
   }
 }
 
+// 活動タブ (#82): 既定は直近 24 時間、「もっと見る」で 7 日 -> 30 日 -> すべてと遡る
+const HOURS = [24, 168, 720, 0], HOURS_LABEL = {24: '直近 24 時間', 168: '直近 7 日', 720: '直近 30 日', 0: 'すべて'};
+const EVENT_LABEL = {order: '発注', result: '結果', blocked: 'blocked', goal_done: 'ゴール完了'};
+let actHours = 24;
+function options(sel, values) {  // 5 秒ごとの更新で開いている select を閉じないよう、中身が変わったときだけ作り直す
+  const key = JSON.stringify(values); if (sel.dataset.v === key) return; sel.dataset.v = key; const cur = sel.value;
+  sel.replaceChildren(new Option('すべて', ''), ...values.map(v => new Option(v, v, false, v === cur)));
+}
+function openGoal(g, n) { goal = g; pickNode = n; if (cy) { cy.destroy(); cy = null; } show('graph'); }
+async function activity() {
+  const pj = document.getElementById('actpj'), sess = document.getElementById('actsess');
+  const q = new URLSearchParams({hours: actHours, project: pj.value, session: sess.value});
+  const d = await api('/api/activity?' + q); meta(d);
+  options(pj, d.projects || []); options(sess, d.sessions || []);
+  const evs = d.events || [];
+  document.getElementById('actrange').textContent = HOURS_LABEL[actHours] + ' ' + evs.length + ' 件';
+  document.getElementById('actmore').hidden = actHours === 0;
+  document.getElementById('actlist').replaceChildren(table(
+    ['時刻', 'project', 'セッション', 'worker', 'task_id', '種類', '題名 / 要約'], evs.map(e => {
+      const kind = el('span'); kind.append(badge(e.event === 'order' ? 'running' : e.event === 'goal_done' ? 'done'
+        : e.state, EVENT_LABEL[e.event]));
+      if (e.verify) kind.append(' ', el('span', 'mono', 'verify ' + e.verify));
+      const tr = row([local(e.at), e.project, e.session || '-', e.worker || '-', el('span', 'mono', e.task_id || '-'),
+        kind, renderMarkdown(el('span', 'sum'), e.title, true)]);
+      if (e.goal) { tr.className = 'click'; tr.title = 'クリックで Graph を開く';
+        tr.onclick = () => openGoal(e.goal, e.node_id); }
+      return tr; })));
+}
+for (const id of ['actpj', 'actsess']) document.getElementById(id).onchange = () => activity();
+document.getElementById('actmore').onclick = () => { actHours = HOURS[HOURS.indexOf(actHours) + 1]; activity(); };
+
 async function refresh() {
   try { if (view === 'sessions') await sessions(); if (view === 'projects') await projects();
-    if (view === 'graph') { await goals(); if (!cy) await drawGraph(); }
+    if (view === 'graph') { await goals(); if (!cy) await drawGraph(); } if (view === 'activity') await activity();
   } catch (e) { const x = document.getElementById('err'); x.hidden = false; x.textContent = 'error: ' + e; }
 }
 show(view); setInterval(() => { if (view !== 'graph') refresh(); }, 5000);
