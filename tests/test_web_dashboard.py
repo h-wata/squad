@@ -617,3 +617,168 @@ def test_page_script_parses(tmp_path: Path) -> None:
     js = tmp_path / 'page.js'
     js.write_text(web.PAGE[web.PAGE.index('<script>\n') + 9 : web.PAGE.rindex('</script>')])
     subprocess.run([node, '--check', str(js)], check=True)
+
+
+# ---------- 指示の投入 (#85) ----------
+
+ORIGIN = 'http://127.0.0.1'
+INSTR = '/api/instructions'
+
+
+@pytest.fixture
+def write_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Path]:
+    """--allow-write の server。queue は pj (sq1 の担当) と pj2 (other の担当)。YAML は残す (sync し直すため)."""
+    q = tmp_path / 'queue'
+    _write(q / 'projects' / 'pj' / '.squad_session', 'sq1\n', NOW)
+    _write(q / 'projects' / 'pj' / 'tasks' / 'worker1.yaml', 'task_id: SQUAD-1\nassigned_to: worker1\n', NOW - 60)
+    _write(q / 'projects' / 'pj2' / '.squad_session', 'other\n', NOW)
+    _write(q / 'projects' / 'pj2' / 'tasks' / 'worker1.yaml', 'task_id: P2-1\n', NOW - 60)
+    graph.sync(q, config_path=tmp_path / 'none.json')
+    monkeypatch.setattr(subprocess, 'run', _fake_tmux([]))  # squad セッションは sq1 だけ
+    srv = web.make_server('127.0.0.1', 0, TOKEN, q / '.graph.db', allow_write=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f'http://127.0.0.1:{srv.server_address[1]}', q
+    srv.shutdown()
+    srv.server_close()
+
+
+def _post(base: str, payload: object, headers: dict | None = None, path: str = INSTR) -> tuple[int, bytes]:
+    data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    port = base.rsplit(':', 1)[1]
+    h = {'Authorization': f'Bearer {TOKEN}', 'Origin': f'{ORIGIN}:{port}', 'Content-Type': 'application/json'}
+    h.update(headers or {})
+    req = urllib.request.Request(base + path, method='POST', headers={k: v for k, v in h.items() if v}, data=data)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _instruction_files(q: Path) -> list[Path]:
+    return sorted((q / 'instructions').rglob('*')) if (q / 'instructions').exists() else []
+
+
+def test_read_only_server_rejects_instructions_and_has_no_form(server: tuple[str, list], root: Path) -> None:
+    """--allow-write 無しは今と同じ読み取り専用: 正しいトークン・Origin でも POST は 405、入力欄もコードも無い."""
+    base, _ = server
+    assert _post(base, {'session': 'sq1', 'body': 'x'})[0] == 405
+    assert not (root / 'queue' / 'instructions').exists()
+    _, page = _req(base + '/', headers={'Authorization': f'Bearer {TOKEN}'})
+    assert b'id="instr"' not in page and b'loadTargets' not in page and b'/api/instructions' not in page
+    assert _req(base + '/api/targets', headers={'Authorization': f'Bearer {TOKEN}'})[0] == 404
+
+
+def test_post_writes_one_file_per_instruction(write_server: tuple[str, Path]) -> None:
+    base, q = write_server
+    before = {p: p.read_bytes() for p in (q / 'projects').rglob('*') if p.is_file()}
+    code, body = _post(base, {'session': 'sq1', 'project': 'pj', 'body': '  PR #9 を見て\n2 行目  '})
+    assert code == 201, body
+    iid = json.loads(body)['id']
+    assert _post(base, {'session': 'sq1', 'body': 'project なし'})[0] == 201
+    files = sorted((q / 'instructions' / 'sq1').iterdir())
+    assert [p.name for p in files][0] == f'{iid}.json' and len(files) == 2  # 一時ファイルは残らない
+    data = json.loads(files[0].read_text())
+    assert data['session'] == 'sq1' and data['project'] == 'pj' and data['delivered_at'] == ''
+    assert data['body'] == 'PR #9 を見て\n2 行目'
+    assert re.fullmatch(r'\d{8}T\d{12}Z-[0-9a-f]{8}', iid)  # ファイル名は自前で作る (入力から作らない)
+    # tasks/ reports/ には書かない
+    assert {p: p.read_bytes() for p in (q / 'projects').rglob('*') if p.is_file()} == before
+
+
+def test_post_token_only_in_authorization_header(write_server: tuple[str, Path]) -> None:
+    base, q = write_server
+    ok = {'session': 'sq1', 'body': 'x'}
+    assert _post(base, ok, {'Authorization': ''})[0] == 401
+    assert _post(base, ok, {'Authorization': 'Bearer wrong'})[0] == 401
+    assert _post(base, ok, {'Authorization': ''}, path=f'/api/instructions?token={TOKEN}')[0] == 401
+    assert _post(base, ok, {'Authorization': '', 'Cookie': f'token={TOKEN}'})[0] == 401
+    assert _instruction_files(q) == []
+
+
+def test_post_checks_origin(write_server: tuple[str, Path]) -> None:
+    base, q = write_server
+    ok = {'session': 'sq1', 'body': 'x'}
+    assert _post(base, ok, {'Origin': 'http://evil.example'})[0] == 403
+    assert _post(base, ok, {'Origin': 'http://127.0.0.1:1'})[0] == 403  # port 違い
+    assert _post(base, ok, {'Origin': ''})[0] == 403  # Origin 無し
+    assert _instruction_files(q) == []
+
+
+def test_post_rejects_bad_input_without_echoing_it(write_server: tuple[str, Path]) -> None:
+    base, q = write_server
+    cases = [
+        ({'session': 'sq1', 'body': 'あ' * (web.MAX_BODY_CHARS + 1)}, 413),
+        (b'{"session": "sq1", "body": "' + b'x' * web.MAX_REQUEST_BYTES + b'"}', 413),
+        ({'session': 'sq1', 'body': '   '}, 400),
+        ({'session': 'sq1'}, 400),
+        ({'session': 'other', 'body': SECRET}, 400),  # squad セッションでない
+        ({'session': '../sq1', 'body': SECRET}, 400),
+        ({'session': 'sq1', 'project': 'pj2', 'body': SECRET}, 400),  # 別セッションの担当
+        ({'session': 'sq1', 'project': '../../projects/pj/tasks', 'body': SECRET}, 400),
+        ({'session': ['sq1'], 'body': 'x'}, 400),
+        (b'not json', 400),
+        (b'[1]', 400),
+    ]
+    for payload, expected in cases:
+        code, body = _post(base, payload)
+        assert code == expected, (payload, body)
+        assert SECRET.encode() not in body and TOKEN.encode() not in body
+    assert _post(base, {'session': 'sq1', 'body': 'あ' * web.MAX_BODY_CHARS})[0] == 201  # 上限ちょうどは通す
+    assert len(_instruction_files(q)) == 2  # sq1/ と 1 件だけ
+
+
+def test_targets_and_form_only_with_allow_write(write_server: tuple[str, Path]) -> None:
+    base, _ = write_server
+    assert _get_json(base, '/api/targets')['sessions'] == {'sq1': ['pj']}
+    _, page = _req(base + '/', headers={'Authorization': f'Bearer {TOKEN}'})
+    assert b'<form id="instr">' in page and b"fetch('/api/instructions'" in page
+
+
+def test_sent_instruction_shows_in_activity(write_server: tuple[str, Path]) -> None:
+    """Graph sync が指示を読み込み、活動タブに「指示」として時系列で出る (配達済みかどうかも)."""
+    base, q = write_server
+    _, body = _post(base, {'session': 'sq1', 'project': 'pj', 'body': f'見て {SECRET}'})
+    path = q / 'instructions' / 'sq1' / f'{json.loads(body)["id"]}.json'
+    graph.sync(q, config_path=q / 'none.json')
+    ev = [e for e in _get_json(base, '/api/activity?hours=24')['events'] if e['event'] == 'instruction']
+    assert len(ev) == 1 and ev[0]['state'] == 'pending' and ev[0]['project'] == 'pj' and ev[0]['session'] == 'sq1'
+    assert SECRET not in ev[0]['title'] and ev[0]['title'].startswith('見て ')  # 画面に出す前にマスク
+    data = json.loads(path.read_text())
+    path.write_text(json.dumps({**data, 'delivered_at': '2099-01-01T00:00:00+00:00'}))  # watchd が渡した
+    graph.sync(q, config_path=q / 'none.json')
+    data = _get_json(base, '/api/activity?hours=24&session=sq1&project=pj')
+    ev = [e for e in data['events'] if e['event'] == 'instruction']
+    assert ev[0]['state'] == 'delivered' and ev[0]['delivered_at'].startswith('2099')
+    assert [e['event'] for e in data['events']] == ['instruction', 'order']  # 新しい順
+    assert _get_json(base, '/api/activity?hours=24&project=pj2')['events'][0]['event'] == 'order'
+
+
+def test_activity_works_on_db_without_instructions_table(activity_db: Path) -> None:
+    conn = sqlite3.connect(activity_db)
+    conn.execute('DROP TABLE instructions')
+    conn.commit()
+    conn.close()
+    assert web.activity_data(activity_db, 0)['error'] is None
+
+
+def test_write_page_script_parses(tmp_path: Path) -> None:
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node が無い')
+    page = web.PAGE_WRITE
+    assert not re.search(r'<!--WRITE_|/\*WRITE_', page)
+    js = tmp_path / 'page.js'
+    js.write_text(page[page.index('<script>\n') + 9 : page.rindex('</script>')])
+    subprocess.run([node, '--check', str(js)], check=True)
+
+
+def test_does_not_write_through_symlinked_instructions_dir(write_server: tuple[str, Path]) -> None:
+    """instructions/<session> が tasks/ を指す symlink でも、そこには書かない (500)."""
+    base, q = write_server
+    (q / 'instructions').mkdir()
+    (q / 'instructions' / 'sq1').symlink_to(q / 'projects' / 'pj' / 'tasks')
+    before = sorted((q / 'projects' / 'pj' / 'tasks').iterdir())
+    code, body = _post(base, {'session': 'sq1', 'body': SECRET})
+    assert code == 500 and SECRET.encode() not in body
+    assert sorted((q / 'projects' / 'pj' / 'tasks').iterdir()) == before
