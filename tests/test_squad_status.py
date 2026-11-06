@@ -21,6 +21,7 @@ from squad import detect_status  # noqa: E402
         '✢ Burrowing… (1m 3s',
         '✢ Meandering… (5s · esc to interrupt)',
         '✢ Propagating… (9s',
+        '✻ Topsy-turvying… (3s',
     ],
 )
 def test_spinner_with_unknown_verb_is_busy(tail: str) -> None:
