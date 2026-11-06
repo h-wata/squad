@@ -1698,3 +1698,43 @@ class TestTaskYamlTriggersGraphSync:
         assert not self._synced(w, calls)
         (d / 'tasks' / 'archive' / 'T1.yaml').unlink()
         assert self._synced(w, calls)  # 削除
+
+
+class TestGraphSyncRetry:
+    """sync 失敗は dirty を残して backoff 再試行し、成功で回復する (#84 Codex 再レビュー)."""
+
+    def test_failure_retries_with_backoff_and_recovers(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, queue = watcher
+        import graph  # noqa: PLC0415
+
+        make_project(queue, 'pj', session='testsess')
+        calls: list = []
+        logs: list[str] = []
+        w.log = logs.append
+        fail = [True]
+
+        def fake_sync(q: Path) -> tuple[int, int]:
+            calls.append(q)
+            if fail[0]:
+                raise RuntimeError('boom')
+            return (1, 2)
+
+        monkeypatch.setattr(graph, 'sync', fake_sync)
+        w.refresh_owned_projects()
+        w.sync_graph()
+        assert len(calls) == 1
+        w.sync_graph()  # backoff 中は呼ばない (署名も変わっていない)
+        assert len(calls) == 1
+        w._graph_retry_at = 0.0  # noqa: SLF001
+        w.sync_graph()
+        assert len(calls) == 2
+        assert sum('更新に失敗' in m for m in logs) == 1  # ログは初回だけ
+        fail[0] = False
+        w._graph_retry_at = 0.0  # noqa: SLF001
+        w.sync_graph()
+        assert len(calls) == 3
+        assert any('回復' in m for m in logs)
+        w.sync_graph()  # 成功後は dirty が落ちる
+        assert len(calls) == 3
