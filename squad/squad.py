@@ -107,7 +107,7 @@ THINKING_PATTERNS = [
     # 終了表示 `✻ Sautéed for 20s` には `…` が付かないので idle のまま
     # 本文中の引用で誤検知しないよう、行頭の記号 (✶ ✽ など) から始まる行に限る (引用 `>` や箇条書き `-` `*` は除く)
     r'(?m)^\s*[^\w\s>|#*•-]\s+\w+…\s*\(\d+[ms]',
-    r'Working \(\d+m \d+s\)',
+    r'(?m)^\s*[^\w\s>|#*•-]\s+Working \(\d+m \d+s\)',
 ]
 CTX_PATTERNS = [
     re.compile(r'\bctx\s+(\d+)%', re.IGNORECASE),

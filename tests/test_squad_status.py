@@ -43,4 +43,8 @@ def test_quoted_spinner_text_is_idle() -> None:
 
 def test_blockquote_and_bullet_spinner_text_is_idle() -> None:
     for prefix in ('>', '-', '*'):
-        assert detect_status(f'{prefix} Thinking… (12s)\n❯ ')['status'] == 'idle'
+        assert detect_status(f'{prefix} Thinking… (12s)\n{prefix} Working (1m 2s)\n❯ ')['status'] == 'idle'
+
+
+def test_legacy_working_spinner_is_busy() -> None:
+    assert detect_status('✻ Working (1m 2s)\n❯ ')['status'] == 'busy'
