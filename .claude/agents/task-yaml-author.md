@@ -184,7 +184,7 @@ context:
   recommended_skills: []  # worktree 運用前提のため通常 git commit を既定とする。
                            # 環境に safe-pathspec-commit が実在する場合のみ任意で使用可。
 
-created_at: "YYYY-MM-DDTHH:MM:SS+09:00"
+created_at: "YYYY-MM-DDTHH:MM:SS+09:00"  # 推測せず `date -Iseconds` の値を書く
 ```
 
 ## タスク粒度 (right-sizing)

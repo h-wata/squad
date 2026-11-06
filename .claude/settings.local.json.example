@@ -12,6 +12,18 @@
                 "matcher": ""
             }
         ],
+        "PreToolUse": [
+            {
+                "hooks": [
+                    {
+                        "command": "{SQUAD_ROOT}/scripts/hooks/stamp_created_at.py",
+                        "timeout": 5,
+                        "type": "command"
+                    }
+                ],
+                "matcher": "Write"
+            }
+        ],
         "Stop": [
             {
                 "hooks": [

@@ -486,3 +486,94 @@ def test_issued_at_is_min_of_created_at_and_mtime(tmp_path: Path, monkeypatch: p
     assert intents['PAST'][1]['issued_at'] == _iso_utc(-600)
     assert intents['NAIVE'][1]['issued_at'] == _iso_utc(0)
     assert intents['NONE'][1]['issued_at'] == _iso_utc(0)
+
+
+# --- #88: task 同士をつなぐ手がかり -----------------------------------------------------------
+
+
+def _link_queue(tmp_path: Path, tasks: dict[str, str]) -> tuple[dict[str, str], set[tuple[str, str]]]:
+    """task_id -> YAML 本文 (context 以降) から sync し、(task -> goal, derived_from) を返す."""
+    q = tmp_path / 'queue'
+    for i, (tid, body) in enumerate(tasks.items()):
+        _write(q / 'projects' / 'pj' / 'tasks' / f'{tid}.yaml', f'task_id: {tid}\n{body}', 100 + i)
+    db = tmp_path / 'g.db'
+    graph.sync(q, db)
+    goal = {r[0]: r[1] for r in _rows(db, "SELECT dst_id, src_id FROM edges WHERE rel = 'spawns'")}
+    derived = set(_rows(db, "SELECT src_id, dst_id FROM edges WHERE rel = 'derived_from'"))
+    return {k.split('/')[1]: v for k, v in goal.items()}, {(a.split('/')[1], b.split('/')[1]) for a, b in derived}
+
+
+def test_parent_issue_spellings_share_one_goal(tmp_path: Path) -> None:
+    ctx = 'context:\n  parent_issue: {}\n'
+    goal, _ = _link_queue(
+        tmp_path,
+        {
+            'A-1': ctx.format('79'),
+            'A-2': ctx.format('"#79"'),
+            'A-3': ctx.format('h-wata/pj#79'),
+            'A-4': ctx.format('"79, 80"'),  # カンマ区切りは最初の Issue
+            'A-5': ctx.format('"#80"'),
+        },
+    )
+    assert len({goal[t] for t in ('A-1', 'A-2', 'A-3', 'A-4')}) == 1
+    assert goal['A-1'] == 'goal:pj#79'
+    assert goal['A-5'] == 'goal:pj#80'
+
+
+def test_task_id_reference_joins_goal_and_derives(tmp_path: Path) -> None:
+    goal, derived = _link_queue(
+        tmp_path,
+        {
+            'S-1': 'context:\n  parent_issue: 5\n',
+            'S-2': 'context:\n  parent_issue: S-1\n',  # parent_issue に task_id
+            'S-3': 'context:\n  parent_task: "S-2 (レビュー済み)"\n',
+            'S-9': 'context:\n  parent_issue: 6\n',
+        },
+    )
+    assert goal['S-1'] == goal['S-2'] == goal['S-3'] == 'goal:pj#5'
+    assert derived == {('S-2', 'S-1'), ('S-3', 'S-2')}
+    assert goal['S-9'] == 'goal:pj#6'
+
+
+def test_same_pr_url_shares_goal(tmp_path: Path) -> None:
+    pr = 'context:\n  pr_url: https://github.com/o/r/pull/7{}\n'
+    goal, _ = _link_queue(
+        tmp_path,
+        {
+            'P-1': pr.format(''),
+            'P-2': pr.format('/'),
+            'P-3': 'context:\n  pr_url: https://github.com/o/r/pull/8\n',
+        },
+    )
+    assert goal['P-1'] == goal['P-2'] != goal['P-3']
+
+
+def test_review_fields_derive_from_original_task(tmp_path: Path) -> None:
+    q = tmp_path / 'queue'
+    _write(q / 'projects' / 'pj' / 'reports' / 'worker4_review.yaml', 'task_id: R-1\nverdict: approve\n', 50)
+    goal, derived = _link_queue(
+        tmp_path,
+        {
+            'I-1': 'context:\n  parent_issue: 3\n',
+            'R-1': 'context:\n  parent_issue: 3\n  review_report: /x/queue/projects/pj/reports/worker4_review.yaml\n',
+            'F-1': 'context:\n  prior_review: /x/queue/projects/pj/reports/archive/worker4_review_I-1.yaml\n',
+            'R-2': 'context:\n  previous_review: /x/queue/projects/pj/reports/worker4_review.yaml\n',
+        },
+    )
+    assert ('F-1', 'I-1') in derived  # ファイル名の task_id
+    assert ('R-2', 'R-1') in derived  # report の中の task_id
+    assert ('R-1', 'R-1') not in derived  # 自分自身へは張らない
+    assert goal['I-1'] == goal['F-1'] == goal['R-1'] == goal['R-2']
+
+
+def test_links_never_merge_different_issues(tmp_path: Path) -> None:
+    goal, derived = _link_queue(
+        tmp_path,
+        {
+            'X-1': 'context:\n  parent_issue: 1\n  pr_url: https://github.com/o/r/pull/9\n',
+            'X-2': 'context:\n  parent_issue: 2\n  pr_url: https://github.com/o/r/pull/9\n  parent_task: X-1\n',
+        },
+    )
+    assert goal['X-1'] == 'goal:pj#1'
+    assert goal['X-2'] == 'goal:pj#2'
+    assert derived == set()  # 別 Issue の task へは derived_from も張らない

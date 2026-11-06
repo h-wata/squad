@@ -197,8 +197,14 @@ verify:                  # コードタスクは必須。verifier が worktree �
   max_attempts: 3        # fail 時の author 差し戻し上限（既定 3）
 context:
   workspace: /path/to/workspace
-created_at: "2026-05-18T12:00:00"
+created_at: "2026-05-18T12:34:56+09:00"  # 推測で書かず `date -Iseconds` の値を書く
 ```
+
+`created_at` は発注した実時刻 (タイムゾーン付き) を書く。きりのいい時刻や先の時刻を推測で書かない。
+`max_wall_clock_min` はこの値から時間を測る。`.claude/settings.local.json` に PreToolUse Hook
+(`scripts/hooks/stamp_created_at.py`) を入れていれば、`tasks/*.yaml` への Write 時に実時刻へ差し替わり、
+同じファイルの Write 書き直しでは既存の値を残す (Edit は対象外)。Hook が無い環境の手書きのために、
+`date -Iseconds` の値を書くこと。
 
 `verify:` はコード変更タスクに必ず付ける。ドキュメント/設計レビュー/PR レビュー等の
 非コードタスクは省略してよい（worker 側で `verify_status: skipped`）。

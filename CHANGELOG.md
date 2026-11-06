@@ -20,6 +20,9 @@
   (再起動しても二重に送らない)。graph sync が指示を読み込み、活動タブに「指示」として時系列で出す。
   フラグ無しは今と同じ読み取り専用 (POST は 405、入力欄も出ない)。graph DB の schema は 3 に上がる
   (古い DB は次の sync で作り直される)。
+- task YAML の Write 時に PreToolUse Hook (`scripts/hooks/stamp_created_at.py`) が `created_at` を実時刻に差し替える (#87)。
+  同じファイルの書き直しでは既存の値を残し、Edit と task YAML 以外は触らない。`settings.local.json.example` に追加済み。
+  稼働中の設定への反映は手動。dispatcher.md の例もタイムゾーン付きにした。
 - `squad web`: 読み取り専用の Web ダッシュボード (#76)。最初の画面はセッション別の稼働状況
   (担当 project、worker ごとの状態と担当タスク。状態は `squad ls` と同じ判定、pane はクリックで
   開く)。ほかに Projects の縦表 (active / blocked / 今日終わった件数、最新の結果、最終更新) と、
