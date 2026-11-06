@@ -1867,3 +1867,13 @@ class TestInstructions:
         finally:
             os.chmod(p.parent, 0o700)
         assert w.tmux.sent == [] and not _instr(p)['delivered_at']
+
+
+def test_capture_drops_blank_lines_below_the_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """出力が背の高い pane の上の方にあっても、末尾の空行でスピナー行を切り落とさない (待機中と誤読しない)."""
+    from squad import detect_status  # noqa: PLC0415
+    from watchd import Tmux  # noqa: PLC0415
+
+    screen = BUSY + '\n' * 60
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, screen, ''))
+    assert detect_status(Tmux('s').capture('s:0.0'))['status'] == 'busy'

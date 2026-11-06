@@ -257,7 +257,9 @@ class Tmux:
         r = self._run(['capture-pane', '-p', '-t', pane])
         if r.returncode != 0:
             return ''
-        return '\n'.join(r.stdout.splitlines()[-lines:])
+        # 画面の下の空行を落としてから末尾を取る。/clear 直後など出力が画面の上にあると、空行だけの末尾に
+        # なってスピナー行が範囲外に出て、作業中の pane を待機中と読む (#85 の real check で再現)
+        return '\n'.join(r.stdout.rstrip().splitlines()[-lines:])
 
     def send_keys(self, pane: str, keys: str) -> bool:
         return self._run(['send-keys', '-t', pane, keys]).returncode == 0
