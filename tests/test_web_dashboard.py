@@ -398,7 +398,7 @@ def test_render_markdown_falls_back_to_plain_text(libs: str, expected: dict) -> 
         'inline': f'window.marked = {stubs["marked"]}; window.DOMPurify = {stubs["purify"]};',
         'no_marked': f'window.DOMPurify = {stubs["purify"]};',
         'no_purify': f'window.marked = {stubs["marked"]};',
-        'throws': "window.marked = {parse: () => { throw new Error('x') }}; " f'window.DOMPurify = {stubs["purify"]};',
+        'throws': f'window.marked = {{parse: () => {{ throw new Error() }}}}; window.DOMPurify = {stubs["purify"]};',
     }[libs]
     js = (
         'globalThis.window = globalThis;\n'
