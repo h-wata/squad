@@ -4,6 +4,8 @@
 
 ### Changed
 
+- README を 150 行以内に縮め、詳細を `docs/` 配下に移した (#90)。前提ツール・起動オプション・tmux 構成は `docs/setup.md`、
+  ファイル一覧・`squad web` / `squad graph` は `docs/components.md`、ほかは `docs/{ledger,ci-watch,new-project,ponytail}.md`。
 - tmux の pane 分割をやめ、エージェントごとに window を分ける (#95)。window 名は `dispatcher` / `w1` /
   `w2` / `w3` / `w4` / `term` / `aux` で、`prefix + w` の一覧に出る。宛先は `<session>:w1` のように
   window 名で指す (`squad/config.json` の `pane` も `w1` 等に変わった)。`squad web` は `aux` window の
