@@ -158,6 +158,10 @@ def _bool_env(name: str, default: bool) -> bool:
     return v in ('1', 'true', 'yes', 'on')
 
 
+# graph sync 失敗後の再試行間隔 (秒)。最後の値を上限として使い続ける
+GRAPH_RETRY_BACKOFF = (5, 30, 300)
+
+
 @dataclass
 class Config:
     """env から解決した watcher 設定."""
@@ -326,6 +330,11 @@ class Watcher:
         self._queue_readable = True
         # report を配達したサイクルの最後に探索グラフを作り直す (#55)。起動直後に 1 回は作る
         self._graph_dirty = True
+        # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
+        self._tasks_sig: tuple | None = None
+        # sync 失敗時は dirty を残し backoff で再試行する (一時的な失敗で永久に古いままにしない)
+        self._graph_failures = 0
+        self._graph_retry_at = 0.0
 
     # ---- ログ / 通知 ----
 
@@ -637,24 +646,53 @@ class Watcher:
         except OSError as e:
             self.log(f'[WARN] report の写しを archive に残せません (配達は継続): {dest}: {e}')
 
+    def _tasks_changed(self) -> bool:
+        """担当 project の tasks/ 以下 (archive 含む) の YAML が前回から変わったか (#84).
+
+        path 込みで比べるので、移動・削除も拾う。初回は比較元が無いので False
+        (起動直後の sync は _graph_dirty の初期値 True が担う)。
+        """
+        sig = []
+        for d in self.owned:
+            for p in (d / 'tasks').rglob('*.y*ml'):
+                try:
+                    st = p.stat()
+                    # ctime は utime / cp -p で巻き戻せないので、mtime を保った書き換えも拾う
+                    sig.append((str(p), st.st_mtime_ns, st.st_ctime_ns, st.st_size))
+                except OSError:
+                    continue
+        new = tuple(sorted(sig))
+        changed = self._tasks_sig is not None and new != self._tasks_sig
+        self._tasks_sig = new
+        return changed
+
     def sync_graph(self) -> None:
         """探索グラフ (queue/.graph.db) を作り直す (#55).
 
         graph は PyYAML に依存するため、ここでだけ import する。PyYAML が無い・YAML が
         壊れている等で失敗しても、report 配達には影響させない (ログだけ残して次の配達で再試行)。
         """
-        if not self._graph_dirty:
+        if self._tasks_changed():
+            self._graph_dirty = True
+            self._graph_retry_at = 0.0  # 新しい変化は backoff を待たず試す
+        if not self._graph_dirty or time.monotonic() < self._graph_retry_at:
             return
-        self._graph_dirty = False
         try:
             import graph  # noqa: PLC0415
 
             n_nodes, n_edges = graph.sync(self.cfg.queue_dir)
-        except ImportError as e:
-            self.log(f'[WARN] 探索グラフを更新できません (PyYAML が必要): {e}')
-        except Exception as e:  # noqa: BLE001 (graph の失敗で watcher を止めない)
-            self.log(f'[WARN] 探索グラフの更新に失敗 (次の配達で再試行): {e}')
+        except Exception as e:  # noqa: BLE001 (graph の失敗で watcher を止めない。ImportError = PyYAML 無しも含む)
+            # dirty を残して backoff 付きで再試行する。ログは初回の失敗だけ (毎サイクルの洪水を避ける)
+            wait = GRAPH_RETRY_BACKOFF[min(self._graph_failures, len(GRAPH_RETRY_BACKOFF) - 1)]
+            if self._graph_failures == 0:
+                self.log(f'[WARN] 探索グラフの更新に失敗 ({wait}s 後から再試行、PyYAML が必要な場合あり): {e}')
+            self._graph_failures += 1
+            self._graph_retry_at = time.monotonic() + wait
         else:
+            self._graph_dirty = False
+            if self._graph_failures:
+                self.log('探索グラフの更新が回復しました')
+            self._graph_failures = 0
             self.log(f'探索グラフを更新: {n_nodes} nodes, {n_edges} edges')
 
     # ---- 2 & 3. 承認オートアンサー + 停止検知 ----

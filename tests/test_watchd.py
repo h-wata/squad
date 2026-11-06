@@ -1662,3 +1662,79 @@ class TestReportArchiveCopy:
         d = make_project(queue, 'pj', session='testsess')
         w._archive_copy(str(d / 'reports' / 'worker1_report.yaml'), '../../x', 'f' * 64, {'task_id': 'T'}, b'a', 0)  # noqa: SLF001
         assert [p.name for p in self._archive(d)] == ['T__.._.._x.yaml']
+
+
+class TestTaskYamlTriggersGraphSync:
+    """task YAML の発注・書換・移動で次サイクルに graph sync が走る (#84)."""
+
+    def _synced(self, w: Watcher, calls: list) -> bool:
+        before = len(calls)
+        w.refresh_owned_projects()
+        w.sync_graph()
+        return len(calls) > before
+
+    def test_sync_only_on_task_change(self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+        w, queue = watcher
+        import graph  # noqa: PLC0415
+
+        calls: list = []
+        monkeypatch.setattr(graph, 'sync', lambda q: calls.append(q) or (0, 0))
+        d = make_project(queue, 'pj', session='testsess')
+        assert self._synced(w, calls)  # 起動直後の 1 回
+        assert not self._synced(w, calls)  # 何も変わらない
+        task = d / 'tasks' / 'worker1.yaml'
+        task.write_text('task_id: T1\n')
+        assert self._synced(w, calls)  # 発注
+        assert not self._synced(w, calls)
+        os.utime(task, ns=(1, 1))
+        assert self._synced(w, calls)  # mtime 変化
+        assert not self._synced(w, calls)
+        task.write_text('task_id: T2\n')
+        os.utime(task, ns=(1, 1))  # 内容だけ変えて mtime を戻しても ctime で拾う
+        assert self._synced(w, calls)
+        (d / 'tasks' / 'archive').mkdir()
+        task.rename(d / 'tasks' / 'archive' / 'T1.yaml')
+        assert self._synced(w, calls)  # archive へ移動
+        assert not self._synced(w, calls)
+        (d / 'tasks' / 'archive' / 'T1.yaml').unlink()
+        assert self._synced(w, calls)  # 削除
+
+
+class TestGraphSyncRetry:
+    """sync 失敗は dirty を残して backoff 再試行し、成功で回復する (#84 Codex 再レビュー)."""
+
+    def test_failure_retries_with_backoff_and_recovers(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, queue = watcher
+        import graph  # noqa: PLC0415
+
+        make_project(queue, 'pj', session='testsess')
+        calls: list = []
+        logs: list[str] = []
+        w.log = logs.append
+        fail = [True]
+
+        def fake_sync(q: Path) -> tuple[int, int]:
+            calls.append(q)
+            if fail[0]:
+                raise RuntimeError('boom')
+            return (1, 2)
+
+        monkeypatch.setattr(graph, 'sync', fake_sync)
+        w.refresh_owned_projects()
+        w.sync_graph()
+        assert len(calls) == 1
+        w.sync_graph()  # backoff 中は呼ばない (署名も変わっていない)
+        assert len(calls) == 1
+        w._graph_retry_at = 0.0  # noqa: SLF001
+        w.sync_graph()
+        assert len(calls) == 2
+        assert sum('更新に失敗' in m for m in logs) == 1  # ログは初回だけ
+        fail[0] = False
+        w._graph_retry_at = 0.0  # noqa: SLF001
+        w.sync_graph()
+        assert len(calls) == 3
+        assert any('回復' in m for m in logs)
+        w.sync_graph()  # 成功後は dirty が落ちる
+        assert len(calls) == 3

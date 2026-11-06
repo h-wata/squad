@@ -467,3 +467,22 @@ def test_archive_copy_of_review_keeps_review_flag(tmp_path: Path) -> None:
     graph.sync(q)
     [(payload,)] = _rows(graph.default_db_path(q), f"SELECT payload_json FROM nodes WHERE node_id = 'result:{RID1}'")
     assert '"review": true' in payload
+
+
+def test_issued_at_is_min_of_created_at_and_mtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """活動タブの発注時刻は min(created_at, task YAML の mtime)。未来の created_at は mtime で出す (#84)."""
+    import time  # noqa: PLC0415
+
+    monkeypatch.setenv('TZ', 'Asia/Tokyo')
+    time.tzset()
+    pj = tmp_path / 'queue' / 'projects' / 'pj'
+    _write(pj / '.squad_session', 'sq1\n', T0)
+    _write(pj / 'tasks' / 'worker1.yaml', f'task_id: FUTURE\ncreated_at: "{_at(5400, "+09:00")}"\n', T0)  # 未来
+    _write(pj / 'tasks' / 'worker2.yaml', f'task_id: PAST\ncreated_at: "{_at(-600, "+09:00")}"\n', T0)  # 過去
+    _write(pj / 'tasks' / 'worker3.yaml', f'task_id: NAIVE\ncreated_at: "{_at(3600, "")}"\n', T0)  # naive の未来
+    _write(pj / 'tasks' / 'worker4.yaml', 'task_id: NONE\n', T0)  # created_at 無し
+    intents = _intents(tmp_path / 'queue')
+    assert intents['FUTURE'][1]['issued_at'] == _iso_utc(0)
+    assert intents['PAST'][1]['issued_at'] == _iso_utc(-600)
+    assert intents['NAIVE'][1]['issued_at'] == _iso_utc(0)
+    assert intents['NONE'][1]['issued_at'] == _iso_utc(0)

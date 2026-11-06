@@ -220,7 +220,7 @@ def collect(
                 current,
                 assigned_to=_s(data.get('assigned_to')),
                 created_at=_s(data.get('created_at')),
-                issued_at=_iso(created if created is not None else mtime),  # 活動タブの発注時刻 (#82)
+                issued_at=_iso(issued if issued is not None else mtime),  # 活動タブの発注時刻。#84: 早い方
                 routing_reason=_s(data.get('routing_reason')),
                 replan_reason=_s(data.get('replan_reason')),
                 description=_s(data.get('description'))[:4000],

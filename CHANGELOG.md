@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- `squad web` の稼働状況の遅れ 2 件 (#84)。watchd が tasks/ 以下 (archive 含む) の task YAML の変化
+  (発注・書換・移動・削除) でも graph sync を走らせる。Codex の `• Working (<経過時間> • esc to interrupt)`
+  行を作業中と判定する。活動タブの発注時刻は `min(created_at, task YAML の mtime)` にし、未来の
+  `created_at` を書いた task が先頭に出ないようにする。
 - worker の作業中判定を、スピナー動詞の一覧ではなく `<単語>… (<経過時間>` の行の形で行う (#79)。
   一覧に無い動詞 (Nucleating など) の作業中 pane を idle と出していた。
 
