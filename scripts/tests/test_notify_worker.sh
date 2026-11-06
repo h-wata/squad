@@ -23,6 +23,7 @@ mkdir -p "$FAKE_BIN"
 #   send-keys <text>  : $WORKDIR/calls に追記。drop 残があれば pane に書かない
 #   capture-pane      : $WORKDIR/pane の内容を返す
 #   list-panes        : 対象 pane が存在することにする
+#   list-windows      : FAKE_WINDOWS=1 なら window 構成、無ければ旧構成
 cat >"$FAKE_BIN/tmux" <<'FAKE'
 #!/usr/bin/env bash
 set -eu
@@ -32,6 +33,11 @@ DROPS="$WORKDIR/drops"
 case "${1:-}" in
   list-panes)
     echo "testsess:0.2"
+    ;;
+  list-windows)
+    # FAKE_WINDOWS=1: エージェントごとに window を分けた構成 (#95)。無ければ旧構成 (window 0 に pane)
+    [ -n "${FAKE_WINDOWS:-}" ] && printf '%s\n' dispatcher w1 w2 w3 w4 term aux
+    [ -n "${FAKE_WINDOWS:-}" ] || echo "claude"
     ;;
   send-keys)
     # send-keys -t <target> <arg>
@@ -114,6 +120,14 @@ run_case 99
 grep -q "send-keys:Enter" "$WORKDIR/calls" && fail "case3: 乗っていないのに Enter を打った"
 grep -qE "[0-9]+ 回試しても" "$WORKDIR/out" || fail "case3: 失敗メッセージが出ていない"
 echo "ok: case3 乗らなければ Enter を打たず失敗させる"
+
+# --- case 5: window 構成なら window 名、旧構成なら pane 番号に送る (#95) -------
+FAKE_WINDOWS=1 run_case 0
+[ "$RC" -eq 0 ] || fail "case5: window 構成で exit $RC"
+grep -q "testsess:w2" "$WORKDIR/out" || fail "case5: window w2 に送っていない"
+run_case 0
+grep -q "testsess:0.2" "$WORKDIR/out" || fail "case5: 旧構成で pane 0.2 に送っていない"
+echo "ok: case5 window 構成と旧構成で宛先を選ぶ"
 
 # --- case 4: Enter を打っても走り出さなければ発注失敗にする ---------------
 # 入力欄に乗ったことと送信されたことは別。実測でここを見ておらず 2 時間半

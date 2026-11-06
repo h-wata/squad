@@ -89,7 +89,7 @@ def root(tmp_path: Path) -> Path:
     _write(q / 'projects' / 'pj2' / 'tasks' / 'worker1.yaml', 'task_id: P2-1\nassigned_to: worker1\n', NOW - 100)
     (q / 'projects' / '.ruff_cache' / '0.1').mkdir(parents=True)
     cfg = tmp_path / 'config.json'
-    cfg.write_text(json.dumps({'workers': {f'w{i}': {'agent': 'claude', 'pane': f'0.{i}'} for i in (1, 2, 3)}}))
+    cfg.write_text(json.dumps({'workers': {f'w{i}': {'agent': 'claude', 'pane': f'w{i}'} for i in (1, 2, 3)}}))
     graph.sync(q, config_path=cfg)
     # web は YAML も config.json も読まない (worker 定義は sync が DB に写す) ので、消しても同じ画面が出る
     shutil.rmtree(q / 'projects')
@@ -97,10 +97,20 @@ def root(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _fake_tmux(calls: list[list[str]]) -> object:
+# start.sh が作る window 構成 (#95)。list-panes -s -F '#{window_name}\t#{pane_title}' の出力
+SQ1_PANES = ''.join(
+    f'{w}\t{t}\n'
+    for w, t in (('dispatcher', 'Dispatcher'), ('w1', 'Worker1'), ('w2', 'Worker2'), ('w3', 'Worker3'))
+    + (('w4', 'Worker4'), ('term', 'Terminal'), ('aux', 'Aux-Shell'))
+)
+# window に分ける前の旧構成: window 0 に 7 pane。window 名はプロセス名
+LEGACY_PANES = ''.join(f'claude\t{t}\n' for t in ('Dispatcher', 'W1', 'W2', 'W3', 'Terminal', 'Aux-Shell', 'W4'))
+
+
+def _fake_tmux(calls: list[list[str]], layout: str = SQ1_PANES, prefix: str = 'sq1:w') -> object:
     screens = {
-        'sq1:0.1': '✶ Thinking… (12s · esc to interrupt)\n',
-        'sq1:0.2': f'export GH={SECRET}\nDo you want to proceed?\n 1. Yes\n',
+        f'{prefix}1': '✶ Thinking… (12s · esc to interrupt)\n',
+        f'{prefix}2': f'export GH={SECRET}\nDo you want to proceed?\n 1. Yes\n',
     }
 
     def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
@@ -108,11 +118,12 @@ def _fake_tmux(calls: list[list[str]]) -> object:
         if cmd[:2] == ['tmux', 'list-sessions']:
             return subprocess.CompletedProcess(cmd, 0, 'sq1\nother\n', '')
         if cmd[:2] == ['tmux', 'list-panes']:
-            out = 'Dispatcher\nAux-Shell\n' if 'sq1' in cmd else 'bash\n'
+            # other は aux / w1 window を持つが start.sh が付けるタイトルが無い無関係なセッション
+            out = layout if '=sq1' in cmd else 'aux\tbash\nw1\tbash\n'
             return subprocess.CompletedProcess(cmd, 0, out, '')
         if cmd[:2] == ['tmux', 'capture-pane']:
             target = cmd[cmd.index('-t') + 1]
-            if target == 'sq1:0.3':
+            if target == f'{prefix}3':
                 return subprocess.CompletedProcess(cmd, 1, '', "can't find pane")
             return subprocess.CompletedProcess(
                 cmd, 0, screens.get(target, f'idle\nAuthorization: Bearer {SECRET}\n'), ''
@@ -202,7 +213,7 @@ def test_projects_come_from_db_and_match_graph_status(server: tuple[str, list], 
 def test_sessions_reuse_squad_ls_states(server: tuple[str, list]) -> None:
     base, calls = server
     data = _get_json(base, '/api/sessions')
-    (sess,) = data['sessions']  # Aux-Shell の無い other は squad セッションではない
+    (sess,) = data['sessions']  # aux window があってもタイトル Aux-Shell の無い other は squad セッションではない
     assert sess['name'] == 'sq1'
     assert sess['projects'] == ['pj']  # pj2 は other の担当
     w = {r['worker']: r for r in sess['workers']}
@@ -219,14 +230,28 @@ def test_sessions_reuse_squad_ls_states(server: tuple[str, list]) -> None:
     assert {c[1] for c in calls} <= {'list-sessions', 'list-panes', 'capture-pane'}
 
 
+def test_legacy_pane_layout_session_still_shows(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Window に分ける前の旧構成 (window 0 に 7 pane、pane タイトル Aux-Shell) も稼働状況と pane 表示が出る (#95)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, 'run', _fake_tmux(calls, LEGACY_PANES, 'sq1:0.'))
+    (sess,) = web.sessions_data(root / 'queue' / '.graph.db')['sessions']
+    assert [(r['pane'], r['status']) for r in sess['workers']] == [
+        ('sq1:0.1', 'busy'),
+        ('sq1:0.2', 'permission_wait'),
+        ('sq1:0.3', 'unreachable'),
+    ]
+    assert web.pane_data(root / 'queue' / '.graph.db', 'sq1:0.2')['ok'] is True
+    assert web.pane_data(root / 'queue' / '.graph.db', 'sq1:w2')['ok'] is False
+
+
 def test_pane_opens_only_squad_worker_panes(server: tuple[str, list]) -> None:
     base, calls = server
-    data = _get_json(base, '/api/pane?target=sq1:0.2')
+    data = _get_json(base, '/api/pane?target=sq1:w2')
     assert data['ok'] is True
     assert 'Do you want to proceed?' in data['text']
     assert SECRET not in data['text']
     calls.clear()
-    for target in ('other:0.1', 'sq1:0.0', '3:0.0'):
+    for target in ('other:w1', 'sq1:dispatcher', 'sq1:aux', '3:0.0'):
         refused = _get_json(base, f'/api/pane?target={target}')
         assert refused['ok'] is False
     assert not [c for c in calls if c[1] == 'capture-pane']
@@ -325,11 +350,13 @@ def test_pane_masked_before_tail(root: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     def run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess:
         calls.append(cmd)
-        out = {'list-sessions': 's\n', 'list-panes': 'Aux-Shell\n', 'capture-pane': screen + '\n\n'}[cmd[1]]
+        out = {'list-sessions': 's\n', 'list-panes': 'w1\tbash\naux\tAux-Shell\n', 'capture-pane': screen + '\n\n'}[
+            cmd[1]
+        ]
         return subprocess.CompletedProcess(cmd, 0, out, '')
 
     monkeypatch.setattr(subprocess, 'run', run)
-    pane = web.pane_data(root / 'queue' / '.graph.db', 's:0.1')
+    pane = web.pane_data(root / 'queue' / '.graph.db', 's:w1')
     (capture,) = [c for c in calls if c[1] == 'capture-pane']
     assert capture[capture.index('-S') + 1] == '-'  # 可視範囲でなく履歴全体を取る
     assert 'KEYBODY' not in pane['text']

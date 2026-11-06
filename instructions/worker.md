@@ -99,15 +99,15 @@ kioku-mesh が使える場合、非自明な学びが出たら**その場で** `
 
 ## 補助ターミナルの操作
 
-シェルコマンドを別 pane で実行したい場合は補助 Pane に送る (Pane 4: Terminal, Pane 5: Aux-Shell)。
+シェルコマンドを別 window で実行したい場合は補助 window に送る (`term`: Terminal, `aux`: Aux-Shell)。
 どちらも汎用シェルで、特別な環境 (ROS2 等) は source されていない。必要なら送信コマンド側で source する。
 
 **重要**: メッセージと Enter は 2 回に分けて送信。
 
 ```bash
-tmux send-keys -t {SQUAD_SESSION}:0.{N} "{command}"
+tmux send-keys -t {SQUAD_SESSION}:aux "{command}"
 sleep 0.3
-tmux send-keys -t {SQUAD_SESSION}:0.{N} Enter
+tmux send-keys -t {SQUAD_SESSION}:aux Enter
 ```
 
 ## 検証ゲート（report 前の必須ステップ）

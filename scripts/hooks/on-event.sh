@@ -28,23 +28,23 @@ export HOOK_JSON
 # worker ID 解決
 worker="${SQUAD_WORKER_ID:-}"
 if [ -z "$worker" ] && [ -n "${TMUX_PANE:-}" ]; then
-    # %85 → session:window.pane 形式に変換
+    # %85 → window 名と window.pane 番号 (例 "w1 0.0")
     target=$(tmux display-message -p -t "$TMUX_PANE" \
-        '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
+        '#{window_name} #{window_index}.#{pane_index}' 2>/dev/null || true)
     if [ -n "$target" ] && [ -f "$CONFIG" ]; then
-        # config.json の pane は session 非依存のサフィックス (例 "0.1") で
-        # 持っているため、target ("session:0.1") からもサフィックス側だけを
-        # 切り出して比較する (squad.py load_config() と同じ設計)。
+        # config.json の pane は session 非依存の window 名 (例 "w1") で持つ (#95)。
+        # 旧構成 (window 0 を 7 pane に分けていた頃) のセッションは pane 番号 ("0.1") で照合する。
         worker=$(CONFIG="$CONFIG" TARGET="$target" python3 -c '
 import json, os, sys
+LEGACY = {"0.0": "dispatcher", "0.1": "w1", "0.2": "w2", "0.3": "w3", "0.4": "term", "0.5": "aux", "0.6": "w4"}
 try:
     cfg = json.load(open(os.environ["CONFIG"]))
-    target = os.environ["TARGET"]
-    target_suffix = target.rsplit(":", 1)[-1]
+    window, index = os.environ["TARGET"].rsplit(" ", 1)
+    if window not in LEGACY.values():  # 役割名の window が無い = 旧構成
+        window = LEGACY.get(index, window)
     for name, meta in cfg.get("workers", {}).items():
-        pane = meta.get("pane", "")
-        pane_suffix = pane.rsplit(":", 1)[-1]
-        if pane_suffix == target_suffix:
+        pane = meta.get("pane", "").rsplit(":", 1)[-1]
+        if LEGACY.get(pane, pane) == window:
             print(name); sys.exit(0)
 except Exception:
     pass

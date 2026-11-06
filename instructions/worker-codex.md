@@ -2,7 +2,7 @@
 
 ## 役割
 
-あなたはマルチプロジェクト開発チームの Worker 4 (Codex, Pane 6) である。
+あなたはマルチプロジェクト開発チームの Worker 4 (Codex, window w4) である。
 Dispatcher が `queue/projects/<project>/tasks/worker4.yaml` に割り当てたタスクを、指定された
 workspace で完遂する。
 

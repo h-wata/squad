@@ -2,8 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- tmux の pane 分割をやめ、エージェントごとに window を分ける (#95)。window 名は `dispatcher` / `w1` /
+  `w2` / `w3` / `w4` / `term` / `aux` で、`prefix + w` の一覧に出る。宛先は `<session>:w1` のように
+  window 名で指す (`squad/config.json` の `pane` も `w1` 等に変わった)。`squad web` は `aux` window の
+  有無で squad セッションを見分ける。window に分ける前に起動したままのセッション (window 0 に 7 pane)
+  は、notify-worker.sh / watchd / hook / `squad ls` / `squad web` / stop.sh が従来の `0.<n>` で扱う。
+  新しい構成にするにはセッションを `stop.sh` → `start.sh` で作り直す。
+
 ### Fixed
 
+- `squad ls` / `squad web` の作業中判定で、画面下の空行を落としてから末尾を取る (#95)。背の高い
+  pane で出力が画面の上にあると、作業中を待機中と読んでいた (watchd は #85 で修正済み)。
 - `squad web` の稼働状況の遅れ 2 件 (#84)。watchd が tasks/ 以下 (archive 含む) の task YAML の変化
   (発注・書換・移動・削除) でも graph sync を走らせる。Codex の `• Working (<経過時間> • esc to interrupt)`
   行を作業中と判定する。活動タブの発注時刻は `min(created_at, task YAML の mtime)` にし、未来の

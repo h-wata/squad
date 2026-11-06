@@ -2,19 +2,19 @@
     "workers": {
         "w1": {
             "agent": "claude",
-            "pane": "0.1"
+            "pane": "w1"
         },
         "w2": {
             "agent": "claude",
-            "pane": "0.2"
+            "pane": "w2"
         },
         "w3": {
             "agent": "claude",
-            "pane": "0.3"
+            "pane": "w3"
         },
         "w4": {
             "agent": "codex",
-            "pane": "0.6"
+            "pane": "w4"
         }
     }
 }

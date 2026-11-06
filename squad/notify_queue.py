@@ -8,7 +8,7 @@ watchd.py が Dispatcher pane (0) へ直接 send-keys していた通知を、�
 
 優先度:
   critical: status:blocked report / report_id 欠落など。即時 enqueue。未 ack が
-            一定時間を超えたときだけ Pane 0 へ 1 行 fallback (age-based, 指数 backoff)。
+            一定時間を超えたときだけ Dispatcher window へ 1 行 fallback (age-based, 指数 backoff)。
   normal:   通常 report。即時 enqueue。Dispatcher の次の pull で読む。
   low:      stall / discovery / sweep。Pane 直送はせず、dedupe_key で同一原因を
             1 件に畳んで queue に留める。
@@ -33,7 +33,7 @@ import uuid
 
 PRIORITIES = ('critical', 'normal', 'low')
 
-# critical fallback (Pane 0 への唯一の直送経路) の再送間隔。末尾が cap。
+# critical fallback (Dispatcher window への唯一の直送経路) の再送間隔。末尾が cap。
 FALLBACK_BACKOFF_SECONDS = (300, 600, 1200, 2400, 3600)
 
 
@@ -177,7 +177,7 @@ class NotificationQueue:
         """未 ack event が priority 別閾値を超えたら {'priority','count','oldest_age'} を返す.
 
         critical だけでなく normal / low も age で昇格させる。Dispatcher が pull を
-        忘れても、閾値を過ぎれば Pane 0 へ「N 件未確認」の 1 行が出て永久沈黙しない
+        忘れても、閾値を過ぎれば Dispatcher window へ「N 件未確認」の 1 行が出て永久沈黙しない
         (SQUAD-226 critical 2)。閾値超過が複数 priority にまたがるときは、より重い
         priority を代表として報告する (count は超過分の合計)。
 
@@ -232,7 +232,7 @@ class NotificationQueue:
             unacked = self.unacked()
         except QueueUnreadableError as e:
             # 未 ack の件数すら分からない = 最も危険な状態。health は必ず残す
-            # (Pane 0 への直送 alert は watchd 側が別経路で出す)。
+            # (Dispatcher window への直送 alert は watchd 側が別経路で出す)。
             data.update(
                 queue_readable=False,
                 queue_error=str(e),

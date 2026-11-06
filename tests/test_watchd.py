@@ -28,7 +28,9 @@ from ledger import report_identity  # noqa: E402
 from watchd import Config  # noqa: E402
 from watchd import posix_cksum  # noqa: E402
 from watchd import resolve_next  # noqa: E402
+from squad import tmux_target  # noqa: E402
 from watchd import Watcher  # noqa: E402
+from watchd import WORKER_WINDOW  # noqa: E402
 
 
 def cksum_key(text: str) -> str:
@@ -45,7 +47,7 @@ class FakeTmux:
         self.panes = (
             panes
             if panes is not None
-            else {f'{session}:0.0', f'{session}:0.1', f'{session}:0.2', f'{session}:0.3', f'{session}:0.6'}
+            else {f'{session}:{w}' for w in ('dispatcher', 'w1', 'w2', 'w3', 'w4', 'term', 'aux')}
         )
         self.sent: list[tuple[str, str]] = []
         self.captures: dict[str, list[str]] = {}  # pane -> 順に返す capture 内容 (末尾を使い回す)
@@ -53,6 +55,10 @@ class FakeTmux:
 
     def has_session(self) -> bool:
         return True
+
+    def target(self, name: str) -> str:
+        windows = [p.split(':', 1)[1] for p in self.panes if p.startswith(f'{self.session}:')]
+        return tmux_target(self.session, name, windows)
 
     def pane_exists(self, pane: str) -> bool:
         return pane in self.panes
@@ -413,7 +419,7 @@ class TestStallDetection:
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         w.cfg.stall_cycles = 2
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['idle screen']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['idle screen']
         w.check_workers()  # 1回目: hash 初期化 (stall=0)
         assert w.tmux.sent == []
         w.check_workers()  # 2回目: 無変化を検知 (stall=1, まだ閾値未満)
@@ -441,10 +447,10 @@ class TestStallDetection:
         d = make_project(queue, 'pj', session='testsess')
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Do you want to proceed? (y/n)']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['Do you want to proceed? (y/n)']
         w.check_workers()
-        assert (f'{w.cfg.session}:0.1', 'y') in w.tmux.sent
-        assert (f'{w.cfg.session}:0.1', 'Enter') in w.tmux.sent
+        assert (f'{w.cfg.session}:w1', 'y') in w.tmux.sent
+        assert (f'{w.cfg.session}:w1', 'Enter') in w.tmux.sent
 
     def test_dangerous_approval_is_held_not_answered(self, watcher: tuple[Watcher, Path]) -> None:
         """#54: 危険操作の承認プロンプトには y/Enter を送らず、critical で 1 回だけ上げる."""
@@ -453,7 +459,7 @@ class TestStallDetection:
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         w.cfg.stall_cycles = 1
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Bash(rm -rf build)\nDo you want to proceed?\n1. Yes']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['Bash(rm -rf build)\nDo you want to proceed?\n1. Yes']
         for _ in range(3):
             w.check_workers()
         assert w.tmux.sent == []
@@ -471,7 +477,7 @@ class TestStallDetection:
         task.write_text('task_id: T1\n')
         os.utime(task, (100, 100))
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Bash(rm -rf build)\nDo you want to proceed?\n1. Yes']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['Bash(rm -rf build)\nDo you want to proceed?\n1. Yes']
         w.check_workers()
         report = write_report(d)
         os.utime(report, (200, 200))
@@ -490,15 +496,15 @@ class TestStallDetection:
         w2 = Watcher(cfg=w.cfg, tmux=w.tmux)
         w2.sleep = lambda _s: None
         w2.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['Bash(rm -rf build)\nDo you want to proceed? (y/n)']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['Bash(rm -rf build)\nDo you want to proceed? (y/n)']
         w2.check_workers()
-        assert (f'{w.cfg.session}:0.1', 'y') in w.tmux.sent
+        assert (f'{w.cfg.session}:w1', 'y') in w.tmux.sent
 
     def test_missing_pane_skipped_without_stall(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
         d = make_project(queue, 'pj', session='testsess')
         (d / 'tasks' / 'worker4.yaml').write_text('task_id: T1\n')  # W4 pane 無し想定
-        w.tmux.panes.discard(f'{w.cfg.session}:0.6')
+        w.tmux.panes.discard(f'{w.cfg.session}:w4')
         w.cfg.stall_cycles = 1
         w.refresh_owned_projects()
         w.check_workers()
@@ -518,7 +524,7 @@ class TestStallDetection:
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         w.cfg.stall_cycles = 1
         monkeypatch.setattr(Watcher, '_recent_hook_event', staticmethod(lambda n: 'Notification'))
-        pane = f'{w.cfg.session}:0.1'
+        pane = f'{w.cfg.session}:w1'
         w.tmux.captures[pane] = ['idle screen', 'idle screen', 'Do you want to proceed? (y/n)']
         w.refresh_owned_projects()
         w.check_workers()  # 1回目: hash 初期化
@@ -537,7 +543,7 @@ class TestStallDetection:
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         w.cfg.stall_cycles = 1
         monkeypatch.setattr(Watcher, '_recent_hook_event', staticmethod(lambda n: 'Notification'))
-        pane = f'{w.cfg.session}:0.1'
+        pane = f'{w.cfg.session}:w1'
         w.tmux.captures[pane] = ['idle screen, nothing to see']
         w.refresh_owned_projects()
         w.check_workers()  # 1回目: hash 初期化
@@ -570,7 +576,7 @@ class TestArchivedReportReconciliation:
         self._archive_delivered_report(w, d, 1, 'T1')
         w.cfg.stall_cycles = 1
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['idle screen']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['idle screen']
         w.check_workers()
         assert w.tmux.sent == []
         assert w.nq.unacked() == []  # queue にも積まれない (stall 対象外)
@@ -583,7 +589,7 @@ class TestArchivedReportReconciliation:
         self._archive_delivered_report(w, d, 1, 'T1')  # archive にあるのは T1 の report
         w.cfg.stall_cycles = 1
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['idle screen']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['idle screen']
         w.check_workers()  # 1回目: hash 初期化
         w.check_workers()  # 2回目: 無変化を検知して stall=1 で閾値到達
         events = [e for e in w.nq.unacked() if e['priority'] == 'low']
@@ -595,7 +601,7 @@ class TestArchivedReportReconciliation:
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         w.cfg.stall_cycles = 1
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['idle screen']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['idle screen']
         w.check_workers()  # 1回目: hash 初期化
         w.check_workers()  # 2回目: 無変化を検知して stall=1 で閾値到達
         events = [e for e in w.nq.unacked() if e['priority'] == 'low']
@@ -1314,11 +1320,53 @@ def test_posix_cksum_matches_coreutils() -> None:
     assert posix_cksum(b'/tmp/x.py|# TODO: fix this') == 2509647034
 
 
-def test_pane_for_matches_legacy_layout() -> None:
-    """旧 pane_for() の worker→pane マッピング (1..3 → 0.1..0.3, 4 → 0.6) を維持する."""
-    from watchd import PANE_SUFFIX
+def test_workers_are_addressed_by_window_name(tmp_path: Path) -> None:
+    """Worker n は window wn、Dispatcher は window dispatcher を宛先にする (#95)."""
+    queue = tmp_path / 'queue'
+    queue.mkdir()
+    w = Watcher(cfg=Config(session='testsess', queue_dir=queue), tmux=FakeTmux('testsess'))
+    assert [w.tmux.target(WORKER_WINDOW[n]) for n in (1, 2, 3, 4)] == [f'testsess:w{n}' for n in (1, 2, 3, 4)]
+    assert w.tmux.target('dispatcher') == 'testsess:dispatcher'
 
-    assert PANE_SUFFIX == {1: '0.1', 2: '0.2', 3: '0.3', 4: '0.6'}
+
+def test_legacy_pane_layout_still_works(tmp_path: Path) -> None:
+    """Window に分ける前の旧構成 (window 0 に 7 pane) のセッションでも、承認応答と Dispatcher 通知が届く (#95)."""
+    queue = tmp_path / 'queue'
+    queue.mkdir()
+    legacy = {f'testsess:0.{i}' for i in range(7)}
+    w = Watcher(cfg=Config(session='testsess', queue_dir=queue), tmux=FakeTmux('testsess', panes=legacy))
+    d = make_project(queue, 'pj', session='testsess')
+    (d / 'tasks' / 'worker4.yaml').write_text('task_id: T4\n')
+    w.refresh_owned_projects()
+    w.tmux.captures['testsess:0.6'] = ['Do you want to proceed? (y/n)']
+    w.check_workers()
+    assert ('testsess:0.6', 'y') in w.tmux.sent
+    assert w.notify_dispatcher('hello')
+    assert ('testsess:0.0', 'hello') in w.tmux.sent
+
+
+def test_real_tmux_pane_exists_accepts_window_and_legacy_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tmux.pane_exists は window 名の宛先も旧構成の pane 番号も見つける (#95 の real check で漏れていた)."""
+    from watchd import Tmux  # noqa: PLC0415
+
+    out = 's:0.0 s:dispatcher\ns:1.0 s:w1\n'
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, out, ''))
+    t = Tmux('s')
+    assert t.pane_exists('s:w1')
+    assert t.pane_exists('s:dispatcher')
+    assert t.pane_exists('s:0.0')
+    assert not t.pane_exists('s:w4')
+
+
+def test_real_tmux_target_resolves_both_layouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tmux.target は list-windows の結果で新旧の構成を見分ける."""
+    from watchd import Tmux  # noqa: PLC0415
+
+    for names, want in (('dispatcher\nw1\nw2\n', 's:w1'), ('claude\n', 's:0.1')):
+        monkeypatch.setattr(
+            subprocess, 'run', lambda cmd, names=names, **_kw: subprocess.CompletedProcess(cmd, 0, names, '')
+        )
+        assert Tmux('s').target('w1') == want
 
 
 class TestBudget:
@@ -1341,7 +1389,7 @@ class TestBudget:
         d = make_project(queue, 'pj', session='testsess')
         self._task(d, minutes_ago=45)
         w.refresh_owned_projects()
-        w.tmux.captures[f'{w.cfg.session}:0.1'] = ['working...']
+        w.tmux.captures[f'{w.cfg.session}:w1'] = ['working...']
         w.check_workers()
         w.check_workers()
         events = self._budget_events(w)
@@ -1765,13 +1813,16 @@ class TestInstructions:
 
     def test_idle_dispatcher_gets_oldest_once_with_delivered_at(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         b = write_instruction(queue, '20261106T000002000000Z-bbbb', body='2 件目')
         a = write_instruction(queue, '20261106T000001000000Z-aaaa', body='PR #9 を\n見て\x1b[2J;', project='p\nj')
         w.deliver_instructions()
         assert w.tmux.sent == [
-            ('testsess:0.0', '[squad-web 指示] [project: p j] PR #9 を 見て [2J; [id=20261106T000001000000Z-aaaa]'),
-            ('testsess:0.0', 'Enter'),
+            (
+                'testsess:dispatcher',
+                '[squad-web 指示] [project: p j] PR #9 を 見て [2J; [id=20261106T000001000000Z-aaaa]',
+            ),
+            ('testsess:dispatcher', 'Enter'),
         ]
         assert _instr(a)['delivered_at'] and not _instr(b)['delivered_at']  # 1 サイクル 1 件
         w._sent_to_dispatcher = False  # noqa: SLF001 (次のサイクル)
@@ -1786,16 +1837,16 @@ class TestInstructions:
         w, queue = watcher
         p = write_instruction(queue, 'x')
         for screen in (BUSY, 'Do you want to proceed?\n 1. Yes\n'):  # 作業中 / 許可待ち
-            w.tmux.captures['testsess:0.0'] = [screen]
+            w.tmux.captures['testsess:dispatcher'] = [screen]
             w.deliver_instructions()
             assert w.tmux.sent == [] and not _instr(p)['delivered_at']
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         w.deliver_instructions()
         assert len(w.tmux.sent) == 2 and _instr(p)['delivered_at']
 
     def test_restart_does_not_send_again(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         write_instruction(queue, 'x')
         w.deliver_instructions()
         again = Watcher(cfg=w.cfg, tmux=w.tmux)  # watchd の再起動
@@ -1810,7 +1861,7 @@ class TestInstructions:
         d = make_project(queue, 'pj', session='testsess')
         write_report(d)
         p = write_instruction(queue, 'x')
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         w.cycle()
         assert not _instr(p)['delivered_at'] and all('squad-web' not in m for _, m in w.tmux.sent)
         n = len(w.tmux.sent)
@@ -1819,7 +1870,7 @@ class TestInstructions:
 
     def test_send_failure_marks_failed_and_is_not_retried(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         w.tmux.fail_send = True
         p = write_instruction(queue, 'x')
         w.deliver_instructions()
@@ -1831,7 +1882,7 @@ class TestInstructions:
 
     def test_other_sessions_and_broken_files_are_left_alone(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         other = write_instruction(queue, 'x', session='other')
         broken = queue / 'instructions' / 'testsess' / 'a.json'
         broken.parent.mkdir(parents=True)
@@ -1846,11 +1897,11 @@ class TestInstructions:
         w, queue = watcher
         w.deliver_instructions()
         w._graph_dirty = False  # noqa: SLF001
-        w.tmux.captures['testsess:0.0'] = [BUSY]
+        w.tmux.captures['testsess:dispatcher'] = [BUSY]
         write_instruction(queue, 'x', body='ひみつの本文')
         w.deliver_instructions()  # 渡す前でも活動タブに出すため sync し直す
         assert w._graph_dirty  # noqa: SLF001
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         w.deliver_instructions()
         assert 'ひみつの本文' not in capsys.readouterr().out
 
@@ -1859,7 +1910,7 @@ class TestInstructions:
         if os.geteuid() == 0:
             pytest.skip('root では権限で書き込みを止められない')
         w, queue = watcher
-        w.tmux.captures['testsess:0.0'] = [IDLE]
+        w.tmux.captures['testsess:dispatcher'] = [IDLE]
         p = write_instruction(queue, 'x')
         os.chmod(p.parent, 0o500)
         try:
@@ -1876,7 +1927,7 @@ def test_capture_drops_blank_lines_below_the_output(monkeypatch: pytest.MonkeyPa
 
     screen = BUSY + '\n' * 60
     monkeypatch.setattr(subprocess, 'run', lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, screen, ''))
-    assert detect_status(Tmux('s').capture('s:0.0'))['status'] == 'busy'
+    assert detect_status(Tmux('s').capture('s:dispatcher'))['status'] == 'busy'
 
 
 def test_two_watchers_on_one_session_send_once(watcher: tuple[Watcher, Path]) -> None:
@@ -1884,7 +1935,7 @@ def test_two_watchers_on_one_session_send_once(watcher: tuple[Watcher, Path]) ->
     import fcntl  # noqa: PLC0415
 
     w, queue = watcher
-    w.tmux.captures['testsess:0.0'] = [IDLE]
+    w.tmux.captures['testsess:dispatcher'] = [IDLE]
     p = write_instruction(queue, 'x')
     other = os.open(p.parent / '.lock', os.O_RDWR | os.O_CREAT)
     fcntl.flock(other, fcntl.LOCK_EX)  # もう 1 つの watchd が印付け〜送信の最中
