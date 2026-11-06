@@ -98,13 +98,34 @@ def _s(value: object) -> str:
     return '' if value is None else str(value)
 
 
+_REPO_ISSUE_RE = re.compile(r'^([\w.-]+)/([\w.-]+)#(\d+)$')
+_TOKEN_RE = re.compile(r'[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+')
+_REPORT_PATH_RE = re.compile(r'projects/([^/\s]+)/(reports/[^\s()]+\.yaml)')
+# 元の task / レビューを指す context のキー (実 queue の揺れ: parent_task / review_report / prior_review_302 等)。
+# sha・worktree・branch・note 等は拾わない
+_LINK_KEY_RE = re.compile(
+    r'^(parent_tasks?|prior_tasks?|prior_task_archive|parent_review(_task)?|parent_verify|parent_design|'
+    r'(review|fixer|fix|source|primary|related)_report|primary_review(_claude)?|related_review|review_canonical|'
+    r'(prior|previous|prev)_(review|reviews|review_report|review_refs|review_archive|review_ref|reports|approved_review|'
+    r'review_\d+)|prior_review_\d+|codex_review|review_path)$'
+)
+
+
 def _goal_id(project: str, parent_issue: object) -> str:
-    """番号だけなら project の Issue、URL なら owner/repo の Issue (別 repo の Issue を取り違えない)."""
-    ref = _s(parent_issue).strip()
+    """Issue のゴール ID. 番号・`#N`・`<project と同名の repo>#N` は project の Issue、別 repo は owner/repo の Issue.
+
+    カンマ区切り (`79, 80`) は最初の Issue。`SQUAD-228` のような task_id は Issue ではない ('' を返す).
+    """
+    ref = _s(parent_issue).split(',')[0].strip()
     if m := _ISSUE_URL_RE.search(ref):
-        return f'goal:{m.group(1)}#{m.group(2)}'
-    m = _ISSUE_RE.match(ref)
-    return f'goal:{project}#{m.group(1)}' if m else ''
+        repo, num = m.group(1), m.group(2)
+    elif m := _REPO_ISSUE_RE.match(ref):
+        repo, num = f'{m.group(1)}/{m.group(2)}', m.group(3)
+    elif m := _ISSUE_RE.match(ref):
+        return f'goal:{project}#{m.group(1)}'
+    else:
+        return ''
+    return f'goal:{project}#{num}' if repo.split('/')[1] == project else f'goal:{repo}#{num}'
 
 
 def _line(value: object, limit: int = 200) -> str:
@@ -196,6 +217,8 @@ def collect(
         # intent id -> (tasks/ 直下か, mtime, 発注時刻 or None)。発注時刻は created_at と mtime の早い方
         task_files: dict[str, tuple[bool, float, float | None]] = {}
         issues: dict[str, tuple[str, str]] = {}  # intent id -> (task_id, parent_issue)
+        pr_urls: dict[str, str] = {}  # intent id -> context.pr_url
+        link_refs: dict[str, list[str]] = {}  # intent id -> 元の task を指す context の値 (文字列)
         for path in sorted((pj_dir / 'tasks').rglob('*.yaml')):
             data = _load(path)
             task_id = _s(data.get('task_id')).strip() if data else ''
@@ -228,6 +251,8 @@ def collect(
             context = data.get('context') if isinstance(data.get('context'), dict) else {}
             if nodes[intent]['ref'] == str(path):  # 採用された方のファイルの parent_issue を使う
                 issues[intent] = (task_id, _s(context.get('parent_issue')).strip())
+                pr_urls[intent] = _s(context.get('pr_url')).strip().rstrip('/')
+                link_refs[intent] = _link_values(context)
             derived = data.get('derived_from') or []
             for ref in derived if isinstance(derived, list) else [derived]:
                 if _s(ref).strip():
@@ -343,7 +368,12 @@ def collect(
             )
         for intent in task_files:
             nodes[intent]['payload'].setdefault('finished_at', '')
-        for goal, (pj, title, ref, members) in _group_goals(project, issues, nodes).items():
+        derived_links = _task_links(queue_dir, project, link_refs, task_files)
+        grouped = _group_goals(project, issues, nodes, pr_urls, derived_links)
+        goal_of = {m: g for g, (_, _, _, ms) in grouped.items() for m in ms}
+        # Issue が違う task 同士には張らない (参照されただけで別 Issue の流れに見えてしまう)
+        edges.update((i, 'derived_from', t) for i, t in derived_links if goal_of.get(i) == goal_of.get(t))
+        for goal, (pj, title, ref, members) in grouped.items():
             # 同じ Issue の URL を別 project の task も指すことがあるので、上書きせず配下を足す
             goal_members.setdefault(goal, (pj, title, ref, []))[3].extend(members)
         latest = max(
@@ -370,33 +400,109 @@ def collect(
     return nodes, edges, projects
 
 
+def _link_values(context: dict[str, Any]) -> list[str]:
+    """parent_issue と、元の task / レビューを指すキーの値を文字列にして集める (list は 1 要素ずつ)."""
+    out: list[str] = []
+    for key, value in context.items():
+        if key == 'parent_issue' or _LINK_KEY_RE.match(str(key)):
+            out += [_s(v) for v in (value if isinstance(value, list) else [value]) if _s(v).strip()]
+    return out
+
+
+def _task_links(
+    queue_dir: Path,
+    project: str,
+    link_refs: dict[str, list[str]],
+    task_files: dict[str, tuple[bool, float, float | None]],
+) -> set[tuple[str, str]]:
+    """(派生 task の intent, 元 task の intent) を返す. 元 task は同じ project の既知の task_id だけ.
+
+    値に task_id が書いてあればそれ。無ければ値の report パス (reports/....yaml) を開いて、中の task_id を使う
+    (worker4_review.yaml のように上書きされるパスは、今そこにある report の task を指す)。
+    """
+    known = {i.split('/', 1)[1] for i in task_files}
+    links: set[tuple[str, str]] = set()
+    for intent, values in link_refs.items():
+        for value in values:
+            targets = {t for t in _TOKEN_RE.findall(value) if t in known}
+            if not targets:
+                for m in _REPORT_PATH_RE.finditer(value):
+                    if m.group(1) != project:
+                        continue
+                    data = _load(queue_dir / 'projects' / m.group(1) / m.group(2))
+                    if data and _s(data.get('task_id')).strip() in known:
+                        targets.add(_s(data['task_id']).strip())
+            links.update((intent, f'intent:{project}/{t}') for t in targets if f'intent:{project}/{t}' != intent)
+    return links
+
+
 # task_id の頭 (SQUAD-284-fix1 -> SQUAD-284)。この形でない task_id は 1 件で 1 ゴール
 _BASE_RE = re.compile(r'^([A-Za-z][A-Za-z0-9]*-\d+)(?:-.+)?$')
 
 
 def _group_goals(
-    project: str, issues: dict[str, tuple[str, str]], nodes: dict[str, dict[str, Any]]
+    project: str,
+    issues: dict[str, tuple[str, str]],
+    nodes: dict[str, dict[str, Any]],
+    pr_urls: dict[str, str],
+    links: set[tuple[str, str]],
 ) -> dict[str, tuple[str, str, str, list[str]]]:
-    """Intent をゴールに組み分ける (#76 addendum).
+    """Intent をゴールに組み分ける (#76 addendum, #88).
 
-    context.parent_issue があればその Issue がゴール。無い task は task_id の頭が同じ派生 task
-    (SQUAD-284 / SQUAD-284-fix1 / SQUAD-016-review) を、元の task を根にした 1 ゴールにまとめる。
-    元の task が Issue を持っていれば、派生 task もその Issue のゴールに入れる。
+    つなぐ手がかり (同じ Issue / task_id の頭 / 同じ pr_url / task_id 参照) で task を 1 ゴールにまとめる。
+    Issue のゴールが違う 2 つはどの手がかりでもまとめない (使い回された PR や参照で別 Issue を巻き込まない)。
+    ゴールは、まとまりの中の Issue があればそれ、無ければ根の task_id の頭。
     """
     base = {i: (m.group(1) if (m := _BASE_RE.match(tid)) else tid) for i, (tid, _) in issues.items()}
-    root_issue = {base[i]: _goal_id(project, ref) for i, (tid, ref) in issues.items() if tid == base[i] and ref}
+    own = {i: _goal_id(project, ref) for i, (_, ref) in issues.items()}
+    parent = {i: i for i in issues}
+    issue_of = {i: own[i] for i in issues}  # 代表 intent -> まとまりの Issue ゴール ('' なら未定)
+
+    def find(i: str) -> str:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra == rb or (issue_of[ra] and issue_of[rb] and issue_of[ra] != issue_of[rb]):
+            return
+        parent[rb] = ra
+        issue_of[ra] = issue_of[ra] or issue_of[rb]
+
+    def join_by(key: dict[str, str]) -> None:
+        first: dict[str, str] = {}
+        for i in sorted(issues):
+            if key[i]:
+                union(first.setdefault(key[i], i), i)
+
+    # 先に Issue と task_id の頭で束ねる (根の Issue が、Issue を持たない派生 task にも回る)
+    join_by(own)
+    join_by(base)
+    join_by(pr_urls)
+    for src, dst in sorted(links):
+        if src in issues and dst in issues:
+            union(dst, src)
+
+    members: dict[str, list[str]] = {}
+    for i in issues:
+        members.setdefault(find(i), []).append(i)
     out: dict[str, tuple[str, str, str, list[str]]] = {}
-    # 古い順に入れて、ゴールの題名は根 (無ければ一番古い task) の題名にする
-    for intent in sorted(issues, key=lambda i: (issues[i][0] != base[i], nodes[i]['_mtime'])):
-        ref = issues[intent][1]
-        goal = _goal_id(project, ref) or root_issue.get(base[intent], '')
+    for rep, group in members.items():
+        # 古い順に入れて、ゴールの題名は根 (無ければ一番古い task) の題名にする
+        group.sort(key=lambda i: (issues[i][0] != base[i], nodes[i]['_mtime']))
+        root = group[0]
+        goal = issue_of[find(rep)]
         if goal:
-            label, gref = f'Issue {goal.rsplit("#", 1)[1]}', ref or base[intent]
+            label = f'Issue {goal.rsplit("#", 1)[1]}'
+            gref = next((issues[i][1] for i in group if own[i] == goal), '') or base[root]
         else:
-            goal, label, gref = f'goal:{project}/{base[intent]}', base[intent], base[intent]
-        if goal not in out:
-            out[goal] = (project, f'{label} {nodes[intent]["title"]}'.strip(), gref, [])
-        out[goal][3].append(intent)
+            goal, label, gref = f'goal:{project}/{base[root]}', base[root], base[root]
+        if goal in out:  # 別のまとまりが同じ ID になった (同じ頭の根が 2 つ等): 配下を足す
+            out[goal][3].extend(group)
+        else:
+            out[goal] = (project, f'{label} {nodes[root]["title"]}'.strip(), gref, list(group))
     return out
 
 
