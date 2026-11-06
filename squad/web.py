@@ -49,6 +49,21 @@ def _masked(obj: Any) -> Any:  # noqa: ANN401
 
 # ---------- project 一覧 ----------
 
+
+def parse_iso8601(value: str) -> datetime | None:
+    """ISO8601 を UTC の aware datetime にする. scripts/measure_task_cost.py の同名関数と同じ扱い.
+
+    Z 終端は +00:00、オフセット無し (naive) は worker が手元の時計で書いた値なのでローカル時刻として読む。
+    """
+    text = (value or '').strip()
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        return datetime.fromisoformat(text).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
 # 同じ task_id に複数の結果があるときの優先順: worker の report > cross-review > verifier の verdict
 _RESULT_RANK = {'status': 2, 'verdict': 1, 'result': 0}
 
@@ -69,22 +84,34 @@ def projects_data(queue_dir: Path, dashboards_dir: Path) -> dict[str, Any]:
 
     結果は `<task>_report.yaml` に限らず worker4_review*.yaml や workerN_verdict.yaml にもあるので、
     reports/*.yaml を全部読む。task より古い結果は数えない (同じ task_id の再発注を done にしない)。
+    新旧は task の発注時刻と report の completed_at (無ければ report の mtime) で比べる。発注時刻は task の
+    created_at と mtime の早い方。どちらも実際の発注より後ろにしかずれないため: mtime は一括更新される
+    ことがあり (mesh-mem の tasks/ は 2026-07-02 に全部更新された)、created_at は Dispatcher が丸めて
+    書くので実際の発注より後になることがある (SQUAD-257 は created_at 13:10、発注 13:04、review 13:09)。
+    created_at が無いときは task / report とも mtime で比べる。
     """
     out = []
     for pj_dir in sorted(p for p in (queue_dir / 'projects').glob('*') if p.is_dir()):
         reports = {p.name: p for p in (pj_dir / 'reports').glob('*.yaml')}
-        results: dict[str, list[tuple[float, int, str]]] = {}
+        results: dict[str, list[tuple[datetime, datetime, int, str]]] = {}
         for rep_path in reports.values():
             rep = yaml_shallow(rep_path)
             if rep.get('task_id') and (st := _result_state(rep)):
-                results.setdefault(rep['task_id'], []).append((rep_path.stat().st_mtime, *st))
+                mtime = datetime.fromtimestamp(rep_path.stat().st_mtime, timezone.utc)
+                completed = parse_iso8601(rep.get('completed_at', '')) or mtime
+                results.setdefault(rep['task_id'], []).append((mtime, completed, *st))
         tasks = []
         for task in sorted((pj_dir / 'tasks').glob('*.yaml')):
             meta = yaml_shallow(task)
             worker = meta.get('assigned_to') or task.stem
             issued = task.stat().st_mtime
+            task_mtime = datetime.fromtimestamp(issued, timezone.utc)
+            created = parse_iso8601(meta.get('created_at', ''))
+            created = min(created, task_mtime) if created else None
             found = [
-                (rank, mtime, st) for mtime, rank, st in results.get(meta.get('task_id', ''), []) if mtime >= issued
+                (rank, mtime, st)
+                for mtime, completed, rank, st in results.get(meta.get('task_id', ''), [])
+                if (completed >= created if created else mtime >= task_mtime)
             ]
             state = max(found)[2] if found else 'active'
             tasks.append(

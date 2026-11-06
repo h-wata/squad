@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -306,3 +307,80 @@ def test_projects_match_results_by_task_id(tmp_path: Path) -> None:
     assert states == {'X-1': 'done', 'X-2': 'done', 'X-3': 'done', 'X-4': 'active', 'X-5': 'blocked'}
     assert data['latest_report']['file'] == 'worker3_report.yaml'
     assert data['latest_report']['summary'] == '直した 2 行目'
+
+
+@pytest.fixture
+def tokyo_tz() -> None:
+    """Naive 時刻のローカル解釈を固定する (UTC と読むと 9 時間ずれるのを検出できるように)."""
+    old = os.environ.get('TZ')
+    os.environ['TZ'] = 'Asia/Tokyo'
+    time.tzset()
+    yield
+    if old is None:
+        os.environ.pop('TZ', None)
+    else:
+        os.environ['TZ'] = old
+    time.tzset()
+
+
+def _states(tmp_path: Path) -> dict[str, str]:
+    (data,) = web.projects_data(tmp_path / 'queue', tmp_path / 'dashboards')['projects']
+    return {x['task_id']: x['state'] for x in data['tasks']}
+
+
+def test_freshness_uses_created_at_and_completed_at(tmp_path: Path) -> None:
+    """mesh-mem と同じ形: task の mtime だけが後から一括更新され、report より新しく見える."""
+    pj = tmp_path / 'queue' / 'projects' / 'pj'
+    t, r = pj / 'tasks', pj / 'reports'
+    _write(t / 'worker3.yaml', 'task_id: Y-1\ncreated_at: "2026-05-22T17:18:00+09:00"\n', 2_000_000_000)
+    _write(
+        r / 'worker3_report.yaml',
+        'task_id: Y-1\nstatus: completed\ncompleted_at: "2026-05-22T17:25:00+09:00"\n',
+        3_000,
+    )
+    # 再発注: created_at が completed_at より新しければ done にしない
+    _write(t / 'worker2.yaml', 'task_id: Y-2\ncreated_at: "2026-05-23T09:00:00+09:00"\n', 2_000_000_000)
+    _write(
+        r / 'worker2_report.yaml',
+        'task_id: Y-2\nstatus: completed\ncompleted_at: "2026-05-22T21:25:00+09:00"\n',
+        3_000,
+    )
+    # created_at はあるが completed_at が無い review: report 側は mtime で比べる
+    _write(t / 'worker4.yaml', 'task_id: Y-3\ncreated_at: "1970-01-01T00:30:00+00:00"\n', 9_000)
+    _write(r / 'worker4_review.yaml', 'task_id: Y-3\nverdict: approve\n', 3_000)  # 00:50Z
+    # Dispatcher が created_at を丸めて先の時刻を書いた (SQUAD-257 と同じ形): mtime の方が早ければそちらで比べる
+    _write(t / 'worker5.yaml', 'task_id: Y-4\ncreated_at: "1970-01-01T01:00:00+00:00"\n', 3_000)  # 00:50Z
+    _write(r / 'worker5_review.yaml', 'task_id: Y-4\nverdict: approve\nchecked_at: "x"\n', 3_300)  # 00:55Z
+    assert _states(tmp_path) == {'Y-1': 'done', 'Y-2': 'active', 'Y-3': 'done', 'Y-4': 'done'}
+
+
+def test_freshness_falls_back_to_mtime_without_created_at(tmp_path: Path) -> None:
+    """created_at が無ければ task / report とも mtime (report の completed_at も使わない)."""
+    pj = tmp_path / 'queue' / 'projects' / 'pj'
+    t, r = pj / 'tasks', pj / 'reports'
+    _write(t / 'worker1.yaml', 'task_id: Z-1\n', 2_000)
+    _write(r / 'worker1_report.yaml', 'task_id: Z-1\nstatus: completed\ncompleted_at: "2099-01-01T00:00:00Z"\n', 1_000)
+    _write(t / 'worker2.yaml', 'task_id: Z-2\n', 2_000)
+    _write(r / 'worker2_report.yaml', 'task_id: Z-2\nstatus: completed\ncompleted_at: "1970-01-01T00:00:00Z"\n', 3_000)
+    assert _states(tmp_path) == {'Z-1': 'active', 'Z-2': 'done'}
+
+
+@pytest.mark.usefixtures('tokyo_tz')
+def test_freshness_naive_is_local_time(tmp_path: Path) -> None:
+    """Naive はローカル時刻 (ここでは JST)。UTC と読むと 4 件とも逆の判定になる組み合わせ."""
+    pj = tmp_path / 'queue' / 'projects' / 'pj'
+    t, r = pj / 'tasks', pj / 'reports'
+    cases = {
+        # task naive 17:18 JST = 08:18Z < report 12:00Z
+        'N-1': ('"2026-05-22T17:18:00"', '"2026-05-22T12:00:00Z"'),
+        # task naive 17:18 JST = 08:18Z < report 08:30Z
+        'N-2': ('"2026-05-22T17:18:00"', '"2026-05-22T08:30:00+00:00"'),
+        # task 12:00Z > report naive 17:25 JST = 08:25Z
+        'N-3': ('"2026-05-22T12:00:00Z"', '"2026-05-22T17:25:00"'),
+        # task 08:20Z > report naive 08:25 JST = 前日 23:25Z
+        'N-4': ('"2026-05-22T08:20:00Z"', '"2026-05-22T08:25:00"'),
+    }
+    for i, (tid, (created, completed)) in enumerate(cases.items()):
+        _write(t / f'worker{i}.yaml', f'task_id: {tid}\ncreated_at: {created}\n', 2_000_000_000)
+        _write(r / f'worker{i}_report.yaml', f'task_id: {tid}\nstatus: completed\ncompleted_at: {completed}\n', 2_000)
+    assert _states(tmp_path) == {'N-1': 'done', 'N-2': 'done', 'N-3': 'active', 'N-4': 'active'}
