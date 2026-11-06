@@ -97,7 +97,7 @@ def root(tmp_path: Path) -> Path:
 
 def _fake_tmux(calls: list[list[str]]) -> object:
     screens = {
-        'sq1:0.1': 'Thinking… (12s · esc to interrupt)\n',
+        'sq1:0.1': '✶ Thinking… (12s · esc to interrupt)\n',
         'sq1:0.2': f'export GH={SECRET}\nDo you want to proceed?\n 1. Yes\n',
     }
 

@@ -17,10 +17,10 @@ from squad import detect_status  # noqa: E402
     'tail',
     [
         '✶ Nucleating… (4m 52s · ↓ 18.4k tokens)',
-        'Lollygagging… (12s',
-        'Burrowing… (1m 3s',
-        'Meandering… (5s · esc to interrupt)',
-        'Propagating… (9s',
+        '✢ Lollygagging… (12s',
+        '✢ Burrowing… (1m 3s',
+        '✢ Meandering… (5s · esc to interrupt)',
+        '✢ Propagating… (9s',
     ],
 )
 def test_spinner_with_unknown_verb_is_busy(tail: str) -> None:
@@ -35,3 +35,12 @@ def test_finished_and_prompt_are_idle(tail: str) -> None:
 def test_permission_wins_over_spinner() -> None:
     tail = '✶ Nucleating… (4m 52s\nDo you want to proceed?\n 1. Yes'
     assert detect_status(tail)['status'] == 'permission_wait'
+
+
+def test_quoted_spinner_text_is_idle() -> None:
+    assert detect_status('例: Nucleating… (4m 52s · ↓ 18.4k tokens)\n❯ ')['status'] == 'idle'
+
+
+def test_blockquote_and_bullet_spinner_text_is_idle() -> None:
+    for prefix in ('>', '-', '*'):
+        assert detect_status(f'{prefix} Thinking… (12s)\n❯ ')['status'] == 'idle'
