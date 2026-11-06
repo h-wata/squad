@@ -103,7 +103,9 @@ PERMISSION_PATTERNS = [
     r'\b1\.\s+Yes\b',
 ]
 THINKING_PATTERNS = [
-    r'(Sprouting|Whirring|Topsy-turvying|Pondering|Thinking|Working|Cogitating|Crafting)…',
+    # スピナー行 `<動詞>… (<経過時間>`。動詞は毎回入れ替わるので一覧にしない。
+    # 終了表示 `✻ Sautéed for 20s` には `…` が付かないので idle のまま
+    r'\w+…\s*\(\d+[ms]',
     r'Working \(\d+m \d+s\)',
 ]
 CTX_PATTERNS = [
