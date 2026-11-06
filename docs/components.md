@@ -10,6 +10,7 @@ README から移した、ファイルごとの役割の詳細表、`squad` CLI�
 | `scripts/ci-watch.sh` | `gh` の JSON だけで対象 PR の CI 失敗・ハングを検知し、失敗時のみ `scripts/pi-log-triage.sh` にログ一次切り分けを依頼して `queue/_inbox.md` に追記する（検知自体に LLM は使わない） |
 | `scripts/pi-log-triage.sh` | ログ 1 本を pi (local vLLM) に読ませ、根拠付きの一次切り分け YAML を返す薄いラッパー |
 | `scripts/hooks/on-event.sh` | Claude Code hook。Stop/Notification 等のイベントを `squad/state/<worker>.json` に即時反映 |
+| `bin/squad` | `squad` コマンドの入口。start / stop / status / attach / log / root は自分で処理し、ls / assign / dashboard / ledger / notify / graph / trace / web は `squad/squad.py` に渡す。`squad status` はセッションと watcher の状態、worker の状態は `squad ls` |
 | `squad/squad.py` | worker 状態確認・タスク割当・dashboard 生成用の軽量 CLI (stdlib only) |
 | `squad/graph.py` | task / report YAML から探索グラフの派生索引 `queue/.graph.db` を作る (`squad graph sync / why / show / status`)。つなぎ方は下の「squad graph」 |
 | `squad/trace_search.py` / `squad/mask.py` | worker の Claude Code transcript を横断検索する `squad trace search / get`。出力は `pi-log-triage.sh` と同じ規則で secret をマスクする |
@@ -28,7 +29,7 @@ checkout / git worktree を置く親ディレクトリ（`{SQUAD_ROOT}` の親�
 ## squad CLI
 
 ```bash
-cd squad && make install     # ~/.local/bin/squad にシンボリックリンク
+cd squad && make install     # ~/.local/bin/squad に bin/squad のシンボリックリンク
 squad ls                     # 全 worker の状態一覧 (busy/idle/permission_wait/...)
 squad assign w1 <task.yaml>  # task YAML を読み notify-worker.sh 経由で通知
 squad dashboard              # worker 状態表を Markdown で出力
@@ -55,8 +56,8 @@ daemon 系（report 検知・停止検知・自動承認）は `watch.sh` が担
 セッション別の稼働状況、Projects の表、ゴール単位の Graph を見るダッシュボード。
 
 ```bash
-SQUAD_WEB_TOKEN=<token> python3 squad/squad.py web            # 読み取り専用
-SQUAD_WEB_TOKEN=<token> python3 squad/squad.py web --allow-write   # 指示の投入を許す
+SQUAD_WEB_TOKEN=<token> squad web            # 読み取り専用
+SQUAD_WEB_TOKEN=<token> squad web --allow-write   # 指示の投入を許す
 ```
 
 - LAN の別端末から `http://<host>:8765/?token=<token>` で開く。トークン必須 (未設定なら起動しない)。

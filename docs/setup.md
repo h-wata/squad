@@ -124,7 +124,7 @@ SQUAD_SESSION=myproj ./stop.sh
 tmux attach -t myproj
 ```
 
-`squad` CLI (`squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
+`squad` CLI (`bin/squad` と、そこから呼ぶ `squad/squad.py`) も同じ環境変数を見る。未設定時は従来通り `ros-agents` になり、
 `squad/config.json` の宛先 (window 名 w1/w2/w3/w4) も変わらない。
 
 ## Dispatcher 起動モデルのカスタマイズ
