@@ -195,6 +195,7 @@ def test_sessions_reuse_squad_ls_states(server: tuple[str, list]) -> None:
     assert [(t['task_id'], t['state']) for t in w['w1']['tasks']] == [('SQUAD-1-fix1', 'running')]
     assert [(t['task_id'], t['state']) for t in w['w2']['tasks']] == [('SQUAD-2', 'blocked')]
     assert w['w3']['tasks'] == []
+    assert all('last_line' not in r for r in sess['workers'])  # 可視範囲だけのマスクは返さない
     assert SECRET not in json.dumps(data)
     assert {c[1] for c in calls} <= {'list-sessions', 'list-panes', 'capture-pane'}
 
@@ -320,7 +321,7 @@ def test_pane_masked_before_tail(root: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_page_pins_cytoscape_version(server: tuple[str, list]) -> None:
     base, _ = server
     _code, body = _req(f'{base}/?token={TOKEN}')
-    assert b'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js' in body
+    assert b'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js" integrity="sha384-' in body
     assert b"name: 'breadthfirst'" in body
 
 

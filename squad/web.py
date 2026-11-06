@@ -297,7 +297,8 @@ def sessions_data(db_path: Path) -> dict[str, Any]:
                     'label': STATUS_LABEL.get(st['status'], st['status']),
                     'model': st.get('model'),
                     'context_pct': st.get('context_pct'),
-                    'last_line': st.get('last_line', ''),
+                    # last_line は返さない: 可視範囲だけをマスクした行なので、BEGIN 行が画面外に出た
+                    # PRIVATE KEY の本文が素通しになりうる。中身は pane_data (履歴全体をマスク) で見る
                     'tasks': [current[pj, _worker_key(w)] for pj in projects if (pj, _worker_key(w)) in current],
                 }
             )
@@ -390,15 +391,18 @@ def make_server(host: str, port: int, token: str, db_path: Path) -> ThreadingHTT
     return srv
 
 
-# Cytoscape.js は版を URL に固定する。階層レイアウトは同梱の breadthfirst を使う (拡張を足さない)
+# Cytoscape.js は版を URL に固定し、SRI で中身も固定する (ページはトークンを持つので、CDN 側で差し替え
+# られた script を実行しない)。階層レイアウトは同梱の breadthfirst を使う (拡張を足さない)。SRI は公開値
 CYTOSCAPE_URL = 'https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js'
+CYTOSCAPE_SRI = 'sha384-IWROdLKRsN1UuJywMlWl7/blXQ8GEooN2n7dzTxfEPd7ybYIKCUJ2Ol/1Gpf3YV4'  # pragma: allowlist secret
 
 PAGE = (
-    """<!DOCTYPE html>
+    (
+        """<!DOCTYPE html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>squad dashboard</title>
-<script src="CYTOSCAPE_URL"></script>
+<script src="CYTOSCAPE_URL" integrity="CYTOSCAPE_SRI" crossorigin="anonymous"></script>
 <style>
 *{box-sizing:border-box}
 body{font-family:system-ui,sans-serif;margin:0;background:#f5f6f8;color:#1f2328;font-size:14px}
@@ -479,14 +483,13 @@ async function sessions() {
   for (const s of d.sessions) {
     const box = el('div', 'sess'), h = el('h2', '', s.name);
     h.append(el('small', '', '担当 project: ' + (s.projects.join(', ') || 'なし'))); box.append(h);
-    box.append(table(['worker', '状態', '担当タスク', 'model / ctx', '最終行'], s.workers.map(w => {
+    box.append(table(['worker', '状態', '担当タスク', 'model / ctx'], s.workers.map(w => {
       const task = el('div');
       for (const t of w.tasks) { const x = el('div'); x.append(badge(t.state), ' ',
         el('span', 'mono', t.task_id + ' '), el('span', '', t.title)); task.append(x); }
       if (!w.tasks.length) task.textContent = '-';
       const tr = row([el('span', '', w.worker + ' (' + w.agent + ')'), badge(w.status, w.label), task,
-        (w.model || '-') + ' / ' + (w.context_pct == null ? '-' : w.context_pct + '%'),
-        el('span', 'mono', w.last_line)]);
+        (w.model || '-') + ' / ' + (w.context_pct == null ? '-' : w.context_pct + '%')]);
       tr.className = 'click'; tr.title = 'クリックで pane を開く'; tr.onclick = () => openPane(w.pane); return tr;
     })));
     root.append(box);
@@ -577,4 +580,7 @@ async function refresh() {
 show(view); setInterval(() => { if (view !== 'graph') refresh(); }, 5000);
 </script></body></html>
 """
-).replace('CYTOSCAPE_URL', CYTOSCAPE_URL)
+    )
+    .replace('CYTOSCAPE_URL', CYTOSCAPE_URL)
+    .replace('CYTOSCAPE_SRI', CYTOSCAPE_SRI)
+)
