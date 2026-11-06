@@ -103,8 +103,11 @@ PERMISSION_PATTERNS = [
     r'\b1\.\s+Yes\b',
 ]
 THINKING_PATTERNS = [
-    r'(Sprouting|Whirring|Topsy-turvying|Pondering|Thinking|Working|Cogitating|Crafting)…',
-    r'Working \(\d+m \d+s\)',
+    # スピナー行 `<動詞>… (<経過時間>`。動詞は毎回入れ替わるので一覧にしない。
+    # 終了表示 `✻ Sautéed for 20s` には `…` が付かないので idle のまま
+    # 本文中の引用で誤検知しないよう、スピナーの記号 (· ✢ ✳ ✶ ✻ ✽ の許可リスト) で始まる行に限る
+    r'(?m)^[ \t]*[·✢✳✶✻✽][ \t]+[\w-]+…[ \t]*\(\d+[ms]',
+    r'(?m)^[ \t]*[·✢✳✶✻✽][ \t]+Working \(\d+m \d+s\)',
 ]
 CTX_PATTERNS = [
     re.compile(r'\bctx\s+(\d+)%', re.IGNORECASE),
