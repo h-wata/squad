@@ -1,9 +1,25 @@
 {
   "permissions": {
     "allow": [],
-    "deny": [],
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/credentials*.json)",
+      "Bash(cat ~/.ssh/*)",
+      "Bash(cat *.pem*)",
+      "Bash(cat *.env*)",
+      "Bash(printenv*)",
+      "Bash(env)",
+      "Bash(env *)"
+    ],
     "ask": []
   },
-  "theme": "dark",
-  "skipDangerousModePermissionPrompt": true
+  "model": "sonnet",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark"
 }

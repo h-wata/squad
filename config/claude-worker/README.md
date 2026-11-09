@@ -24,5 +24,8 @@
 
 - **ローカルモデル worker** (`claude-local`): `ANTHROPIC_BASE_URL` /
   `ANTHROPIC_AUTH_TOKEN` で認証するため、このディレクトリに credentials は要らない。
-- **Claude モデルで同じことをしたい場合**: `~/.claude/.credentials.json` をこの
-  ディレクトリに symlink すれば動くはず (未検証)。
+- **Claude モデルの worker** (`claude`): `claude setup-token` で発行した長期トークンを
+  `~/.config/squad/claude-oauth-token` (`SQUAD_CLAUDE_TOKEN_FILE` で変更可、権限 600) に置くと、
+  start.sh は claude worker もこのディレクトリで起動し、`CLAUDE_CODE_OAUTH_TOKEN` で認証する。
+  トークンは pane のコマンド行に出さず、起動時に `$(cat ...)` で読む。ファイルが無ければ従来どおり
+  `~/.claude` の設定 (ask あり) で起動する。
