@@ -441,10 +441,11 @@ def squad_sessions() -> dict[str, list[str]]:
     for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []:
         rows = [
             r.split('\t', 1)
-            for r in _tmux_lines('list-panes', '-s', '-t', f'={name}', '-F', '#{window_name}\t#{pane_title}') or []
+            for r in _tmux_lines('list-panes', '-s', '-t', f'={name}:', '-F', '#{window_name}\t#{pane_title}') or []
         ]
         windows = [r[0] for r in rows]
         titles = [r[-1] for r in rows]
+        # -t の末尾 : はセッション指定の印。無いと、attach 中のセッションにある同名の window (例: rmf) に当たる
         # window 名だけだと、aux や w1 という window を持つ無関係なセッションの pane まで開けてしまう。
         # start.sh が aux window に付けるタイトルも揃っていることを求める。旧構成は window 名が無いのでタイトルだけ
         if [SQUAD_WINDOW, PANE_TITLE] in rows or (SQUAD_WINDOW not in windows and PANE_TITLE in titles):

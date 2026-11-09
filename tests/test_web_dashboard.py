@@ -119,7 +119,7 @@ def _fake_tmux(calls: list[list[str]], layout: str = SQ1_PANES, prefix: str = 's
             return subprocess.CompletedProcess(cmd, 0, 'sq1\nother\n', '')
         if cmd[:2] == ['tmux', 'list-panes']:
             # other は aux / w1 window を持つが start.sh が付けるタイトルが無い無関係なセッション
-            out = layout if '=sq1' in cmd else 'aux\tbash\nw1\tbash\n'
+            out = layout if '=sq1:' in cmd else 'aux\tbash\nw1\tbash\n'
             return subprocess.CompletedProcess(cmd, 0, out, '')
         if cmd[:2] == ['tmux', 'capture-pane']:
             target = cmd[cmd.index('-t') + 1]
