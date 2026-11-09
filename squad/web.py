@@ -441,10 +441,11 @@ def squad_sessions() -> dict[str, list[str]]:
     for name in _tmux_lines('list-sessions', '-F', '#{session_name}') or []:
         rows = [
             r.split('\t', 1)
-            for r in _tmux_lines('list-panes', '-s', '-t', f'={name}', '-F', '#{window_name}\t#{pane_title}') or []
+            for r in _tmux_lines('list-panes', '-s', '-t', f'={name}:', '-F', '#{window_name}\t#{pane_title}') or []
         ]
         windows = [r[0] for r in rows]
         titles = [r[-1] for r in rows]
+        # -t の末尾 : はセッション指定の印。無いと、attach 中のセッションにある同名の window (例: rmf) に当たる
         # window 名だけだと、aux や w1 という window を持つ無関係なセッションの pane まで開けてしまう。
         # start.sh が aux window に付けるタイトルも揃っていることを求める。旧構成は window 名が無いのでタイトルだけ
         if [SQUAD_WINDOW, PANE_TITLE] in rows or (SQUAD_WINDOW not in windows and PANE_TITLE in titles):
@@ -714,25 +715,30 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 #goals .g{padding:.5em .7em;border-bottom:1px solid #eaeef2;cursor:pointer}
 #goals .g:hover{background:#f6f8fa}#goals .g.on{background:#ddf4ff}
 #goals .g .t{margin:.2em 0}
-#cy{flex:1;background:#fff;border:1px solid #d0d7de;border-radius:8px;overflow:auto}
+#gmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:1em}
+#cy{flex:1;min-height:0;background:#fff;border:1px solid #d0d7de;border-radius:8px;overflow:auto}
 #cy .card{padding:1em;max-width:60em}
-#side{width:380px;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.8em}
+#side{height:38%;overflow:auto;background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.8em}
 #side pre{white-space:pre-wrap;font-size:12px;background:#f6f8fa;padding:.5em;border-radius:6px}
 .md p,.md ul,.md ol,.md pre{margin:.3em 0}.md ul,.md ol{padding-left:1.4em}
 .md h1,.md h2,.md h3,.md h4{font-size:1em;margin:.4em 0 .2em}
 .md code{font-family:ui-monospace,monospace;font-size:12px;background:#eff1f3;padding:0 .2em;border-radius:3px}
 .md pre code{background:none;padding:0}.md pre{overflow:auto}
 .sum .md{max-height:14em;overflow:auto}.plain{white-space:pre-wrap}
-#actbar{margin-bottom:.6em}#actbar select{margin:0 .8em 0 .3em}#actmore{margin-top:.6em}
+#actbar,#pjbar{margin-bottom:.6em}#actbar select,#pjbar select{margin:0 .8em 0 .3em}#actmore{margin-top:.6em}
 #instr{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:.6em .8em;margin-bottom:.8em}
 #instr select{margin:0 .8em 0 .3em}#instr textarea{display:block;width:100%;margin:.4em 0;font:inherit}
 </style></head><body>
 <nav><button data-v="sessions" class="on">稼働状況</button><button data-v="projects">Projects</button>
 <button data-v="graph">Graph</button><button data-v="activity">活動</button><span id="sync"></span></nav>
 <main><div id="err" class="err" hidden></div>
-<section id="sessions"></section><section id="projects" hidden></section>
-<section id="graph" hidden><div id="goals"></div><div id="cy"></div>
-<div id="side"><p class="mono">ノードをクリックすると内容が出ます</p></div></section>
+<section id="sessions"></section>
+<section id="projects" hidden><div id="pjbar">project<select id="pjsel"></select>期間<select id="pjdays">
+<option value="30">直近 30 日</option>
+<option value="90">直近 90 日</option><option value="0">すべて</option></select></div>
+<div id="pjlist"></div></section>
+<section id="graph" hidden><div id="goals"></div><div id="gmain"><div id="cy"></div>
+<div id="side"><p class="mono">ノードをクリックすると内容が出ます</p></div></div></section>
 <section id="activity" hidden><!--WRITE_FORM-->
 <div id="actbar">project<select id="actpj"></select>セッション<select id="actsess">
 </select><span id="actrange" class="mono"></span></div><div id="actlist"></div>
@@ -775,7 +781,7 @@ const row = cells => { const tr = el('tr'); for (const c of cells) { const td = 
   if (c instanceof Node) td.append(c); else td.textContent = c ?? ''; tr.append(td); } return tr; };
 const table = (heads, rows) => { const t = el('table'), h = el('tr');
   for (const x of heads) h.append(el('th', '', x)); t.append(h); for (const r of rows) t.append(r); return t; };
-let view = params.get('view') || 'sessions', goal = params.get('goal') || '', goalDays = '30', cy = null;
+let view = params.get('view') || 'sessions', goal = params.get('goal') || '', goalDays = '30', goalPj = '', cy = null;
 let pickNode = params.get('node') || '';  // Graph で選ぶノード (活動タブの行から来たとき等)
 function show(v) { view = v;
   document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x.dataset.v === v));
@@ -814,15 +820,22 @@ async function sessions() {
 }
 
 async function projects() {
-  const d = await api('/api/projects'), root = document.getElementById('projects'); meta(d);
-  root.replaceChildren(table(['project', 'session', 'active', 'blocked', '今日終わった', '最新の結果', '最終更新'],
-    (d.projects || []).map(p => { const r = p.latest_result, res = el('div', 'sum');
+  const d = await api('/api/projects'), sel = document.getElementById('pjsel'); meta(d);
+  // 期間内に更新があった project だけ選択肢と表に出す (古いものは「すべて」で見える)。選んだ project の行だけ出す
+  const days = +document.getElementById('pjdays').value, since = Date.now() - days * 864e5;
+  const pjs = (d.projects || []).filter(p => !days || new Date(p.updated_at) >= since);
+  options(sel, pjs.map(p => p.name));
+  document.getElementById('pjlist').replaceChildren(table(
+    ['project', 'session', 'active', 'blocked', '今日終わった', '最新の結果', '最終更新'],
+    pjs.filter(p => !sel.value || p.name === sel.value).map(p => { const r = p.latest_result, res = el('div', 'sum');
       if (r) res.append(badge(r.status), ' ', el('span', 'mono', r.task_id + ' '),
         renderMarkdown(el('div'), r.summary));
       else res.textContent = '-';
-      return row([el('b', '', p.name), p.session || '-', el('span', 'num', String(p.active)),
+      const tr = row([el('b', '', p.name), p.session || '-', el('span', 'num', String(p.active)),
         el('span', 'num', String(p.blocked)), el('span', 'num', String(p.done_today)), res,
-        local(p.updated_at)]); })));
+        local(p.updated_at)]);
+      tr.className = 'click'; tr.title = 'クリックでこの project のゴールを Graph で開く';
+      tr.onclick = () => { goalPj = p.name; openGoal('', ''); }; return tr; })));
 }
 
 async function goals() {
@@ -831,10 +844,15 @@ async function goals() {
   const sel = el('select'); for (const [v, t] of [['30', '直近 30 日'], ['90', '直近 90 日'], ['0', 'すべて']])
     sel.append(new Option(t, v, false, v === goalDays));
   sel.onchange = () => { goalDays = sel.value; goals(); };
-  const head = el('div', 'g'); head.append(sel, el('span', 'mono', ' ' + (d.goals || []).length + ' 件'));
+  const pj = el('select'); pj.append(new Option('project: すべて', ''));
+  for (const v of [...new Set((d.goals || []).map(g => g.project))].sort())
+    pj.append(new Option(v, v, false, v === goalPj));
+  pj.onchange = () => { goalPj = pj.value; goal = ''; goals().then(drawGraph); };
+  const gs = (d.goals || []).filter(g => !goalPj || g.project === goalPj);
+  const head = el('div', 'g'); head.append(sel, ' ', pj, el('span', 'mono', ' ' + gs.length + ' 件'));
   root.append(head);
-  if (!goal && d.goals && d.goals.length) goal = d.goals[0].node_id;
-  for (const g of d.goals || []) {
+  if (!goal && gs.length) goal = gs[0].node_id;
+  for (const g of gs) {
     const x = el('div', 'g' + (g.node_id === goal ? ' on' : '')); x.append(badge(g.state), ' ',
       el('span', 'mono', g.project + ' / ' + g.tasks + ' task / ' + local(g.updated_at)),
       renderMarkdown(el('div', 't'), g.title, true));
@@ -860,7 +878,7 @@ function drawCard(d) {  // task が 1 件のゴール: 図にせず、内容と�
     const v = n.detail[k]; if (!v) continue;
     box.append(el('h4', '', NAMES[k])); box.append(renderMarkdown(el('div'), v));
   }
-  root.append(box); side(d.nodes.find(x => x.node_id === pickNode) || n);
+  root.append(box); document.getElementById('side').hidden = true;  // カードに同じ内容が出ているので下の詳細は隠す
 }
 async function drawGraph() {
   if (!goal) return;
@@ -868,7 +886,7 @@ async function drawGraph() {
   const pick = pickNode;
   const first = d.nodes.find(n => n.node_id === pick) || d.nodes.find(n => n.node_id === goal);
   if (cy) { cy.destroy(); cy = null; }
-  document.getElementById('cy').replaceChildren();
+  document.getElementById('cy').replaceChildren(); document.getElementById('side').hidden = false;
   if (d.card) { drawCard(d); return; }
   if (typeof cytoscape === 'undefined') { const e = document.getElementById('err'); e.hidden = false;
     e.textContent = 'Cytoscape.js を CDN から読めませんでした (右の詳細だけ出します)'; side(first); return; }
@@ -947,6 +965,7 @@ async function activity() {
         tr.onclick = () => openGoal(e.goal, e.node_id); }
       return tr; })));
 }
+for (const id of ['pjsel', 'pjdays']) document.getElementById(id).onchange = () => projects();
 for (const id of ['actpj', 'actsess']) document.getElementById(id).onchange = () => activity();
 document.getElementById('actmore').onclick = () => { actHours = HOURS[HOURS.indexOf(actHours) + 1]; activity(); };
 /*WRITE_JS*/

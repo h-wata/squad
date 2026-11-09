@@ -264,7 +264,7 @@ class Tmux:
                 'list-panes',
                 '-s',
                 '-t',
-                f'={self.session}',
+                f'={self.session}:',  # 末尾の : が無いと同名の window (別セッション) に当たる
                 '-F',
                 '#{session_name}:#{window_index}.#{pane_index} #{session_name}:#{window_name}',
             ]
