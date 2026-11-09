@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `SQUAD_SESSION` が無いとき、動いている squad セッションがちょうど 1 つならそれを使う (#101)。対象は
+  ls / assign などの Python 委譲、`attach`、`log`。2 つ以上のときは `ros-agents` のままで、候補を stderr に出す。
+  `stop` は推測で選ばない。`squad/squad.py` 冒頭 docstring から `status` の別名記述を消した。
 - `squad` の入口を `bin/squad` にそろえた (#99)。ls / assign / dashboard / ledger / notify / graph / trace / web
   は `squad/squad.py` に渡す。`make -C squad install` は `~/.local/bin/squad` を `bin/squad` に張る
   (前は `squad.py` に張っていたので `squad start` が動かなかった)。`squad status` はセッションと watcher
