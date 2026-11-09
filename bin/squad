@@ -118,6 +118,10 @@ case "$cmd" in
     root)
         echo "$SQUAD_ROOT"
         ;;
+    # worker 操作系は squad/squad.py に渡す (#99)。status は上の bash 版が正
+    ls|assign|dashboard|ledger|notify|graph|trace|web)
+        exec python3 "$SQUAD_ROOT/squad/squad.py" "$cmd" "$@"
+        ;;
     ""|-h|--help|help)
         usage
         ;;

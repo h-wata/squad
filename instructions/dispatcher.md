@@ -29,9 +29,9 @@
 
 起動直後、**前回の続きを把握してからユーザーの指示を待つ**。以下を Read し、要約する:
 
-0. `python3 squad/squad.py graph status`（`--project <pj>` で絞れる）: task / report YAML から
+0. `{SQUAD_ROOT}/bin/squad graph status`（`--project <pj>` で絞れる）: task / report YAML から
    機械的に出した PJ ごとの未完了 task（running / blocked と理由）と、goal（Issue）ごとの件数。
-   dashboard の手書きより先にこれを見る。各行の node_id は `squad graph why <node_id>` で根拠の
+   dashboard の手書きより先にこれを見る。各行の node_id は `{SQUAD_ROOT}/bin/squad graph why <node_id>` で根拠の
    report まで辿れる。日付が古い running は、report を出さずに外れた task の可能性がある (#57)
 1. `dashboard.md`（index）: Worker 状態 (W1-W4)、アクティブ PJ 一覧
 2. **アクティブタスクが 1 件以上ある PJ の dashboard のみ**: `dashboards/<pj>.md`
@@ -41,10 +41,10 @@
    直近の方針・決定・PJ 知識を復元（worker に渡すべき制約があれば task 化時に反映）。
    特定の task で保存された記憶は `recall_context(reference_prefix="squad:task:<pj>/<task_id>")`
    （PJ 全体なら `squad:task:<pj>/`）で引ける。逆に記憶の references の `squad:task:<pj>/<task_id>` は
-   探索グラフの `intent:<pj>/<task_id>` なので、`squad graph show` で task YAML と report まで辿れる (#58)。
+   探索グラフの `intent:<pj>/<task_id>` なので、`{SQUAD_ROOT}/bin/squad graph show` で task YAML と report まで辿れる (#58)。
    設定が無ければこの項目はスキップしてよい
 5. 通知 queue を opt-in (`WATCH_NOTIFY_QUEUE=1`) している場合、または**過去に一度でも
-   opt-in してから off に戻した (rollback) 場合**: `squad notify pull --health` で未 ack
+   opt-in してから off に戻した (rollback) 場合**: `{SQUAD_ROOT}/bin/squad notify pull --health` で未 ack
    通知を読む（→「通知 queue の pull / ack 規約」）。rollback 後も
    `queue/notifications/<session>/events.json` に未 ack event が残っていれば watcher が
    age-based fallback で最終的に Dispatcher window へ 1 行アラートを出すが、内容そのものは pull
@@ -345,9 +345,9 @@ report の `details_path` は判断に必要な場合のみ読む（通常は su
 watch.sh は status を読み、blocked の report は `[INBOX]` 付きであなたに通知する。
 
 blocked の原因や、report に書かれなかった途中経過を確かめたいときは、worker の transcript を
-`python3 squad/squad.py trace search <語句> --project <project> --task <task_id> [--errors-only]`
+`{SQUAD_ROOT}/bin/squad trace search <語句> --project <project> --task <task_id> [--errors-only]`
 → `trace get <trace_id> --context 2` で引ける (出力は secret をマスク済み, #56)。再割当の task
-YAML に「同じ失敗を `squad trace search --errors-only` で確認してから着手」と書いてもよい。
+YAML に「同じ失敗を `{SQUAD_ROOT}/bin/squad trace search --errors-only` で確認してから着手」と書いてもよい。
 
 ### 危険操作の保留 `[APPROVAL-HOLD]` と実行時間予算 `[BUDGET]` (#54)
 
@@ -397,12 +397,12 @@ Dispatcher window へ直送されるのは「未 ack 通知が閾値を超えた
 
 ```bash
 # 未 ack 通知を読む (critical だけ先に読む: --priority critical)
-python3 squad/squad.py notify pull --health
-python3 squad/squad.py notify pull --priority critical
+{SQUAD_ROOT}/bin/squad notify pull --health
+{SQUAD_ROOT}/bin/squad notify pull --priority critical
 
 # 処理し終えた event を ack する (event_id 指定、または全件 ack)
-python3 squad/squad.py notify ack <event_id> --by dispatcher
-python3 squad/squad.py notify ack all --by dispatcher
+{SQUAD_ROOT}/bin/squad notify ack <event_id> --by dispatcher
+{SQUAD_ROOT}/bin/squad notify ack all --by dispatcher
 ```
 
 規約:

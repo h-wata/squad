@@ -4,6 +4,10 @@
 
 ### Changed
 
+- `squad` の入口を `bin/squad` にそろえた (#99)。ls / assign / dashboard / ledger / notify / graph / trace / web
+  は `squad/squad.py` に渡す。`make -C squad install` は `~/.local/bin/squad` を `bin/squad` に張る
+  (前は `squad.py` に張っていたので `squad start` が動かなかった)。`squad status` はセッションと watcher
+  の状態のまま。worker の状態は `squad ls` で見る。`python3 squad/squad.py <cmd>` の直接実行もそのまま動く。
 - README を 150 行以内に縮め、詳細を `docs/` 配下に移した (#90)。前提ツール・起動オプション・tmux 構成は `docs/setup.md`、
   ファイル一覧・`squad web` / `squad graph` は `docs/components.md`、ほかは `docs/{ledger,ci-watch,new-project,ponytail}.md`。
 - tmux の pane 分割をやめ、エージェントごとに window を分ける (#95)。window 名は `dispatcher` / `w1` /

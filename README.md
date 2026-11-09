@@ -44,12 +44,12 @@ Dispatcher はコードを書かない。ユーザー指示を受けて `queue/p
 ## 主要コマンド
 
 ```bash
-cd squad && make install     # ~/.local/bin/squad にシンボリックリンク
+cd squad && make install     # ~/.local/bin/squad に bin/squad のシンボリックリンク
 squad ls                     # 全 worker の状態一覧 (busy/idle/permission_wait/...)
 squad assign w1 <task.yaml>  # task YAML を読み notify-worker.sh 経由で通知
 squad dashboard              # worker 状態表を Markdown で出力
 scripts/ci-watch.sh <PR番号>  # PR の CI 失敗・ハングを検知
-SQUAD_WEB_TOKEN=<token> python3 squad/squad.py web   # Web ダッシュボード
+SQUAD_WEB_TOKEN=<token> squad web   # Web ダッシュボード
 ```
 
 - 常駐の監視 (report 検知、停止検知、自動承認) は `watch.sh` が担当し、`squad` は単発操作に専念する。
