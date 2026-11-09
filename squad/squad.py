@@ -8,7 +8,7 @@
   - インタラクティブ単発: 状態確認 / 指示 / dashboard 生成 → このスクリプト
 
 Subcommands:
-  ls / status               全 worker の状態一覧 + state/<w>.json 保存
+  ls                        全 worker の状態一覧 + state/<w>.json 保存
   assign <w> <task.yaml>    task YAML を読み notify-worker.sh で通知
   dashboard                 Worker ステータス表を生成して stdout
   graph sync / why <id> / show <id>

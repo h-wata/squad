@@ -19,6 +19,8 @@ set -u
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SQUAD_ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 DEFAULT_SESSION="${SQUAD_SESSION:-ros-agents}"
+# テストで実環境の pidfile を拾わないための差し替え口。既定は /tmp
+PIDDIR="${SQUAD_PIDFILE_DIR:-/tmp}"
 
 usage() {
     sed -n '/^# 使い方:/,/^# *squad root/{s/^# \{0,3\}//p}' "$SELF"
@@ -28,8 +30,8 @@ usage() {
 # SQUAD_SESSION が一致するものがあるか
 watcher_pid_for() {
     local session="$1" pid
-    if [ -f "/tmp/${session}-watch.pid" ]; then
-        pid=$(cat "/tmp/${session}-watch.pid")
+    if [ -f "$PIDDIR/${session}-watch.pid" ]; then
+        pid=$(cat "$PIDDIR/${session}-watch.pid")
         kill -0 "$pid" 2>/dev/null && { echo "$pid"; return 0; }
     fi
     for pid in $(pgrep -f "$SQUAD_ROOT/watch.sh" 2>/dev/null); do
@@ -40,6 +42,31 @@ watcher_pid_for() {
         [ "$env_session" = "$session" ] && { echo "$pid"; return 0; }
     done
     return 1
+}
+
+# SQUAD_SESSION 未設定のとき、動いている squad セッションがちょうど 1 つならそれを
+# 既定にする (#101)。0 個 / 2 個以上は ros-agents のまま。attach / log / Python 委譲だけ
+# で呼ぶ (stop は推測で選ばない)
+auto_session() {
+    [ -n "${SQUAD_SESSION:-}" ] && return 0
+    local found=() s pid env_session
+    for f in "$PIDDIR"/*-watch.pid; do
+        [ -f "$f" ] || continue
+        s=$(basename "$f" | sed 's/-watch\.pid$//')
+        watcher_pid_for "$s" >/dev/null && found+=("$s")
+    done
+    for pid in $(pgrep -f "$SQUAD_ROOT/watch.sh" 2>/dev/null); do
+        env_session=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+            | grep -m1 '^SQUAD_SESSION=' | cut -d= -f2)
+        found+=("${env_session:-ros-agents}")
+    done
+    mapfile -t found < <(printf '%s\n' "${found[@]}" | sort -u | sed '/^$/d')
+    if [ "${#found[@]}" -eq 1 ]; then
+        export SQUAD_SESSION="${found[0]}"
+        DEFAULT_SESSION="$SQUAD_SESSION"
+    elif [ "${#found[@]}" -gt 1 ]; then
+        echo "複数の squad セッションが動いています: ${found[*]}。SQUAD_SESSION=<name> で指定してください (既定 $DEFAULT_SESSION を使います)" >&2
+    fi
 }
 
 cmd="${1:-}"
@@ -96,9 +123,11 @@ case "$cmd" in
         done
         ;;
     attach)
+        auto_session
         exec tmux attach -t "${1:-$DEFAULT_SESSION}"
         ;;
     log)
+        auto_session
         session="$DEFAULT_SESSION"
         follow=0
         while [ $# -gt 0 ]; do
@@ -120,6 +149,7 @@ case "$cmd" in
         ;;
     # worker 操作系は squad/squad.py に渡す (#99)。status は上の bash 版が正
     ls|assign|dashboard|ledger|notify|graph|trace|web)
+        auto_session
         exec python3 "$SQUAD_ROOT/squad/squad.py" "$cmd" "$@"
         ;;
     ""|-h|--help|help)
