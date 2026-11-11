@@ -370,3 +370,16 @@ def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
     r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
 
     assert r.returncode == 0, r.stderr
+
+
+def test_blank_token_file_is_ignored(tmp_path: Path) -> None:
+    """空白だけのトークンでは有効にしない (設定が無くても従来どおり起動する)."""
+    root = _fake_root(tmp_path)  # config/ をコピーしない
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text(' \n\n')
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+
+    assert r.returncode == 0, r.stderr

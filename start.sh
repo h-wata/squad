@@ -94,7 +94,10 @@ WORKER_CONFIG_DIR="$SCRIPT_DIR/config/claude-worker"
 # このファイルに置いたときだけ有効にする (トークン本体は pane のコマンド行に出さず $(cat) で読む)。
 CLAUDE_TOKEN_FILE="${SQUAD_CLAUDE_TOKEN_FILE:-$HOME/.config/squad/claude-oauth-token}"
 CLAUDE_WORKER_NO_ASK=0
-[ -s "$CLAUDE_TOKEN_FILE" ] && CLAUDE_WORKER_NO_ASK=1
+# 読めない・空白だけのファイルだと空トークンで起動してログイン待ちのまま止まるので、有効にしない。
+if [ -r "$CLAUDE_TOKEN_FILE" ] && grep -q '[^[:space:]]' "$CLAUDE_TOKEN_FILE"; then
+    CLAUDE_WORKER_NO_ASK=1
+fi
 if [ "$ANY_CLAUDE_LOCAL" = "1" ] || [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
     if [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
         echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker と $CLAUDE_TOKEN_FILE を置いたときに必須)" >&2
@@ -116,7 +119,16 @@ data['hasCompletedOnboarding'] = True
 projects = data.setdefault('projects', {})
 for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
     projects.setdefault(d, {})['hasTrustDialogAccepted'] = True
+# ~/.claude.json の user MCP はこのディレクトリからは見えない。worker が使う kioku_mesh だけ写す。
+try:
+    src = json.loads(pathlib.Path.home().joinpath('.claude.json').read_text())
+    kioku = src['mcpServers']['kioku_mesh']
+except (OSError, ValueError, KeyError, TypeError):
+    kioku = None
+if kioku:
+    data.setdefault('mcpServers', {})['kioku_mesh'] = kioku
 state.write_text(json.dumps(data, indent=2))
+state.chmod(0o600)
 " || {
         echo "エラー: $WORKER_CONFIG_DIR の初期化に失敗しました" >&2
         exit 1

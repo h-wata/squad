@@ -29,3 +29,14 @@
   start.sh は claude worker もこのディレクトリで起動し、`CLAUDE_CODE_OAUTH_TOKEN` で認証する。
   トークンは pane のコマンド行に出さず、起動時に `$(cat ...)` で読む。ファイルが無ければ従来どおり
   `~/.claude` の設定 (ask あり) で起動する。
+
+## 既知の制約 (Claude モデルの worker)
+
+- `~/.claude` 側の skills / plugins / 自分用 `CLAUDE.md` / user MCP は見えない。worker が使う
+  kioku_mesh だけは、start.sh が起動のたびに `~/.claude.json` からこのディレクトリの
+  `.claude.json` に写す。
+- `settings.json` で起動時の既定モデルを `sonnet` にしている。タスクごとの切り替えは今までどおり
+  Dispatcher が `/model` で行う。
+- `settings.json` の deny はトークンを守りきれない。Bash の deny はコマンドの前方一致なので
+  `head` や `python3` では読めるし、トークンは worker の環境変数 `CLAUDE_CODE_OAUTH_TOKEN` にも
+  入っている。worker からは読める前提で扱うこと。
