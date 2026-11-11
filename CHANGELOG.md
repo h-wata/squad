@@ -33,6 +33,14 @@
 
 ### Added
 
+- squad 用の status line を足し、ctx の取り方を直した (#105 の 1)。`scripts/statusline.py` が
+  `w1 | Opus 5.5 | ctx 12% | SQUAD-301` の 1 行を出し、同じ値を `squad/state/<worker>.json` に取得元
+  `statusline` と時刻つきで書く。start.sh は Dispatcher と worker の `--settings` にこの statusLine を足す
+  (`~/.claude/settings.json` は変えない)。`config/claude-worker/settings.json` にも同じ statusLine を入れた。
+  ctx の取得元は statusline > transcript (hook が受け取る `transcript_path` の usage) > pane の順。
+  pane 読みは `ctx:54%` を拾い、Codex の `Context N% left` は 100 から引いて使用率にする。取れないときは
+  `squad ls` と `squad web` に「不明」と出し、値があるときは取得元と経過時間を添える。status line が
+  受け取る JSON の実測は `docs/statusline-stdin-json.md`。
 - `squad web --allow-write`: 活動タブから Dispatcher に指示を出す (#85)。`POST /api/instructions` は
   `queue/instructions/<session>/` に 1 件 1 ファイルで書くだけで、tmux には送らない。トークンは
   `Authorization` ヘッダだけで受け付け、`Origin` が自分自身でなければ 403、本文は 4000 文字まで。

@@ -230,6 +230,32 @@ def test_sessions_reuse_squad_ls_states(server: tuple[str, list]) -> None:
     assert {c[1] for c in calls} <= {'list-sessions', 'list-panes', 'capture-pane'}
 
 
+def test_sessions_show_ctx_source_and_age(root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Status line が書いた state の ctx を、取得元と取得時刻と一緒に返す。取れない worker は null (#105)."""
+    import ctx  # noqa: PLC0415
+
+    state = tmp_path / 'state'
+    state.mkdir()
+    st: dict = {}
+    ctx.set_slot(st, 'statusline', session='sq1', pct=12, tokens=24000, window=200000, model='Opus 5.5')
+    (state / 'w1.json').write_text(json.dumps(st))
+    other: dict = {}
+    ctx.set_slot(other, 'statusline', session='other', pct=80, tokens=1, window=2, model='Sonnet 5.5')
+    (state / 'w2.json').write_text(json.dumps(other))
+    monkeypatch.setenv('SQUAD_STATE_DIR', str(state))
+    monkeypatch.setattr(subprocess, 'run', _fake_tmux([]))
+
+    (sess,) = web.sessions_data(root / 'queue' / '.graph.db')['sessions']
+
+    w = {r['worker']: r for r in sess['workers']}
+    assert (w['w1']['model'], w['w1']['context_pct'], w['w1']['context_source']) == ('Opus 5.5', 12, 'statusline')
+    assert w['w1']['context_at'] == st['ctx_sources']['statusline']['at']
+    assert (w['w2']['context_pct'], w['w2']['context_source']) == (None, 'pane')  # 別セッションの値は使わない
+    assert w['w3']['context_pct'] is None
+    assert 'ctxCell(w)' in web.PAGE
+    assert '不明' in web.PAGE
+
+
 def test_legacy_pane_layout_session_still_shows(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Window に分ける前の旧構成 (window 0 に 7 pane、pane タイトル Aux-Shell) も稼働状況と pane 表示が出る (#95)."""
     calls: list[list[str]] = []

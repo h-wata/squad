@@ -2,12 +2,14 @@
 # ruff: noqa: CPY001
 """全 project の進捗を 1 画面で見る読み取り専用 Web ダッシュボード (Issue #76, stdlib only).
 
-読むのは `queue/.graph.db` と tmux だけ。task / report YAML は読まない:
+読むのは `queue/.graph.db` と tmux と `squad/state/<worker>.json` だけ。task / report YAML は読まない:
   - 状態 (running / blocked / done ...)、ゴールの組み分け、project 一覧は `squad graph sync` が DB に
     入れたものをそのまま出す。`squad graph status` と同じ DB の値なので、2 つの判定は一致する
   - DB は `mode=ro` で開く (無ければ作らない、書かない)。sync は今どおり watchd の仕事
   - tmux は list-sessions / list-panes / capture-pane だけを呼ぶ (キー入力は送らない)。worker の状態は
     `squad ls` と同じ squad.probe_worker で判定する
+  - model と ctx は squad/state/<worker>.json (status line と hook が書く) を読み、`squad ls` と同じ
+    ctx.resolve で取得元 (statusline > transcript > pane) を選ぶ。取得元と取得時刻も返す (#105)
   - GET 以外は 405。全リクエストでトークンを検査する (未設定なら起動しない)
   - 例外は `--allow-write` で起動したときの `POST /api/instructions` だけ (#85)。Dispatcher への指示を
     `queue/instructions/<session>/` に 1 件 1 ファイルで書く (tmux には送らない。打ち込むのは watchd)。
@@ -42,6 +44,7 @@ from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
 
+import ctx
 from mask import mask
 import squad
 
@@ -490,6 +493,7 @@ def sessions_data(db_path: Path) -> dict[str, Any]:
         for w, meta in workers.items():
             pane = _pane(name, meta.get('pane', ''), windows)
             st = squad.probe_worker(pane)
+            cv = ctx.resolve(squad.load_state(w), name, st)
             rows.append(
                 {
                     'worker': w,
@@ -497,8 +501,11 @@ def sessions_data(db_path: Path) -> dict[str, Any]:
                     'agent': meta.get('agent', ''),
                     'status': st['status'],
                     'label': STATUS_LABEL.get(st['status'], st['status']),
-                    'model': st.get('model'),
-                    'context_pct': st.get('context_pct'),
+                    'model': cv['model'],
+                    'context_pct': cv['context_pct'],
+                    'context_tokens': cv['context_tokens'],
+                    'context_source': cv['context_source'],
+                    'context_at': cv['context_at'],
                     # last_line は返さない: 可視範囲だけをマスクした行なので、BEGIN 行が画面外に出た
                     # PRIVATE KEY の本文が素通しになりうる。中身は pane_data (履歴全体をマスク) で見る
                     'tasks': [current[pj, _worker_key(w)] for pj in projects if (pj, _worker_key(w)) in current],
@@ -799,6 +806,19 @@ async function openPane(target) {
   document.getElementById('modal').style.display = 'flex'; pre.scrollTop = pre.scrollHeight;
 }
 
+// ctx は取得元と経過時間つき。取れないときは 0% にせず「不明」 (#105)
+function ago(iso) {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (isNaN(s)) return '';
+  return s < 60 ? s + '秒前' : s < 3600 ? Math.floor(s / 60) + '分前' : s < 86400 ? Math.floor(s / 3600) + '時間前'
+    : Math.floor(s / 86400) + '日前';
+}
+function ctxCell(w) {
+  const v = w.context_pct != null ? w.context_pct + '%' : w.context_tokens != null ? w.context_tokens + ' tok' : null;
+  if (v == null) return (w.model || '-') + ' / 不明';
+  return (w.model || '-') + ' / ' + v + ' (' + w.context_source + (w.context_at ? ', ' + ago(w.context_at) : '') + ')';
+}
+
 async function sessions() {
   const d = await api('/api/sessions'), root = document.getElementById('sessions'); meta(d);
   root.replaceChildren();
@@ -812,7 +832,7 @@ async function sessions() {
         el('span', 'mono', t.task_id + ' '), renderMarkdown(el('span', ''), t.title, true)); task.append(x); }
       if (!w.tasks.length) task.textContent = '-';
       const tr = row([el('span', '', w.worker + ' (' + w.agent + ')'), badge(w.status, w.label), task,
-        (w.model || '-') + ' / ' + (w.context_pct == null ? '-' : w.context_pct + '%')]);
+        ctxCell(w)]);
       tr.className = 'click'; tr.title = 'クリックで pane を開く'; tr.onclick = () => openPane(w.pane); return tr;
     })));
     root.append(box);
