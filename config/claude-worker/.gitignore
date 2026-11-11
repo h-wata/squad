@@ -1,5 +1,6 @@
-# CLAUDE_CONFIG_DIR として使うため実行時ファイルが増える。settings.json だけ追跡する。
+# worker ごとの CLAUDE_CONFIG_DIR (<session>/w<n>/) は start.sh が作る実行時ファイル。
+# ひな形 settings.base.json と README だけ追跡する。
 *
 !.gitignore
-!settings.json
+!settings.base.json
 !README.md

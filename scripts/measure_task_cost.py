@@ -85,10 +85,12 @@ CLAUDE_PROJECTS = Path.home() / '.claude' / 'projects'
 def projects_roots() -> list[Path]:
     """Transcript を探す projects ディレクトリ.
 
-    claude-local worker は ``CLAUDE_CONFIG_DIR=config/claude-worker`` で動くので、その transcript は
-    ``config/claude-worker/projects/`` にある (#72)。
+    claude-local と トークンありの claude worker は ``CLAUDE_CONFIG_DIR=config/claude-worker/<session>/w<n>``
+    で動くので、その transcript は各 ``projects/`` にある (#72)。共有ディレクトリだった頃の
+    ``config/claude-worker/projects/`` も残す。
     """
-    return [CLAUDE_PROJECTS, REPO_ROOT / 'config' / 'claude-worker' / 'projects']
+    worker_base = REPO_ROOT / 'config' / 'claude-worker'
+    return [CLAUDE_PROJECTS, worker_base / 'projects', *sorted(worker_base.glob('*/w[0-9]*/projects'))]
 
 
 METRICS_PATH = REPO_ROOT / 'metrics' / 'task_costs.jsonl'
