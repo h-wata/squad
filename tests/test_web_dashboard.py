@@ -242,6 +242,9 @@ def test_sessions_show_ctx_source_and_age(root: Path, monkeypatch: pytest.Monkey
     other: dict = {}
     ctx.set_slot(other, 'statusline', session='other', pct=80, tokens=1, window=2, model='Sonnet 5.5')
     (state / 'w2.json').write_text(json.dumps(other))
+    disp: dict = {}
+    ctx.set_slot(disp, 'statusline', session='sq1', pct=30, tokens=3, window=10, model='Opus 5.5')
+    (state / 'dispatcher.json').write_text(json.dumps(disp))
     monkeypatch.setenv('SQUAD_STATE_DIR', str(state))
     monkeypatch.setattr(subprocess, 'run', _fake_tmux([]))
 
@@ -250,8 +253,10 @@ def test_sessions_show_ctx_source_and_age(root: Path, monkeypatch: pytest.Monkey
     w = {r['worker']: r for r in sess['workers']}
     assert (w['w1']['model'], w['w1']['context_pct'], w['w1']['context_source']) == ('Opus 5.5', 12, 'statusline')
     assert w['w1']['context_at'] == st['ctx_sources']['statusline']['at']
-    assert (w['w2']['context_pct'], w['w2']['context_source']) == (None, 'pane')  # 別セッションの値は使わない
+    assert (w['w2']['context_pct'], w['w2']['context_source']) == (None, None)  # 別セッションの値は使わない
     assert w['w3']['context_pct'] is None
+    assert (sess['dispatcher']['context_pct'], sess['dispatcher']['context_source']) == (30, 'statusline')
+    assert 'ctxCell(s.dispatcher)' in web.PAGE
     assert 'ctxCell(w)' in web.PAGE
     assert '不明' in web.PAGE
 

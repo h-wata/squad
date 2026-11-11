@@ -269,7 +269,10 @@ def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec='seconds')
     session = resolve_session(cfg)
     rows = []
-    for w, meta in cfg.get('workers', {}).items():
+    # Dispatcher は config.json の workers に無い。status line が state/dispatcher.json に書く値を出すため先頭に足す
+    targets = {'dispatcher': {'agent': 'claude', 'pane': tmux_target(session, 'dispatcher', tmux_windows(session))}}
+    targets.update(cfg.get('workers', {}))
+    for w, meta in targets.items():
         pane = meta['pane']
         probe = probe_worker(pane)
 
@@ -297,7 +300,7 @@ def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
         agent = r['agent'] or '-'
         evt = f' evt={r["last_event"]}' if r.get('last_event') else ''
         print(
-            f'{ic} {r["worker"]:<3} {r["pane"]:<22} {r["status"]:<16} '
+            f'{ic} {r["worker"]:<10} {r["pane"]:<22} {r["status"]:<16} '
             f'ctx={ctx_label(r):<22} model={model:<14} agent={agent}{evt}'
         )
         if r['status'] in ('permission_wait', 'unreachable'):

@@ -251,7 +251,7 @@ def test_statusline_null_is_not_filled_by_older_sources() -> None:
 def test_slots_from_other_session_are_ignored() -> None:
     st = _slots(statusline={'pct': 10})
     r = ctx.resolve(st, 'other', {'context_pct': None, 'model': None}, NOW)
-    assert (r['context_pct'], r['context_source']) == (None, 'pane')
+    assert (r['context_pct'], r['context_source'], r['context_at']) == (None, None, None)
 
 
 def test_nothing_available_stays_null() -> None:
@@ -295,8 +295,12 @@ def test_ls_shows_unknown_and_keeps_statusline(
     st = {'worker': 'w1', 'last_event': 'Stop'}
     ctx.set_slot(st, 'statusline', session='sq1', pct=12, tokens=24000, window=200000, model='Opus 5.5')
     (tmp_path / 'w1.json').write_text(json.dumps(st))
-    probes = {'sq1:w1': 'ctx 99%\n', 'sq1:w2': 'idle\n'}
+    d: dict = {}
+    ctx.set_slot(d, 'statusline', session='sq1', pct=30, tokens=1, window=2, model='Opus 5.5')
+    (tmp_path / 'dispatcher.json').write_text(json.dumps(d))
+    probes = {'sq1:dispatcher': 'ctx:54%\n', 'sq1:w1': 'ctx 99%\n', 'sq1:w2': 'idle\n'}
     monkeypatch.setattr(squad, 'probe_worker', lambda pane: squad.detect_status(probes[pane]))
+    monkeypatch.setattr(squad, 'tmux_windows', lambda _s: ['dispatcher', 'w1', 'w2'])
     cfg = {'workers': {'w1': {'agent': 'claude', 'pane': 'sq1:w1'}, 'w2': {'agent': 'claude', 'pane': 'sq1:w2'}}}
 
     assert squad.cmd_ls(argparse.Namespace(), cfg) == 0
@@ -304,6 +308,8 @@ def test_ls_shows_unknown_and_keeps_statusline(
     out = capsys.readouterr().out
     w1 = next(ln for ln in out.splitlines() if ' w1 ' in ln)
     w2 = next(ln for ln in out.splitlines() if ' w2 ' in ln)
+    disp = next(ln for ln in out.splitlines() if ' dispatcher ' in ln)
+    assert 'ctx=30%(statusline' in disp  # Dispatcher も status line の値を第一に出す
     assert 'ctx=12%' in w1
     assert 'statusline' in w1
     assert 'model=Opus 5.5' in w1

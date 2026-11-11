@@ -146,9 +146,11 @@ def resolve(state: dict | None, session: str | None, pane: dict | None = None, n
             )
     if pane is not None:
         model = model or pane.get('model')
-        if out['context_source'] is None:
+        pane_pct = as_int(pane.get('context_pct'))
+        # 画面から何も読めなければ取得元にしない (取得元と時刻は「値を取れた」ことを表す)
+        if out['context_source'] is None and pane_pct is not None:
             at = (now or datetime.now(timezone.utc)).isoformat(timespec='seconds')
-            out.update(context_pct=as_int(pane.get('context_pct')), context_source='pane', context_at=at)
+            out.update(context_pct=pane_pct, context_source='pane', context_at=at)
     out['model'] = model
     return out
 

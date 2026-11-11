@@ -511,7 +511,11 @@ def sessions_data(db_path: Path) -> dict[str, Any]:
                     'tasks': [current[pj, _worker_key(w)] for pj in projects if (pj, _worker_key(w)) in current],
                 }
             )
-        sessions.append({'name': name, 'projects': projects, 'workers': rows})
+        # Dispatcher は workers に無い (pane も開かせない)。status line が書いた model / ctx だけを返す
+        dst = squad.probe_worker(_pane(name, 'dispatcher', windows))
+        dcv = ctx.resolve(squad.load_state('dispatcher'), name, dst)
+        dispatcher = {'status': dst['status'], 'label': STATUS_LABEL.get(dst['status'], dst['status']), **dcv}
+        sessions.append({'name': name, 'projects': projects, 'workers': rows, 'dispatcher': dispatcher})
     return _masked({**db, 'sessions': sessions})
 
 
@@ -825,7 +829,9 @@ async function sessions() {
   if (!d.sessions.length) root.append(el('p', '', 'squad セッションが見つかりません'));
   for (const s of d.sessions) {
     const box = el('div', 'sess'), h = el('h2', '', s.name);
-    h.append(el('small', '', '担当 project: ' + (s.projects.join(', ') || 'なし'))); box.append(h);
+    h.append(el('small', '', '担当 project: ' + (s.projects.join(', ') || 'なし')));
+    if (s.dispatcher) h.append(el('small', '', ' / Dispatcher: ' + s.dispatcher.label + ' ' + ctxCell(s.dispatcher)));
+    box.append(h);
     box.append(table(['worker', '状態', '担当タスク', 'model / ctx'], s.workers.map(w => {
       const task = el('div');
       for (const t of w.tasks) { const x = el('div'); x.append(badge(t.state), ' ',
