@@ -332,7 +332,7 @@ def test_claude_local_agent_is_accepted(tmp_path: Path) -> None:
 
 
 def test_claude_local_requires_worker_config_dir(tmp_path: Path) -> None:
-    """config/claude-worker/settings.json が無ければ起動を止める.
+    """config/claude-worker/settings.base.json が無ければ起動を止める.
 
     無いまま起動すると user 設定の ask ルールを拾い、worker が無言で止まる。
     """
@@ -371,7 +371,10 @@ def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
     r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
 
     assert r.returncode == 0, r.stderr
-    proj = json.loads((root / 'config/claude-worker/.claude.json').read_text())['projects'][str(workspace)]
+    worker_dirs = [root / 'config/claude-worker/testsess' / f'w{n}' for n in (1, 2, 3)]
+    for d in worker_dirs:
+        assert (d / 'settings.json').read_text() == (root / 'config/claude-worker/settings.base.json').read_text()
+    proj = json.loads((worker_dirs[0] / '.claude.json').read_text())['projects'][str(workspace)]
     assert proj['hasTrustDialogAccepted'] is True
     assert proj['hasClaudeMdExternalIncludesWarningShown'] is True
 
@@ -387,3 +390,22 @@ def test_blank_token_file_is_ignored(tmp_path: Path) -> None:
     r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
 
     assert r.returncode == 0, r.stderr
+
+
+def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
+    """Squad を複数立ち上げても、worker の CLAUDE_CONFIG_DIR は session ごとに分かれる."""
+    root = _fake_root(tmp_path)
+    shutil.copytree(REPO / 'config', root / 'config')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy\n')
+
+    for sess in ('sq-a', 'sq-b'):
+        r = _run_start(root, workspace, sess, extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+        assert r.returncode == 0, r.stderr
+
+    a = root / 'config/claude-worker/sq-a/w1/settings.json'
+    b = root / 'config/claude-worker/sq-b/w1/settings.json'
+    a.write_text('{"model": "opus"}')  # /model で書き換わった想定
+    assert b.read_text() == (root / 'config/claude-worker/settings.base.json').read_text()

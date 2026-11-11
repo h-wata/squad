@@ -18,6 +18,16 @@
 `CLAUDE_CONFIG_DIR` をこのディレクトリに向けると user 設定の出所ごと差し替わるため、
 **手元の対話用設定に一切触れずに** worker だけ ask を外せる。
 
+## 構成
+
+- `settings.base.json`: worker 用 user 設定のひな形 (追跡する)
+- `<session>/w<n>/`: worker ごとの `CLAUDE_CONFIG_DIR` (追跡しない)。start.sh が起動のたびに
+  `settings.base.json` を `settings.json` として書き出し、`.claude.json` の初回確認を済ませる
+
+worker ごとに分けるのは、Claude Code が `/model` などでこの `settings.json` を書き換えるため。
+1 つを共有すると、1 人の切り替えが他の worker の既定モデルと repo の追跡ファイルに波及する。
+`settings.base.json` を直したら、worker を起動し直すと反映される。
+
 ## 認証について
 
 `CLAUDE_CONFIG_DIR` は認証情報の置き場も切り替える。
@@ -33,11 +43,11 @@
 ## 既知の制約 (Claude モデルの worker)
 
 - `~/.claude` 側の skills / plugins / 自分用 `CLAUDE.md` / user MCP は見えない。worker が使う
-  kioku_mesh だけは、start.sh が起動のたびに `~/.claude.json` からこのディレクトリの
+  kioku_mesh だけは、start.sh が起動のたびに `~/.claude.json` からworker ごとの
   `.claude.json` に写す。worker が使う skill は squad repo の `.claude/skills/` に置いてあり、
   `--add-dir` で読み込むので、こちらはトークンの有無に関係なく見える。
-- `settings.json` で起動時の既定モデルを `sonnet` にしている。タスクごとの切り替えは今までどおり
+- `settings.base.json` で起動時の既定モデルを `sonnet` にしている。タスクごとの切り替えは今までどおり
   Dispatcher が `/model` で行う。
-- `settings.json` の deny はトークンを守りきれない。Bash の deny はコマンドの前方一致なので
+- `settings.base.json` の deny はトークンを守りきれない。Bash の deny はコマンドの前方一致なので
   `head` や `python3` では読めるし、トークンは worker の環境変数 `CLAUDE_CODE_OAUTH_TOKEN` にも
   入っている。worker からは読める前提で扱うこと。
