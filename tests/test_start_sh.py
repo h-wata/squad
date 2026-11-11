@@ -372,8 +372,11 @@ def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
 
     assert r.returncode == 0, r.stderr
     worker_dirs = [root / 'config/claude-worker/testsess' / f'w{n}' for n in (1, 2, 3)]
+    base = json.loads((root / 'config/claude-worker/settings.base.json').read_text())
     for d in worker_dirs:
-        assert (d / 'settings.json').read_text() == (root / 'config/claude-worker/settings.base.json').read_text()
+        cfg = json.loads((d / 'settings.json').read_text())
+        assert cfg.pop('statusLine')['command'] == f'python3 {root / "scripts" / "statusline.py"}'
+        assert cfg == base
     proj = json.loads((worker_dirs[0] / '.claude.json').read_text())['projects'][str(workspace)]
     assert proj['hasTrustDialogAccepted'] is True
     assert proj['hasClaudeMdExternalIncludesWarningShown'] is True
@@ -432,21 +435,6 @@ def test_worker_settings_keep_statusline_with_rc_enabled(tmp_path: Path) -> None
     assert 'disableRemoteControl' not in worker
 
 
-def test_claude_worker_config_has_statusline(tmp_path: Path) -> None:
-    """ひな形の statusLine は、start.sh が書き出す <session>/w<n>/ から repo の statusline.py を指す."""
-    cfg = json.loads((REPO / 'config' / 'claude-worker' / 'settings.base.json').read_text())
-    assert cfg['statusLine']['type'] == 'command'
-    cfg_dir = REPO / 'config' / 'claude-worker' / 'sess' / 'w1'
-    r = subprocess.run(
-        ['bash', '-c', 'set -f; eval "set -- $CMD"; echo "$2"'],
-        env={**os.environ, 'CLAUDE_CONFIG_DIR': str(cfg_dir), 'CMD': cfg['statusLine']['command']},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert Path(os.path.normpath(r.stdout.strip())) == REPO / 'scripts' / 'statusline.py'
-
-
 def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
     """Squad を複数立ち上げても、worker の CLAUDE_CONFIG_DIR は session ごとに分かれる."""
     root = _fake_root(tmp_path)
@@ -463,4 +451,7 @@ def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
     a = root / 'config/claude-worker/sq-a/w1/settings.json'
     b = root / 'config/claude-worker/sq-b/w1/settings.json'
     a.write_text('{"model": "opus"}')  # /model で書き換わった想定
-    assert b.read_text() == (root / 'config/claude-worker/settings.base.json').read_text()
+    b_cfg = json.loads(b.read_text())
+    assert b_cfg['model'] == json.loads((root / 'config/claude-worker/settings.base.json').read_text())['model']
+    # statusLine は repo の statusline.py を絶対パスで指す
+    assert b_cfg['statusLine'] == {'type': 'command', 'command': f'python3 {root / "scripts" / "statusline.py"}'}

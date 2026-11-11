@@ -54,13 +54,13 @@ worker ごとに分けるのは、Claude Code が `/model` などでこの `sett
 
 ## status line
 
-`settings.base.json` の `statusLine` は squad 用の `scripts/statusline.py` を指す (#105)。画面の最下行に
+worker の `settings.json` の `statusLine` は squad 用の `scripts/statusline.py` を指す (#105)。画面の最下行に
 `w1 | Opus 5.5 | ctx 12% | SQUAD-301` (worker ID・モデル・ctx 使用率・作業中の task_id) を出し、同じ値を
 `squad/state/<worker>.json` に取得元 `statusline` と時刻つきで書く。`squad ls` と `squad web` の model・ctx は
 これを第一の取得元にする。
 
-- パスは `${CLAUDE_CONFIG_DIR}/../../../../scripts/statusline.py` (`<session>/w<n>/` から repo 直下へ戻る)。
-  command はシェル経由で動くので環境変数が展開される
+- ひな形 `settings.base.json` には書かない。start.sh が `<session>/w<n>/settings.json` を書き出すときに、
+  repo の `scripts/statusline.py` を絶対パスで足す
 - start.sh は worker と Dispatcher の `--settings` にも同じ statusLine を足す。`--settings` の方が優先されるので、
   `~/.claude` で起動する worker (トークン無し) と Dispatcher にも squad の status line が出る。
   `~/.claude/settings.json` の statusLine は書き換えない
