@@ -10,6 +10,7 @@ SQUAD_DRY_RUN=1 で settings/scaffold の pre-flight だけを実行させ、tmu
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -370,6 +371,9 @@ def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
     r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
 
     assert r.returncode == 0, r.stderr
+    proj = json.loads((root / 'config/claude-worker/.claude.json').read_text())['projects'][str(workspace)]
+    assert proj['hasTrustDialogAccepted'] is True
+    assert proj['hasClaudeMdExternalIncludesWarningShown'] is True
 
 
 def test_blank_token_file_is_ignored(tmp_path: Path) -> None:

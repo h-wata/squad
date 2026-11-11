@@ -117,8 +117,13 @@ except (OSError, ValueError):
     data = {}
 data['hasCompletedOnboarding'] = True
 projects = data.setdefault('projects', {})
+# CLAUDE.md が ~/.claude 配下を import していると、外部 import の許可確認でも止まる。
+# このディレクトリでは skills も見えないので、読み込まない側で確認済みにしておく。
 for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
-    projects.setdefault(d, {})['hasTrustDialogAccepted'] = True
+    proj = projects.setdefault(d, {})
+    proj['hasTrustDialogAccepted'] = True
+    proj['hasClaudeMdExternalIncludesWarningShown'] = True
+    proj.setdefault('hasClaudeMdExternalIncludesApproved', False)
 # ~/.claude.json の user MCP はこのディレクトリからは見えない。worker が使う kioku_mesh だけ写す。
 try:
     src = json.loads(pathlib.Path.home().joinpath('.claude.json').read_text())
