@@ -17,7 +17,22 @@
       "Bash(cat *.env*)",
       "Bash(printenv*)",
       "Bash(env)",
-      "Bash(env *)"
+      "Bash(env *)",
+      "Bash(rm -r*)",
+      "Bash(rm -fr*)",
+      "Bash(rm -f -r*)",
+      "Bash(rm -Rf*)",
+      "Bash(git push*--force*)",
+      "Bash(git push*-f)",
+      "Bash(git push*-f *)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -*f*)",
+      "Bash(gh pr merge*)",
+      "Bash(gh pr close*)",
+      "Bash(gh repo delete*)",
+      "Bash(gh release delete*)",
+      "Bash(mkfs*)",
+      "Bash(dd if=*)"
     ],
     "ask": []
   },
