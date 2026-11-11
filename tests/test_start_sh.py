@@ -375,7 +375,7 @@ def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
     base = json.loads((root / 'config/claude-worker/settings.base.json').read_text())
     for d in worker_dirs:
         cfg = json.loads((d / 'settings.json').read_text())
-        assert cfg.pop('statusLine')['command'] == f"python3 {root / 'scripts' / 'statusline.py'}"
+        assert cfg.pop('statusLine')['command'] == f'python3 {root / "scripts" / "statusline.py"}'
         assert cfg == base
     proj = json.loads((worker_dirs[0] / '.claude.json').read_text())['projects'][str(workspace)]
     assert proj['hasTrustDialogAccepted'] is True
@@ -454,4 +454,4 @@ def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
     b_cfg = json.loads(b.read_text())
     assert b_cfg['model'] == json.loads((root / 'config/claude-worker/settings.base.json').read_text())['model']
     # statusLine は repo の statusline.py を絶対パスで指す
-    assert b_cfg['statusLine'] == {'type': 'command', 'command': f"python3 {root / 'scripts' / 'statusline.py'}"}
+    assert b_cfg['statusLine'] == {'type': 'command', 'command': f'python3 {root / "scripts" / "statusline.py"}'}
