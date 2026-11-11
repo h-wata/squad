@@ -34,7 +34,8 @@
 
 - `~/.claude` 側の skills / plugins / 自分用 `CLAUDE.md` / user MCP は見えない。worker が使う
   kioku_mesh だけは、start.sh が起動のたびに `~/.claude.json` からこのディレクトリの
-  `.claude.json` に写す。
+  `.claude.json` に写す。worker が使う skill は squad repo の `.claude/skills/` に置いてあり、
+  `--add-dir` で読み込むので、こちらはトークンの有無に関係なく見える。
 - `settings.json` で起動時の既定モデルを `sonnet` にしている。タスクごとの切り替えは今までどおり
   Dispatcher が `/model` で行う。
 - `settings.json` の deny はトークンを守りきれない。Bash の deny はコマンドの前方一致なので
