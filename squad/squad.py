@@ -168,7 +168,10 @@ def detect_status(tail: str) -> dict:
     for p, to_used in CTX_PATTERNS:
         m = p.search(tail)
         if m:
-            context_pct = to_used(int(m.group(1)))
+            n = int(m.group(1))
+            # 0..100 の外は読み違いなので不明のまま。他のパターンで拾い直さない
+            if 0 <= n <= 100:
+                context_pct = to_used(n)
             break
 
     model: str | None = None

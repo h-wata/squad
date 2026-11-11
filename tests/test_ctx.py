@@ -288,10 +288,47 @@ def test_age_label() -> None:
         ('w1 | Opus 5.5 | ctx 不明', None),
         ('gpt-5.6  Context 100% left  ~/x', 0),
         ('gpt-5.6  Context 30% left', 70),
+        # 境界は有効、範囲外 (0..100 の外) は不明。他のパターンで拾い直さない
+        ('ctx:0%', 0),
+        ('ctx:100%', 100),
+        ('Context 0% left', 100),
+        ('ctx:101%', None),
+        ('ctx:999%', None),
+        ('Context 101% left', None),
+        ('ctx:101% Context 30% left', None),
     ],
 )
 def test_pane_ctx_patterns(tail: str, pct: int | None) -> None:
     assert squad.detect_status(tail)['context_pct'] == pct
+
+
+# ---------- 範囲外の値 (0..100 の外) は不明 ----------
+
+
+@pytest.mark.parametrize('bad', [-1, 101, 150, 1e9, float('nan'), float('inf'), True, '50', None])
+def test_statusline_out_of_range_pct_is_unknown(bad: object) -> None:
+    sys.path.insert(0, str(REPO / 'scripts'))
+    import statusline  # noqa: PLC0415
+
+    data = {'model': {'display_name': 'X'}, 'context_window': {'used_percentage': bad, 'context_window_size': 100}}
+
+    assert statusline.parse(data)['pct'] is None
+
+
+@pytest.mark.parametrize('bad', [-5, 101, 999])
+def test_resolve_ignores_out_of_range_slot_pct(bad: int) -> None:
+    r = ctx.resolve(_slots(statusline={'pct': bad}), 'sq1', None, NOW)
+
+    assert (r['context_source'], r['context_pct']) == ('statusline', None)
+
+
+def test_transcript_pct_over_window_is_unknown() -> None:
+    st: dict = {}
+    ctx.set_slot(st, 'statusline', session='sq1', pct=None, tokens=None, window=1000, model=None)
+
+    slot = ctx.transcript_slot(2000, st, 'sq1')
+
+    assert (slot['pct'], slot['tokens']) == (None, 2000)  # 使用率は不明のままトークン数は残す
 
 
 # ---------- squad ls ----------

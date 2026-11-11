@@ -79,7 +79,7 @@ def parse(data: object) -> dict:
     pct = cw.get('used_percentage')
     return {
         'model': model.get('display_name') or model.get('id') or None,
-        'pct': None if isinstance(pct, bool) or not isinstance(pct, (int, float)) else round(pct),
+        'pct': ctx.valid_pct(pct),
         'tokens': ctx.usage_tokens(cw.get('current_usage')),
         'window': ctx.as_int(cw.get('context_window_size')),
     }

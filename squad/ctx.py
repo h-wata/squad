@@ -48,6 +48,15 @@ def as_int(v: object) -> int | None:
     return int(v)
 
 
+def valid_pct(v: object) -> int | None:
+    """使用率として 0..100 の数だけ通す (範囲外・非数・bool・文字列は None)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:  # noqa: PLR0124 (NaN)
+        return None
+    if not 0 <= v <= 100:
+        return None
+    return round(v)
+
+
 def usage_tokens(usage: object) -> int | None:
     """Usage の input + cache read + cache creation. 1 つも無ければ None."""
     if not isinstance(usage, dict):
@@ -120,7 +129,7 @@ def _slot(state: dict, source: str, session: str | None) -> dict | None:
 def transcript_slot(tokens: int | None, state: dict, session: str | None) -> dict:
     """Transcript 由来の値。使用率は statusline が残した window の大きさがあるときだけ出す."""
     window = as_int((_slot(state, 'statusline', session) or {}).get('window'))
-    pct = round(tokens * 100 / window) if tokens is not None and window else None
+    pct = valid_pct(tokens * 100 / window) if tokens is not None and window else None
     return {'pct': pct, 'tokens': tokens, 'window': window}
 
 
@@ -139,14 +148,14 @@ def resolve(state: dict | None, session: str | None, pane: dict | None = None, n
         model = model or slot.get('model')
         if out['context_source'] is None:
             out.update(
-                context_pct=as_int(slot.get('pct')),
+                context_pct=valid_pct(slot.get('pct')),
                 context_tokens=as_int(slot.get('tokens')),
                 context_source=src,
                 context_at=slot.get('at'),
             )
     if pane is not None:
         model = model or pane.get('model')
-        pane_pct = as_int(pane.get('context_pct'))
+        pane_pct = valid_pct(pane.get('context_pct'))
         # 画面から何も読めなければ取得元にしない (取得元と時刻は「値を取れた」ことを表す)
         if out['context_source'] is None and pane_pct is not None:
             at = (now or datetime.now(timezone.utc)).isoformat(timespec='seconds')
