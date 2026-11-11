@@ -818,7 +818,9 @@ function ago(iso) {
     : Math.floor(s / 86400) + '日前';
 }
 function ctxCell(w) {
-  const v = w.context_pct != null ? w.context_pct + '%' : w.context_tokens != null ? w.context_tokens + ' tok' : null;
+  // 使用率が無くトークン数だけあるとき (transcript 由来) は、使用率は不明と出してトークン数を添える
+  const v = w.context_pct != null ? w.context_pct + '%'
+    : w.context_tokens != null ? '不明 ' + w.context_tokens + ' tok' : null;
   if (v == null) return (w.model || '-') + ' / 不明';
   return (w.model || '-') + ' / ' + v + ' (' + w.context_source + (w.context_at ? ', ' + ago(w.context_at) : '') + ')';
 }

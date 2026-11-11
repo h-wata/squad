@@ -112,7 +112,7 @@ def _slot(state: dict, source: str, session: str | None) -> dict | None:
     slot = slots.get(source) if isinstance(slots, dict) else None
     if not isinstance(slot, dict):
         return None
-    if session and slot.get('session') and slot['session'] != session:
+    if session and slot.get('session') != session:  # session 無しで書かれた値も別セッションのものとして扱う
         return None
     return slot
 

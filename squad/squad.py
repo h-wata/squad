@@ -260,7 +260,7 @@ def ctx_label(r: dict) -> str:
     """`12%(statusline 3分前)`。取れなければ `不明` (0% や古い値で埋めない, #105)."""
     if r.get('context_pct') is None:
         if r.get('context_tokens') is not None:
-            return f'{r["context_tokens"]}tok({r["context_source"]} {ctx.age_label(r.get("context_at"))})'
+            return f'不明({r["context_tokens"]}tok {r["context_source"]} {ctx.age_label(r.get("context_at"))})'
         return '不明'
     return f'{r["context_pct"]}%({r["context_source"]} {ctx.age_label(r.get("context_at"))})'
 

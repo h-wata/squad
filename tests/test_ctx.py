@@ -254,6 +254,16 @@ def test_slots_from_other_session_are_ignored() -> None:
     assert (r['context_pct'], r['context_source'], r['context_at']) == (None, None, None)
 
 
+def test_slot_without_session_is_not_used_by_a_session() -> None:
+    st = {'ctx_sources': {'statusline': {'session': '', 'at': NOW.isoformat(), 'pct': 10}}}
+    assert ctx.resolve(st, 'sq1', None, NOW)['context_source'] is None
+
+
+def test_ls_label_tokens_only_is_unknown_pct() -> None:
+    r = {'context_pct': None, 'context_tokens': 1055, 'context_source': 'transcript', 'context_at': None}
+    assert squad.ctx_label(r).startswith('不明(1055tok transcript')
+
+
 def test_nothing_available_stays_null() -> None:
     r = ctx.resolve({'context_pct': 55}, 'sq1', {'context_pct': None, 'model': None}, NOW)
     assert r['context_pct'] is None  # 旧形式の top-level context_pct は取得元が分からないので使わない
