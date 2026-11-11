@@ -18,7 +18,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SQUAD_DIR="$REPO_ROOT/squad"
-STATE_DIR="$SQUAD_DIR/state"
+STATE_DIR="${SQUAD_STATE_DIR:-$SQUAD_DIR/state}"  # テストでは一時ディレクトリに差し替える
 CONFIG="$SQUAD_DIR/config.json"
 
 # stdin (hook JSON) を全部読む
@@ -61,11 +61,17 @@ mkdir -p "$STATE_DIR"
 state_file="$STATE_DIR/${worker}.json"
 
 # Python で JSON merge + atomic write (既存 status/model/context_pct 等は保持)
-STATE_FILE="$state_file" WORKER="$worker" python3 - <<'PY' || true
+# transcript_path があれば、最後の assistant の usage を ctx の取得元 transcript として残す (#105)
+STATE_FILE="$state_file" WORKER="$worker" SQUAD_DIR="$SQUAD_DIR" python3 - <<'PY' || true
 import json
 import os
+import sys
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
+
+sys.path.insert(0, os.environ['SQUAD_DIR'])
+import ctx
 
 state_path = os.environ['STATE_FILE']
 worker = os.environ['WORKER']
@@ -95,28 +101,26 @@ elif event == 'Notification':
     else:
         last_event = f'Notification({ntype})' if ntype else 'Notification'
 
-# 既存 state を読んで部分更新
-data = {}
-if os.path.exists(state_path):
-    try:
-        data = json.loads(open(state_path).read())
-    except Exception:
-        data = {}
+session = os.environ.get('SQUAD_SESSION', '')
+transcript = hook.get('transcript_path') or ''
+tokens = ctx.transcript_context_tokens(transcript) if transcript else None  # ロックの外で読む
 
-data['worker'] = worker
-if status is not None:
-    data['status'] = status
-data['last_event'] = last_event
-data['last_event_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
-if msg:
-    data['last_event_message'] = msg[:200]
-data['updated_at'] = data['last_event_at']
 
-tmp = state_path + '.tmp'
-with open(tmp, 'w') as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-    f.write('\n')
-os.replace(tmp, state_path)
+def merge(data):
+    data['worker'] = worker
+    if status is not None:
+        data['status'] = status
+    data['last_event'] = last_event
+    data['last_event_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    if msg:
+        data['last_event_message'] = msg[:200]
+    data['updated_at'] = data['last_event_at']
+    if transcript:
+        ctx.set_slot(data, 'transcript', session=session, **ctx.transcript_slot(tokens, data, session))
+        ctx.apply(data, session)
+
+
+ctx.update_state(Path(state_path), merge)
 PY
 
 exit 0

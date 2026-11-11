@@ -33,6 +33,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ctx  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
 from notify_queue import NotificationQueue  # noqa: E402
@@ -41,7 +42,6 @@ from notify_queue import QueueUnreadableError  # noqa: E402
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 CONFIG_PATH = ROOT / 'config.json'
-STATE_DIR = ROOT / 'state'
 NOTIFY_WORKER = REPO_ROOT / 'scripts' / 'notify-worker.sh'
 QUEUE_DIR = REPO_ROOT / 'queue' / 'projects'
 CAPTURE_TAIL_LINES = 25
@@ -143,10 +143,13 @@ THINKING_PATTERNS = [
     # Codex: `• Working (1m 06s • esc to interrupt)`。終了は `─ Worked for 7m 07s` で別の形
     r'(?m)^[ \t]*•[ \t]+Working \((?:\d+h )?(?:\d+m )?\d+s • esc to interrupt\)',
 ]
+# (パターン, 使用率への変換)。pane 読みは補助 (ctx の第一の取得元は status line, #105)
 CTX_PATTERNS = [
-    re.compile(r'\bctx\s+(\d+)%', re.IGNORECASE),
-    re.compile(r'[◔◑◕○]\s*[\d,]+\s*\((\d+)%\)'),
-    re.compile(r'Context\s+(\d+)%\s+left'),
+    # `ctx 12%` (squad の status line) と `ctx:54%` (Dispatcher の個人 status line)
+    (re.compile(r'\bctx\s*:?\s*(\d+)%', re.IGNORECASE), lambda n: n),
+    (re.compile(r'[◔◑◕○]\s*[\d,]+\s*\((\d+)%\)'), lambda n: n),
+    # Codex の `Context 100% left` は残りの割合なので、使用率は 100 から引く
+    (re.compile(r'Context\s+(\d+)%\s+left'), lambda n: max(0, 100 - n)),
 ]
 MODEL_PATTERNS = [
     re.compile(r'\b((?:Sonnet|Opus|Haiku|Fable)\s+\d[\d.]*)'),
@@ -162,10 +165,13 @@ def detect_status(tail: str) -> dict:
         status = 'busy'
 
     context_pct: int | None = None
-    for p in CTX_PATTERNS:
+    for p, to_used in CTX_PATTERNS:
         m = p.search(tail)
         if m:
-            context_pct = int(m.group(1))
+            n = int(m.group(1))
+            # 0..100 の外は読み違いなので不明のまま。他のパターンで拾い直さない
+            if 0 <= n <= 100:
+                context_pct = to_used(n)
             break
 
     model: str | None = None
@@ -188,13 +194,8 @@ def detect_status(tail: str) -> dict:
 # ---------- state 保存 / hook 読み出し ----------
 
 
-def save_state(worker: str, data: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    (STATE_DIR / f'{worker}.json').write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
-
-
 def load_state(worker: str) -> dict | None:
-    p = STATE_DIR / f'{worker}.json'
+    p = ctx.state_dir() / f'{worker}.json'
     if not p.exists():
         return None
     try:
@@ -258,19 +259,34 @@ def probe_worker(pane: str) -> dict:
     return detect_status(tail)
 
 
+def ctx_label(r: dict) -> str:
+    """`12%(statusline 3分前)`。取れなければ `不明` (0% や古い値で埋めない, #105)."""
+    if r.get('context_pct') is None:
+        if r.get('context_tokens') is not None:
+            return f'不明({r["context_tokens"]}tok {r["context_source"]} {ctx.age_label(r.get("context_at"))})'
+        return '不明'
+    return f'{r["context_pct"]}%({r["context_source"]} {ctx.age_label(r.get("context_at"))})'
+
+
 def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    session = resolve_session(cfg)
     rows = []
-    for w, meta in cfg.get('workers', {}).items():
+    # Dispatcher は config.json の workers に無い。status line が state/dispatcher.json に書く値を出すため先頭に足す
+    targets = {'dispatcher': {'agent': 'claude', 'pane': tmux_target(session, 'dispatcher', tmux_windows(session))}}
+    targets.update(cfg.get('workers', {}))
+    for w, meta in targets.items():
         pane = meta['pane']
-        entry = {'worker': w, 'pane': pane, 'agent': meta.get('agent'), **probe_worker(pane), 'updated_at': now}
-        # 既存 state があり、hook 由来の last_event があれば保持
-        prev = load_state(w)
-        if prev and prev.get('last_event'):
-            entry['last_event'] = prev['last_event']
-            entry['last_event_at'] = prev.get('last_event_at')
-        save_state(w, entry)
-        rows.append(entry)
+        probe = probe_worker(pane)
+
+        # hook (last_event 等) と status line (ctx_sources) が書いた値は残し、画面から読んだ分だけ上書きする
+        def merge(st: dict, w: str = w, pane: str = pane, meta: dict = meta, probe: dict = probe) -> None:
+            st.update({'worker': w, 'pane': pane, 'agent': meta.get('agent')})
+            st.update({k: probe[k] for k in ('status', 'last_line')})
+            st['updated_at'] = now
+            ctx.apply(st, session, probe)
+
+        rows.append(ctx.update_state(ctx.state_dir() / f'{w}.json', merge))
 
     icon = {
         'idle': '🟢',
@@ -283,13 +299,12 @@ def cmd_ls(_: argparse.Namespace, cfg: dict) -> int:
     print(f'== squad ls @ {now} ==')
     for r in rows:
         ic = icon.get(r['status'], '⚪')
-        ctx = f'{r["context_pct"]}%' if r['context_pct'] is not None else '-'
         model = r['model'] or '-'
         agent = r['agent'] or '-'
         evt = f' evt={r["last_event"]}' if r.get('last_event') else ''
         print(
-            f'{ic} {r["worker"]:<3} {r["pane"]:<22} {r["status"]:<16} '
-            f'ctx={ctx:<5} model={model:<14} agent={agent}{evt}'
+            f'{ic} {r["worker"]:<10} {r["pane"]:<22} {r["status"]:<16} '
+            f'ctx={ctx_label(r):<22} model={model:<14} agent={agent}{evt}'
         )
         if r['status'] in ('permission_wait', 'unreachable'):
             print(f'     ↳ {r["last_line"]}')

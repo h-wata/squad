@@ -392,6 +392,61 @@ def test_blank_token_file_is_ignored(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
 
 
+def _dry_run_settings(stdout: str, name: str) -> dict:
+    line = next(ln for ln in stdout.splitlines() if ln.startswith(f'{name}='))
+    return json.loads(line.split('=', 1)[1])
+
+
+def test_dispatcher_and_worker_settings_get_squad_statusline(tmp_path: Path) -> None:
+    """Dispatcher と worker の --settings に squad の statusLine を足す。settings.local.json 自体は変えない (#105)."""
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess')
+
+    assert r.returncode == 0, r.stderr
+    script = root / 'scripts' / 'statusline.py'
+    disp = _dry_run_settings(r.stdout, 'DISPATCHER_SETTINGS_JSON')
+    worker = _dry_run_settings(r.stdout, 'WORKER_SETTINGS_JSON')
+    assert disp['statusLine']['type'] == 'command'
+    assert disp['statusLine']['command'] == f'python3 {script} --name dispatcher'
+    assert worker['statusLine']['command'] == f'python3 {script}'
+    assert worker['disableRemoteControl'] is True
+    assert 'disableRemoteControl' not in disp
+    local = json.loads((root / '.claude' / 'settings.local.json').read_text())
+    assert 'statusLine' not in local
+    assert disp['hooks'] == local['hooks']
+
+
+def test_worker_settings_keep_statusline_with_rc_enabled(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_ENABLE_RC': '1'})
+
+    assert r.returncode == 0, r.stderr
+    worker = _dry_run_settings(r.stdout, 'WORKER_SETTINGS_JSON')
+    assert 'statusLine' in worker
+    assert 'disableRemoteControl' not in worker
+
+
+def test_claude_worker_config_has_statusline(tmp_path: Path) -> None:
+    """ひな形の statusLine は、start.sh が書き出す <session>/w<n>/ から repo の statusline.py を指す."""
+    cfg = json.loads((REPO / 'config' / 'claude-worker' / 'settings.base.json').read_text())
+    assert cfg['statusLine']['type'] == 'command'
+    cfg_dir = REPO / 'config' / 'claude-worker' / 'sess' / 'w1'
+    r = subprocess.run(
+        ['bash', '-c', 'set -f; eval "set -- $CMD"; echo "$2"'],
+        env={**os.environ, 'CLAUDE_CONFIG_DIR': str(cfg_dir), 'CMD': cfg['statusLine']['command']},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert Path(os.path.normpath(r.stdout.strip())) == REPO / 'scripts' / 'statusline.py'
+
+
 def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
     """Squad を複数立ち上げても、worker の CLAUDE_CONFIG_DIR は session ごとに分かれる."""
     root = _fake_root(tmp_path)

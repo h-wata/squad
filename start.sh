@@ -295,10 +295,49 @@ if [ -n "${SQUAD_OWNED_PROJECTS:-}" ]; then
     done
 fi
 
+# --- Dispatcher / worker に渡す --settings の JSON ---
+# settings.local.json に次を足した JSON を --settings に渡す (settings.local.json 自体は書き換えない)。
+# - statusLine: squad 用 status line (scripts/statusline.py, #105)。worker ID・モデル・ctx・task_id を出し、
+#   同じ値を squad/state/<worker>.json に書く。--settings は ~/.claude/settings.json より優先されるので、
+#   個人の statusLine を書き換えずに squad の pane だけ差し替わる。Dispatcher には SQUAD_WORKER_ID が
+#   無いので --name dispatcher で名前を渡す。
+# - disableRemoteControl (worker だけ, SQUAD-279): RC セッションが増殖する問題への対応。claude CLI の
+#   disableRemoteControl 設定 (公式: https://code.claude.com/docs/en/settings-reference#disableremotecontrol)。
+#   Dispatcher はこの対象外。ユーザーが外部 (claude.ai/code や モバイルアプリ) から Dispatcher に直接
+#   繋ぎたい場合があるため据え置き。SQUAD_ENABLE_RC=1 で worker も含めて RC を有効化できる (既定は 0 = off)。
+ENABLE_RC="${SQUAD_ENABLE_RC:-0}"
+_settings_json() {
+    # $1: statusline.py に渡す追加引数 (空可)、$2: 1 なら disableRemoteControl を足す
+    SETTINGS_FILE_PATH="$SETTINGS_FILE" STATUSLINE_SCRIPT="$SCRIPT_DIR/scripts/statusline.py" \
+        STATUSLINE_ARGS="$1" DISABLE_RC="$2" python3 -c "
+import json
+import os
+import shlex
+
+with open(os.environ['SETTINGS_FILE_PATH'], encoding='utf-8') as f:
+    data = json.load(f)
+cmd = 'python3 ' + shlex.quote(os.environ['STATUSLINE_SCRIPT'])
+if os.environ['STATUSLINE_ARGS']:
+    cmd += ' ' + os.environ['STATUSLINE_ARGS']
+data['statusLine'] = {'type': 'command', 'command': cmd}
+if os.environ['DISABLE_RC'] == '1':
+    data['disableRemoteControl'] = True
+print(json.dumps(data))
+"
+}
+_disable_rc=1
+[ "$ENABLE_RC" = "1" ] && _disable_rc=0
+DISPATCHER_SETTINGS_JSON="$(_settings_json '--name dispatcher' 0)" && WORKER_SETTINGS_JSON="$(_settings_json '' "$_disable_rc")" || {
+    echo "エラー: Dispatcher / worker 用 settings JSON の生成に失敗しました" >&2
+    exit 1
+}
+
 # SQUAD_DRY_RUN=1: settings/scaffold の pre-flight のみ実行して tmux には触れずに終了
 # (fresh clone 検証・CI での再利用向け。既存の tmux 起動セッションを巻き込まずに検証できる)
 if [ "${SQUAD_DRY_RUN:-0}" = "1" ]; then
     echo "SQUAD_DRY_RUN=1: pre-flight (settings/scaffold) のみ実行して終了します"
+    echo "DISPATCHER_SETTINGS_JSON=$DISPATCHER_SETTINGS_JSON"
+    echo "WORKER_SETTINGS_JSON=$WORKER_SETTINGS_JSON"
     exit 0
 fi
 
@@ -328,39 +367,14 @@ SQUAD_SESSION_ARG_Q="$(printf '%q' "SQUAD_SESSION=$SESSION_NAME")"
 SESSION_NAME_Q="$(printf '%q' "$SESSION_NAME")"
 
 # tmux send-keys が pane に送るコマンド行そのものに埋め込まれる $SCRIPT_DIR / $WORKSPACE
-# / settings ファイルパスも、render_prompt.py 引数と同様に printf '%q' で
+# / settings の JSON も、render_prompt.py 引数と同様に printf '%q' で
 # エスケープしてから使う（raw のままだと & | " ; や改行を含むパスで pane 側シェルの
 # パースが壊れる）。%q の出力はそれ自体で shell-safe な1トークンなので、
 # 埋め込み側で追加の \"..\" 二重引用符化はしない。
 SCRIPT_DIR_Q="$(printf '%q' "$SCRIPT_DIR")"
 WORKSPACE_Q="$(printf '%q' "$WORKSPACE")"
-SETTINGS_FILE_Q="$(printf '%q' "$SETTINGS_FILE")"
-
-# --- worker (claude / claude-local) の Remote Control (RC) を既定 off にする (SQUAD-279) ---
-# RC セッションが増殖する問題への対応。claude CLI の disableRemoteControl 設定
-# (公式: https://code.claude.com/docs/en/settings-reference#disableremotecontrol) を
-# settings.local.json に足した JSON を worker 起動専用に --settings へ渡す。
-# Dispatcher (SETTINGS_FILE_Q) はこの対象外 — ユーザーが外部 (claude.ai/code や
-# モバイルアプリ) から Dispatcher に直接繋ぎたい場合があるため据え置き。
-# SQUAD_ENABLE_RC=1 で worker も含めて RC を有効化できる (既定は 0 = off)。
-ENABLE_RC="${SQUAD_ENABLE_RC:-0}"
-if [ "$ENABLE_RC" = "1" ]; then
-    WORKER_SETTINGS_FILE_Q="$SETTINGS_FILE_Q"
-else
-    WORKER_SETTINGS_JSON="$(SETTINGS_FILE_PATH="$SETTINGS_FILE" python3 -c "
-import json
-import os
-
-with open(os.environ['SETTINGS_FILE_PATH'], encoding='utf-8') as f:
-    data = json.load(f)
-data['disableRemoteControl'] = True
-print(json.dumps(data))
-")" || {
-        echo "エラー: worker 用 settings JSON (disableRemoteControl 付き) の生成に失敗しました" >&2
-        exit 1
-    }
-    WORKER_SETTINGS_FILE_Q="$(printf '%q' "$WORKER_SETTINGS_JSON")"
-fi
+DISPATCHER_SETTINGS_Q="$(printf '%q' "$DISPATCHER_SETTINGS_JSON")"
+WORKER_SETTINGS_FILE_Q="$(printf '%q' "$WORKER_SETTINGS_JSON")"
 
 # Dispatcher 起動モデルも同様に client (start.sh 実行時) 側で解決してから %q で埋め込む。
 # 既存 tmux server では新規 pane に client の環境変数が継承されないため、
@@ -494,7 +508,7 @@ tmux send-keys -t "$SESSION_NAME:aux" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 #   Dispatcher は YAML 管理のみでコードを書かないため off、Worker 1-3 は実装担当のため
 #   full。プラグイン未導入なら無視されるだけで無害。レベルを変えたい場合はここを編集
 #   (lite/full/ultra)。導入手順は README の「Ponytail 連携 (任意)」参照。
-tmux send-keys -t "$SESSION_NAME:dispatcher" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\"" Enter
+tmux send-keys -t "$SESSION_NAME:dispatcher" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\"" Enter
 
 # w1-w3 window: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
