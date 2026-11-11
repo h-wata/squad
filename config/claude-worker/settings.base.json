@@ -38,9 +38,5 @@
   },
   "model": "sonnet",
   "skipDangerousModePermissionPrompt": true,
-  "theme": "dark",
-  "statusLine": {
-    "type": "command",
-    "command": "python3 \"${CLAUDE_CONFIG_DIR}/../../../../scripts/statusline.py\""
-  }
+  "theme": "dark"
 }

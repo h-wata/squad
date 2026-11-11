@@ -110,7 +110,7 @@ if [ "$ANY_CLAUDE_LOCAL" = "1" ] || [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
     # フォルダ信頼 / bypass 確認) を出す。tmux の pane には答える人がいないので、
     # 起動前に「済んだこと」にしておく。workspace ごとの信頼も先に入れる。
     WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" SESSION_NAME="$SESSION_NAME" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
-import json, os, pathlib, shutil
+import json, os, pathlib, shlex
 
 base = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
 # ~/.claude.json の user MCP は worker からは見えない。worker が使う kioku_mesh だけ写す。
@@ -122,7 +122,11 @@ except (OSError, ValueError, KeyError, TypeError):
 for n in (1, 2, 3):
     cfg_dir = base / os.environ['SESSION_NAME'] / f'w{n}'
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(base / 'settings.base.json', cfg_dir / 'settings.json')
+    # statusLine は repo の statusline.py を絶対パスで指す (相対だとディレクトリ構成に依存する, #105)。
+    settings = json.loads((base / 'settings.base.json').read_text())
+    script = pathlib.Path(os.environ['SCRIPT_DIR']) / 'scripts' / 'statusline.py'
+    settings['statusLine'] = {'type': 'command', 'command': 'python3 ' + shlex.quote(str(script))}
+    (cfg_dir / 'settings.json').write_text(json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
     state = cfg_dir / '.claude.json'
     try:
         data = json.loads(state.read_text())
