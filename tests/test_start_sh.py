@@ -71,7 +71,13 @@ def _run_start(
     tmp_path: Path | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, 'SQUAD_SESSION': session, 'SQUAD_DRY_RUN': '1'}
+    # 手元に ~/.config/squad/claude-oauth-token があっても拾わないよう、既定は存在しないパスにする
+    env = {
+        **os.environ,
+        'SQUAD_SESSION': session,
+        'SQUAD_DRY_RUN': '1',
+        'SQUAD_CLAUDE_TOKEN_FILE': str(root / 'no-claude-token'),
+    }
     if extra_env:
         env.update(extra_env)
     if owned is not None:
@@ -337,3 +343,43 @@ def test_claude_local_requires_worker_config_dir(tmp_path: Path) -> None:
 
     assert r.returncode != 0
     assert 'claude-worker' in r.stderr
+
+
+def test_claude_token_file_requires_worker_config_dir(tmp_path: Path) -> None:
+    """OAuth トークンを置くと claude worker も CLAUDE_CONFIG_DIR で ask を外すので、設定が無ければ止める."""
+    root = _fake_root(tmp_path)  # config/ をコピーしない
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy\n')
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+
+    assert r.returncode != 0
+    assert 'claude-worker' in r.stderr
+
+
+def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    shutil.copytree(REPO / 'config', root / 'config')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy\n')
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+
+    assert r.returncode == 0, r.stderr
+
+
+def test_blank_token_file_is_ignored(tmp_path: Path) -> None:
+    """空白だけのトークンでは有効にしない (設定が無くても従来どおり起動する)."""
+    root = _fake_root(tmp_path)  # config/ をコピーしない
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text(' \n\n')
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+
+    assert r.returncode == 0, r.stderr

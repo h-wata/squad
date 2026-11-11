@@ -89,9 +89,18 @@ done
 # user 設定の出所ごと差し替えて、手元の対話設定に触れずに ask を外す。
 # 詳細は config/claude-worker/README.md。
 WORKER_CONFIG_DIR="$SCRIPT_DIR/config/claude-worker"
-if [ "$ANY_CLAUDE_LOCAL" = "1" ]; then
+# claude worker も同じ CLAUDE_CONFIG_DIR で ask を外す。CLAUDE_CONFIG_DIR を変えると
+# ~/.claude の OAuth 認証も見えなくなるので、`claude setup-token` で発行した長期トークンを
+# このファイルに置いたときだけ有効にする (トークン本体は pane のコマンド行に出さず $(cat) で読む)。
+CLAUDE_TOKEN_FILE="${SQUAD_CLAUDE_TOKEN_FILE:-$HOME/.config/squad/claude-oauth-token}"
+CLAUDE_WORKER_NO_ASK=0
+# 読めない・空白だけのファイルだと空トークンで起動してログイン待ちのまま止まるので、有効にしない。
+if [ -r "$CLAUDE_TOKEN_FILE" ] && grep -q '[^[:space:]]' "$CLAUDE_TOKEN_FILE"; then
+    CLAUDE_WORKER_NO_ASK=1
+fi
+if [ "$ANY_CLAUDE_LOCAL" = "1" ] || [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
     if [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
-        echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker に必須)" >&2
+        echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker と $CLAUDE_TOKEN_FILE を置いたときに必須)" >&2
         exit 1
     fi
     # 新しい CLAUDE_CONFIG_DIR は初回オンボーディング (テーマ選択 / セキュリティ注意 /
@@ -110,7 +119,16 @@ data['hasCompletedOnboarding'] = True
 projects = data.setdefault('projects', {})
 for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
     projects.setdefault(d, {})['hasTrustDialogAccepted'] = True
+# ~/.claude.json の user MCP はこのディレクトリからは見えない。worker が使う kioku_mesh だけ写す。
+try:
+    src = json.loads(pathlib.Path.home().joinpath('.claude.json').read_text())
+    kioku = src['mcpServers']['kioku_mesh']
+except (OSError, ValueError, KeyError, TypeError):
+    kioku = None
+if kioku:
+    data.setdefault('mcpServers', {})['kioku_mesh'] = kioku
 state.write_text(json.dumps(data, indent=2))
+state.chmod(0o600)
 " || {
         echo "エラー: $WORKER_CONFIG_DIR の初期化に失敗しました" >&2
         exit 1
@@ -493,6 +511,9 @@ for n in 1 2 3; do
         # するのを確認したため、軽量な最小インタラクティブUIに切り替えて回避。
         # --auto --prompt での起動と send-keys での対話継続はそのまま使える。
         tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q" Enter
+    elif [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
+        # ask を外した claude worker。起動の形は claude-local と同じで、認証だけ OAuth トークン。
+        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     else
         tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     fi
