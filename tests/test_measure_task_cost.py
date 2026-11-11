@@ -560,3 +560,22 @@ def test_completed_at_after_report_mtime_is_capped(tmp_path: Path, monkeypatch: 
 
     assert record['wall_clock_sec'] == 480
     assert '更新時刻を使う' in record['notes']
+
+
+def test_transcript_under_per_worker_config_dir_is_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker ごとの CLAUDE_CONFIG_DIR (config/claude-worker/<session>/w<n>/projects) も探す."""
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 5, 3, 10, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat(), session_id='tok-1')
+    worker_dir = mtc.REPO_ROOT / 'config' / 'claude-worker' / 'squad' / 'w2' / 'projects' / '-home-x'
+    worker_dir.mkdir(parents=True)
+    usage = {'input_tokens': 5, 'output_tokens': 7}
+    (worker_dir / 'tok-1.jsonl').write_text(
+        _assistant_line(start + timedelta(minutes=1), session_id='tok-1', usage=usage) + '\n', encoding='utf-8'
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'exact'

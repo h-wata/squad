@@ -99,41 +99,48 @@ if [ -r "$CLAUDE_TOKEN_FILE" ] && grep -q '[^[:space:]]' "$CLAUDE_TOKEN_FILE"; t
     CLAUDE_WORKER_NO_ASK=1
 fi
 if [ "$ANY_CLAUDE_LOCAL" = "1" ] || [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
-    if [ ! -f "$WORKER_CONFIG_DIR/settings.json" ]; then
-        echo "エラー: $WORKER_CONFIG_DIR/settings.json がありません (claude-local worker と $CLAUDE_TOKEN_FILE を置いたときに必須)" >&2
+    if [ ! -f "$WORKER_CONFIG_DIR/settings.base.json" ]; then
+        echo "エラー: $WORKER_CONFIG_DIR/settings.base.json がありません (claude-local worker と $CLAUDE_TOKEN_FILE を置いたときに必須)" >&2
         exit 1
     fi
+    # worker ごとに <session>/w<n> を CLAUDE_CONFIG_DIR にする。Claude Code は /model などで
+    # その中の settings.json を書き換えるので、共有すると 1 人の切り替えが他の worker と
+    # repo の追跡ファイルに波及する。settings.json は起動のたびにひな形から作り直す。
     # 新しい CLAUDE_CONFIG_DIR は初回オンボーディング (テーマ選択 / セキュリティ注意 /
     # フォルダ信頼 / bypass 確認) を出す。tmux の pane には答える人がいないので、
     # 起動前に「済んだこと」にしておく。workspace ごとの信頼も先に入れる。
-    WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
-import json, os, pathlib
+    WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" SESSION_NAME="$SESSION_NAME" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
+import json, os, pathlib, shutil
 
-cfg_dir = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
-state = cfg_dir / '.claude.json'
-try:
-    data = json.loads(state.read_text())
-except (OSError, ValueError):
-    data = {}
-data['hasCompletedOnboarding'] = True
-projects = data.setdefault('projects', {})
-# CLAUDE.md が ~/.claude 配下を import していると、外部 import の許可確認でも止まる。
-# このディレクトリでは skills も見えないので、読み込まない側で確認済みにしておく。
-for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
-    proj = projects.setdefault(d, {})
-    proj['hasTrustDialogAccepted'] = True
-    proj['hasClaudeMdExternalIncludesWarningShown'] = True
-    proj.setdefault('hasClaudeMdExternalIncludesApproved', False)
-# ~/.claude.json の user MCP はこのディレクトリからは見えない。worker が使う kioku_mesh だけ写す。
+base = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
+# ~/.claude.json の user MCP は worker からは見えない。worker が使う kioku_mesh だけ写す。
 try:
     src = json.loads(pathlib.Path.home().joinpath('.claude.json').read_text())
     kioku = src['mcpServers']['kioku_mesh']
 except (OSError, ValueError, KeyError, TypeError):
     kioku = None
-if kioku:
-    data.setdefault('mcpServers', {})['kioku_mesh'] = kioku
-state.write_text(json.dumps(data, indent=2))
-state.chmod(0o600)
+for n in (1, 2, 3):
+    cfg_dir = base / os.environ['SESSION_NAME'] / f'w{n}'
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(base / 'settings.base.json', cfg_dir / 'settings.json')
+    state = cfg_dir / '.claude.json'
+    try:
+        data = json.loads(state.read_text())
+    except (OSError, ValueError):
+        data = {}
+    data['hasCompletedOnboarding'] = True
+    projects = data.setdefault('projects', {})
+    # CLAUDE.md が ~/.claude 配下を import していると、外部 import の許可確認でも止まる。
+    # worker からは ~/.claude の skills も見えないので、読み込まない側で確認済みにしておく。
+    for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
+        proj = projects.setdefault(d, {})
+        proj['hasTrustDialogAccepted'] = True
+        proj['hasClaudeMdExternalIncludesWarningShown'] = True
+        proj.setdefault('hasClaudeMdExternalIncludesApproved', False)
+    if kioku:
+        data.setdefault('mcpServers', {})['kioku_mesh'] = kioku
+    state.write_text(json.dumps(data, indent=2))
+    state.chmod(0o600)
 " || {
         echo "エラー: $WORKER_CONFIG_DIR の初期化に失敗しました" >&2
         exit 1
@@ -513,7 +520,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
@@ -532,7 +539,7 @@ for n in 1 2 3; do
         tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q" Enter
     elif [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
         # ask を外した claude worker。起動の形は claude-local と同じで、認証だけ OAuth トークン。
-        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     else
         tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
     fi

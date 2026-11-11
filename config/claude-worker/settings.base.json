@@ -26,6 +26,6 @@
   "theme": "dark",
   "statusLine": {
     "type": "command",
-    "command": "python3 \"${CLAUDE_CONFIG_DIR}/../../scripts/statusline.py\""
+    "command": "python3 \"${CLAUDE_CONFIG_DIR}/../../../../scripts/statusline.py\""
   }
 }

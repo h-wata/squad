@@ -17,7 +17,7 @@
 2. 同じ場所に `{"statusLine": {"type": "command", "command": "<スクリプトの絶対パス>"}}` だけの settings を置く
 3. 本物とは別名の tmux セッション (`probe105`) で `claude --model haiku --settings <その settings>` を対話起動し、
    起動直後に 1 回、`Reply with just the word OK.` に答えた後に 1 回、描画させる
-4. 終わったら `tmux kill-session -t probe105`。`~/.claude/settings.json` と `config/claude-worker/settings.json`
+4. 終わったら `tmux kill-session -t probe105`。`~/.claude/settings.json` と `config/claude-worker` の settings
    は変えていない
 
 ## キー一覧
@@ -80,5 +80,5 @@
 
 - `--settings` に渡した statusLine は `~/.claude/settings.json` の statusLine より優先された
 - command はシェル経由で動き、環境変数が展開された (`"${PROBE_ROOT}/probe.sh"` が動いた)。
-  `config/claude-worker/settings.json` はこれを使い `"${CLAUDE_CONFIG_DIR}/../../scripts/statusline.py"` を指す
+  `config/claude-worker/settings.base.json` はこれを使い `"${CLAUDE_CONFIG_DIR}/../../../../scripts/statusline.py"` を指す
 - pane に設定した `SQUAD_WORKER_ID` などの環境変数は command にも渡る
