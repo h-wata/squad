@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `scripts/measure_task_cost.py` に `worker_dir` 集計と `--compare --cutover <ISO8601>` を足した (#105 の 5)。worker 専用の
+  transcript ディレクトリを task の区間で合算し、レコードに `total_tokens` / `sessions` / `breaks` / `task_created_at`
+  を入れる。`--compare` は cutover 前後を model x agent ごとの Markdown 表で出し、除外した件数を理由別に付ける。
 - `SQUAD_SESSION` が無いとき、動いている squad セッションがちょうど 1 つならそれを使う (#101)。対象は
   ls / assign などの Python 委譲、`attach`、`log`。2 つ以上のときは `ros-agents` のままで、候補を stderr に出す。
   `stop` は推測で選ばない。`squad/squad.py` 冒頭 docstring から `status` の別名記述を消した。
