@@ -74,7 +74,6 @@ import sys
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-import zlib
 
 sys.path.insert(0, os.environ['SQUAD_DIR'])
 import ctx
@@ -117,7 +116,7 @@ def _sent_origins(prompt, sent):
     """watchd_sent のうち crc32 が prompt と一致し、human_origin が bool の記録の human_origin 一覧."""
     if not isinstance(sent, list):
         return []
-    crc = zlib.crc32(prompt.encode('utf-8'))
+    crc = ctx.prompt_crc32(prompt)
     out = []
     for rec in sent:
         if not isinstance(rec, dict):
