@@ -4,6 +4,12 @@
 
 ### Changed
 
+- watchd が Dispatcher のコンテキストも区切る (#105 の 4)。ctx 50% 以上、ctx 不明なら最後の /clear から
+  `[REPORT` 10 件か 4 時間で `BRIEF-REQUEST` を送り、`dashboards/<session>-brief.md` の更新と `BRIEF-READY` を見てから
+  `/clear` と `RESUME` を送る。待機中でない、人間の入力から 20 分未満、brief に確認待ちがある、`AskUserQuestion` の
+  答え待ちのときは送らない。しきい値は `WATCH_DISPATCHER_BREAK_CTX_PCT` / `_REPORTS` / `_HOURS` /
+  `WATCH_DISPATCHER_HUMAN_QUIET_MIN`。Dispatcher に送るたびに `state/dispatcher.json` の `watchd_sent` に残す。
+  `instructions/dispatcher.md` の `/compact` と残量 20% / 80% の規則を brief の手順に置き換えた。
 - `scripts/measure_task_cost.py` に `worker_dir` 集計と `--compare --cutover <ISO8601>` を足した (#105 の 5)。worker 専用の
   transcript ディレクトリを task の区間で合算し、レコードに `total_tokens` / `sessions` / `breaks` / `task_created_at`
   を入れる。`--compare` は cutover 前後を model x agent ごとの Markdown 表で出し、除外した件数を理由別に付ける。

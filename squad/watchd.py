@@ -124,6 +124,103 @@ def resume_text(task_id: str, task_yaml: Path, brief: Path) -> str:
     )
 
 
+# Dispatcher の区切り (ADR 0011 の 4.)
+DISPATCHER = 'dispatcher'
+WATCHD_SENT_KEEP = 20  # state/dispatcher.json の watchd_sent に残す件数 (hook が人間の入力と見分ける)
+REPORT_NOTIFIED_KEEP = 200  # report_notified_at に残す件数 (最後の /clear からの配達数を数える)
+WEB_INSTRUCTION_PREFIX = '[squad-web 指示]'
+ASK_USER_TOOL = 'AskUserQuestion'
+TRANSCRIPT_TAIL_BYTES = 256 * 1024
+BRIEF_QUESTION_HEADING = '## 1. 人間への確認待ち'
+BRIEF_NO_QUESTION = '- なし'
+
+
+def dispatcher_brief_request_text(reason: str, session: str) -> str:
+    """Dispatcher への BRIEF-REQUEST (ADR 0011 の 4.。instructions/dispatcher.md と一字一句揃える)."""
+    return (
+        f'[BRIEF-REQUEST dispatcher reason={reason}] コンテキストを区切ります。dashboards/{session}-brief.md を '
+        '4 項目で書き直し、dashboards/<pj>.md も最新にしてから BRIEF-READY とだけ返してください。'
+        '人間とのやりとりの途中など今は区切れないときは BRIEF-DEFER <理由> と返してください。'
+    )
+
+
+def dispatcher_resume_text(session: str) -> str:
+    """Dispatcher への RESUME (ADR 0011 の 4.。instructions/dispatcher.md と一字一句揃える)."""
+    return (
+        f'[RESUME dispatcher] /clear 後の再開です。dashboards/{session}-brief.md を読み、'
+        'instructions/dispatcher.md の「セッション開始時（状態復元）」の 0-5 を行ってから、'
+        'brief の 2. と 3. を続けてください。'
+    )
+
+
+def brief_question_pending(path: Path) -> bool:
+    """Dispatcher brief の「1. 人間への確認待ち」に「- なし」以外の行があるか.
+
+    brief が無ければ確認待ちは無い。読めない・1. の見出しが無いときは確かめられないので、確認待ちとして
+    扱う (区切らない側)。
+    """
+    try:
+        lines = path.read_text(errors='replace').splitlines()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        start = [ln.strip() for ln in lines].index(BRIEF_QUESTION_HEADING) + 1
+    except ValueError:
+        return True
+    for line in lines[start:]:
+        text = line.strip()
+        if text.startswith('## '):
+            break
+        if text and text != BRIEF_NO_QUESTION:
+            return True
+    return False
+
+
+def _content_blocks(entry: dict) -> list[dict]:
+    msg = entry.get('message')
+    content = msg.get('content') if isinstance(msg, dict) else None
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def ask_user_pending(path: str) -> bool:
+    """Transcript の最後の assistant メッセージが AskUserQuestion の tool_use で、tool_result がまだ無いか.
+
+    path が無い・ファイルが無いときは答え待ちとは見なさない。読めないときは区切らない側 (True) に倒す。
+    """
+    if not path:
+        return False
+    try:
+        with open(path, 'rb') as f:  # noqa: PTH123
+            size = f.seek(0, os.SEEK_END)
+            start = max(0, size - TRANSCRIPT_TAIL_BYTES)
+            f.seek(start)
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if start > 0:
+        lines = lines[1:]  # 途中から読んだ先頭行は欠けている
+    asked: set[str] = set()
+    for raw in lines:
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        blocks = _content_blocks(entry)
+        if entry.get('type') == 'assistant':
+            asked = {
+                str(b.get('id')) for b in blocks if b.get('type') == 'tool_use' and b.get('name') == ASK_USER_TOOL
+            }
+        elif entry.get('type') == 'user':
+            asked -= {str(b.get('tool_use_id')) for b in blocks if b.get('type') == 'tool_result'}
+    return bool(asked)
+
+
 def brief_reply(cap: str) -> str:
     """Pane に出た依頼への返事 ('READY' / 'DEFER' / '')。依頼文より後ろの最後の 1 つを見る."""
     flat = ''.join(cap.split())
@@ -262,6 +359,12 @@ class Config:
     break_ctx_pct: int = field(default_factory=lambda: _int_env('WATCH_BREAK_CTX_PCT', 50))
     break_stops: int = field(default_factory=lambda: _int_env('WATCH_BREAK_STOPS', 8))
     break_minutes: int = field(default_factory=lambda: _int_env('WATCH_BREAK_MINUTES', 60))
+    # Dispatcher の区切り (ADR 0011 の 4.)。どれも勘で決めた初期値
+    dispatcher_break_ctx_pct: int = field(default_factory=lambda: _int_env('WATCH_DISPATCHER_BREAK_CTX_PCT', 50))
+    dispatcher_break_reports: int = field(default_factory=lambda: _int_env('WATCH_DISPATCHER_BREAK_REPORTS', 10))
+    dispatcher_break_hours: int = field(default_factory=lambda: _int_env('WATCH_DISPATCHER_BREAK_HOURS', 4))
+    dispatcher_human_quiet_min: int = field(default_factory=lambda: _int_env('WATCH_DISPATCHER_HUMAN_QUIET_MIN', 20))
+    dashboards_dir: Path = field(default_factory=lambda: REPO_ROOT / 'dashboards')
 
     @property
     def notify_dir(self) -> Path:
@@ -429,6 +532,12 @@ class Watcher:
         self._break_req: dict[int, dict] = {}  # 返事待ちの依頼 (watchd の中で完結するので state に残さない)
         self._break_retry_at: dict[int, float] = {}  # BRIEF-DEFER / 返事なしの後、次に依頼してよい monotonic 時刻
         self._worker_sent_at: dict[int, float] = {}  # watchd がこの worker に最後に送った wall clock
+        # Dispatcher の区切り (ADR 0011 の 4.)
+        self._disp_hash: str | None = None
+        self._disp_quiet = 0  # Dispatcher pane の hash が続けて変わらなかったサイクル数
+        self._disp_send_seq = 0  # watchd が Dispatcher pane に送った回数 (BRIEF-READY 後の送信を見つける)
+        self._disp_req: dict | None = None  # 返事待ちの BRIEF-REQUEST
+        self._disp_retry_at = float('-inf')  # BRIEF-DEFER / 返事なしの後、次に依頼してよい monotonic 時刻
 
     # ---- ログ / 通知 ----
 
@@ -446,14 +555,19 @@ class Watcher:
         """Monotonic clock (テストで差し替える)。watchd の中で完結する待ちに使う."""
         return time.monotonic()
 
-    def notify_dispatcher(self, msg: str) -> bool:
+    def notify_dispatcher(self, msg: str, *, human_origin: bool = False) -> bool:
         """Dispatcher pane へ 1 メッセージ送る.
 
         本文と Enter を 1 回の send-keys にまとめない: tmux 側で Enter が届かず次の
         メッセージと連結される事象があるため、間に sleep を挟んで別々に送る。
+        送る前に state/dispatcher.json の watchd_sent に残す (hook が受付時に照合する, ADR 0011 の 4.)。
+        human_origin は web の指示 (deliver_instructions) だけ True にする。
         """
         pane = self.tmux.target('dispatcher')
         self._sent_to_dispatcher = True
+        self._disp_send_seq += 1
+        self._disp_quiet = 0  # 送った後の画面が落ち着くまで (2 サイクル) は区切りを依頼しない
+        self._record_watchd_sent(msg, human_origin)
         if not self.tmux.send_keys(pane, msg):
             return False
         self.sleep(0.5)
@@ -461,6 +575,34 @@ class Watcher:
             return False
         self.sleep(0.3)
         return True
+
+    def _update_dispatcher_state(self, fn: object) -> dict | None:
+        """state/dispatcher.json を更新する。書けなくても送信や配達は止めない."""
+        try:
+            return ctx.update_state(_state_dir() / f'{DISPATCHER}.json', fn)  # type: ignore[arg-type]
+        except (OSError, ValueError) as e:
+            self.log(f'[WARN] state/{DISPATCHER}.json を更新できません: {e}')
+            return None
+
+    def _record_watchd_sent(self, msg: str, human_origin: bool) -> None:
+        rec = {'crc32': ctx.prompt_crc32(msg), 'at': ctx.now_iso(), 'human_origin': human_origin}
+
+        def fn(data: dict) -> None:
+            prev = data.get('watchd_sent')
+            data['watchd_sent'] = [*(prev if isinstance(prev, list) else []), rec][-WATCHD_SENT_KEEP:]
+
+        self._update_dispatcher_state(fn)
+
+    def _record_report_notified(self) -> None:
+        """完了報告 ([REPORT) を Dispatcher に配達した時刻を残す (最後の /clear からの件数を数える)."""
+        at = datetime.fromtimestamp(self.wall(), timezone.utc).isoformat(timespec='seconds')
+        keep = max(REPORT_NOTIFIED_KEEP, self.cfg.dispatcher_break_reports)
+
+        def fn(data: dict) -> None:
+            prev = data.get('report_notified_at')
+            data['report_notified_at'] = [*(prev if isinstance(prev, list) else []), at][-keep:]
+
+        self._update_dispatcher_state(fn)
 
     def _enqueue_notification(
         self, *, project: str, source: str, priority: str, message: str, dedupe_key: str
@@ -705,6 +847,7 @@ class Watcher:
         token = claim.token
         if enqueued and not invalid:
             self._archive_copy(path, report_id, sha, meta, data, mtime)
+            self._record_report_notified()
         if enqueued and self.ledger.commit(project, report_id, token):
             self._graph_dirty = True
             return
@@ -787,7 +930,9 @@ class Watcher:
         finally:
             os.close(lock)  # flock も外れる
 
-    def _deliver_one_instruction(self, files: list[Path], pane: str) -> None:
+    @staticmethod
+    def _next_instruction(files: list[Path]) -> tuple[Path, dict] | None:
+        """まだ渡していない (delivered_at も failed_at も無い) 最も古い web の指示."""
         for path in files:
             try:
                 data = json.loads(path.read_text())
@@ -795,9 +940,18 @@ class Watcher:
                 continue
             if isinstance(data, dict) and isinstance(data.get('body'), str) and data['body'].strip():
                 if not data.get('delivered_at') and not data.get('failed_at'):
-                    break
-        else:
+                    return path, data
+        return None
+
+    def _instruction_pending(self) -> bool:
+        d = self.cfg.queue_dir / 'instructions' / self.cfg.session
+        return self._next_instruction(sorted(d.glob('*.json'))) is not None
+
+    def _deliver_one_instruction(self, files: list[Path], pane: str) -> None:
+        found = self._next_instruction(files)
+        if found is None:
             return
+        path, data = found
         if detect_status(self.tmux.capture(pane))['status'] != 'idle':
             return
         now = datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -807,9 +961,9 @@ class Watcher:
         # 先頭を固定のタグにする: 本文が - で始まると tmux が option と読み、Enter 等の名前だけなら key と読む。
         # 末尾も固定: 引数の末尾の ; は tmux がコマンドの区切りとして食べる
         tag = f' [project: {project}]' if project else ''
-        msg = f'[squad-web 指示]{tag} {_flat(data["body"])} [id={_flat(path.stem)}]'
+        msg = f'{WEB_INSTRUCTION_PREFIX}{tag} {_flat(data["body"])} [id={_flat(path.stem)}]'
         self._graph_dirty = True
-        if self.notify_dispatcher(msg):
+        if self.notify_dispatcher(msg, human_origin=True):
             self.log(f'web からの指示を Dispatcher に渡しました: {path.name}')
             return
         self.log(f'[WARN] web からの指示を Dispatcher に送れませんでした (再送しない): {path.name}')
@@ -1111,20 +1265,25 @@ class Watcher:
 
     # ---- 3b. タスク途中の区切り (ADR 0011 の 2. と 5.) ----
 
-    def _break_eligible(self, n: int) -> bool:
+    def _break_eligible(self, n: int | str) -> bool:
         """途中の /clear を当ててよい worker か (ADR 0011 の 5.。判定はここ 1 か所に置く).
 
-        start.sh が書く agents-<session>.json で `claude` の w1-w3 だけ。ファイルが無い・読めない・
-        値が不明・claude-local・opencode、および Codex (w4) は区切らない。
+        start.sh が書く agents-<session>.json で `claude` の w1-w3 と Dispatcher だけ。ファイルが無い・
+        読めない・値が不明・claude-local・opencode、および Codex (w4) は区切らない。Dispatcher は
+        ファイルが読めるときだけ対象にする (start.sh を通らずに動いている session には当てない)。
         """
-        if n not in BREAK_WORKERS:
+        if n != DISPATCHER and n not in BREAK_WORKERS:
+            return False
+        if ARCHIVE_NAME_UNSAFE_RE.search(self.cfg.session):
             return False
         path = _state_dir() / f'agents-{self.cfg.session}.json'
         try:
             agents = json.loads(path.read_text())
         except (OSError, ValueError):
             return False
-        return isinstance(agents, dict) and agents.get(f'w{n}') == 'claude'
+        if not isinstance(agents, dict):
+            return False
+        return n == DISPATCHER or agents.get(f'w{n}') == 'claude'
 
     def _load_worker_state(self, n: int) -> dict:
         try:
@@ -1212,8 +1371,15 @@ class Watcher:
         self.sleep(0.5)
         return self.tmux.send_keys(pane, 'Enter')
 
-    def check_context_breaks(self) -> None:
-        """Pending の worker の ctx が溜まっていたら、brief を書かせて /clear し、brief から再開させる."""
+    def check_context_breaks(self, *, dispatcher: bool = False) -> None:
+        """Pending の worker の ctx が溜まっていたら、brief を書かせて /clear し、brief から再開させる.
+
+        dispatcher=True では Dispatcher 分 (ADR 0011 の 4.) だけを回す。cycle() はこちらを report_bridge()
+        より前に呼び、/clear と再開文を送ったサイクルの通知をその後に届ける。
+        """
+        if dispatcher:
+            self._check_dispatcher_break()
+            return
         for n in (1, 2, 3, 4):
             info = self._pending.get(n)
             req = self._break_req.get(n)
@@ -1315,6 +1481,147 @@ class Watcher:
         if not sent:
             self.log(f'[WARN] Worker{n} に /clear の後の RESUME を送れず。pane を確認してください')
         self.log(f'Worker{n}: /clear して brief から再開させた (break_count={brk.get("break_count")})')
+
+    # ---- 3c. Dispatcher の区切り (ADR 0011 の 4.) ----
+
+    def _dispatcher_brief(self) -> Path:
+        return self.cfg.dashboards_dir / f'{self.cfg.session}-brief.md'
+
+    def _load_dispatcher_state(self) -> dict:
+        try:
+            data = json.loads((_state_dir() / f'{DISPATCHER}.json').read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _dispatcher_break_reason(self, state: dict) -> str:
+        """区切る理由 (ctx:52% / reports:10 / hours:4)。成立しなければ ''. 上から最初に成立したものを返す.
+
+        「最後の /clear」は statusline が session_id の変化で書く last_clear_at。無ければ ctx 以外では区切らない。
+        """
+        now = self.wall()
+        r = ctx.resolve(state, self.cfg.session)
+        pct = r.get('context_pct')
+        at = _parse_iso(r.get('context_at'))
+        if isinstance(pct, int) and at is not None and now - at <= BREAK_CTX_FRESH_SECONDS:
+            return f'ctx:{pct}%' if pct >= self.cfg.dispatcher_break_ctx_pct else ''
+        cleared = _parse_iso(state.get('last_clear_at'))
+        if cleared is None:
+            return ''
+        notified = state.get('report_notified_at')
+        times = [_parse_iso(t) for t in notified] if isinstance(notified, list) else []
+        reports = sum(1 for t in times if t is not None and t >= cleared)
+        if reports >= self.cfg.dispatcher_break_reports:
+            return f'reports:{reports}'
+        hours = int((now - cleared) // 3600)
+        if now - cleared >= self.cfg.dispatcher_break_hours * 3600:
+            return f'hours:{hours}'
+        return ''
+
+    def _dispatcher_blocker(self, state: dict, cap: str) -> str:
+        """割り込まない理由 (ADR 0011 の 4.)。どれも当てはまらなければ ''."""
+        if detect_status(cap)['status'] != 'idle':
+            return 'busy'
+        if self._disp_quiet < BREAK_QUIET_CYCLES:
+            return 'pane-changing'
+        if self._sent_to_dispatcher:
+            return 'sent-this-cycle'
+        if self._instruction_pending():
+            return 'web-instruction'
+        human = _parse_iso(state.get('last_human_prompt_at'))
+        if human is not None and self.wall() - human < self.cfg.dispatcher_human_quiet_min * 60:
+            return 'human-input'
+        if brief_question_pending(self._dispatcher_brief()):
+            return 'question-in-brief'
+        path = state.get('transcript_path')
+        if ask_user_pending(path if isinstance(path, str) else ''):
+            return 'ask-user'
+        return ''
+
+    def _check_dispatcher_break(self) -> None:
+        if not self._break_eligible(DISPATCHER):
+            if self._disp_req is not None:
+                self.log('Dispatcher: 対象外になったので区切りの依頼を捨てる')
+                self._disp_req = None
+            return
+        pane = self.tmux.target(DISPATCHER)
+        if not self.tmux.pane_exists(pane):
+            return
+        cap = self.tmux.capture(pane)
+        h = hex(zlib.crc32(cap.encode('utf-8', 'replace')))
+        self._disp_quiet = self._disp_quiet + 1 if h == self._disp_hash else 0
+        self._disp_hash = h
+        state = self._load_dispatcher_state()
+        if self._disp_req is not None:
+            self._advance_dispatcher_break(pane, state, cap)
+            return
+        if self.mono() < self._disp_retry_at:
+            return
+        brk = state.get('break') if isinstance(state.get('break'), dict) else {}
+        last = _parse_iso(brk.get('last_break_at'))
+        if last is not None and self.wall() - last < BREAK_COOLDOWN_SECONDS:
+            return
+        reason = self._dispatcher_break_reason(state)
+        if not reason or self._dispatcher_blocker(state, cap):
+            return
+        self.log(f'Dispatcher: コンテキストを区切る (reason={reason}) -> BRIEF-REQUEST')
+        requested = self.wall()
+        if not self.notify_dispatcher(dispatcher_brief_request_text(reason, self.cfg.session)):
+            self.log('[WARN] Dispatcher に BRIEF-REQUEST を送れず (30 分後にやり直す)')
+            self._disp_retry_at = self.mono() + BREAK_RETRY_SECONDS
+            return
+        self._disp_req = {'wall': requested, 'mono': self.mono(), 'seq': self._disp_send_seq}
+
+    def _advance_dispatcher_break(self, pane: str, state: dict, cap: str) -> None:
+        """返事待ちの依頼を進める (流れは worker と同じ。BRIEF-READY 後に何か送っていたらやり直す)."""
+        req = self._disp_req
+        assert req is not None
+        if self.mono() - req['mono'] >= BREAK_REPLY_TIMEOUT:
+            self.log('Dispatcher: BRIEF-REQUEST に 10 分返事が無い -> /clear せず 30 分後にやり直す')
+            self._disp_req = None
+            self._disp_retry_at = self.mono() + BREAK_RETRY_SECONDS
+            return
+        reply = brief_reply(cap)
+        if reply == 'DEFER':
+            self.log('Dispatcher: BRIEF-DEFER -> 30 分は依頼しない')
+            self._disp_req = None
+            self._disp_retry_at = self.mono() + BREAK_RETRY_SECONDS
+            return
+        if reply != 'READY':
+            # BRIEF-READY が出ていない画面を見た。ここまでの送信は BRIEF-READY より前なので brief に入りうる
+            req['seq'] = self._disp_send_seq
+            return
+        if self._disp_send_seq != req['seq']:
+            # BRIEF-READY が出た後に送ったかもしれない通知が /clear で文脈から消えるので、この回はやり直す
+            self.log('Dispatcher: BRIEF-READY の後に watchd が送ったので /clear せずやり直す')
+            self._disp_req = None
+            return
+        blocker = self._dispatcher_blocker(state, cap)
+        if blocker:
+            return
+        try:
+            fresh = self._dispatcher_brief().stat().st_mtime > req['wall']
+        except OSError:
+            fresh = False
+        if not fresh:
+            return  # brief が書き直されていなければ /clear しない (10 分で諦める)
+        self._disp_req = None
+        if not self.notify_dispatcher('/clear'):
+            self.log('[WARN] Dispatcher に /clear を送れず (30 分後にやり直す)')
+            self._disp_retry_at = self.mono() + BREAK_RETRY_SECONDS
+            return
+        self.sleep(BREAK_CLEAR_WAIT)
+        sent = self.notify_dispatcher(dispatcher_resume_text(self.cfg.session))
+        at = datetime.fromtimestamp(self.wall(), timezone.utc).isoformat(timespec='seconds')
+
+        def fn(data: dict) -> None:
+            prev = data.get('break') if isinstance(data.get('break'), dict) else {}
+            data['break'] = {**prev, 'break_count': (prev.get('break_count') or 0) + 1, 'last_break_at': at}
+
+        self._update_dispatcher_state(fn)
+        if not sent:
+            self.log('[WARN] Dispatcher に /clear の後の RESUME を送れず。pane を確認してください')
+        self.log('Dispatcher: /clear して brief から再開させた')
 
     def _notify_break_limit(self, n: int, project: str, task_id: str, brief: Path) -> None:
         msg = (
@@ -1617,6 +1924,11 @@ class Watcher:
         """1 サイクル分の監視処理."""
         self._sent_to_dispatcher = False
         self.refresh_owned_projects()
+        # Dispatcher の区切りは report_bridge() より前に回す。/clear と再開文を送ったサイクルの通知は後に届く
+        try:
+            self.check_context_breaks(dispatcher=True)
+        except Exception as e:  # noqa: BLE001 (区切りの失敗で watcher を止めない。区切らない側に倒す)
+            self.log(f'[WARN] Dispatcher の区切りの判定に失敗 (今回は区切らない): {e}')
         self.report_bridge()
         self.deliver_instructions()
         self.sync_graph()

@@ -52,7 +52,8 @@
 
 これらから「**仕掛かり中のタスク / 未処理 inbox / blocked(要人間判断) の有無**」を
 3-5 行でユーザーに提示し、指示を仰ぐ。**勝手に再開・再起票はしない**
-（自動再開は事故のもと。再開するかはユーザーが決める）。状態ファイルが無ければ
+（自動再開は事故のもと。再開するかはユーザーが決める）。watchd の `[RESUME dispatcher]` で
+起動した場合だけは例外で、brief の 2. と 3. を続けてよい（→「コンテキスト管理 / Dispatcher 自身」）。状態ファイルが無ければ
 「新規セッション、仕掛かりなし」とだけ伝える。
 
 ## 利用可能なワーカー
@@ -274,13 +275,15 @@ follow-up の修正 task を作らない。**
 # Claude worker (モデル切替込み)
 scripts/notify-worker.sh W2 "新しいタスクがあります。{SQUAD_ROOT}/queue/projects/<project>/tasks/worker2.yaml を確認してください。" --model sonnet
 
-# stale worker を作り直して渡す場合
-scripts/notify-worker.sh W1 "....worker1.yaml を確認してください。" --clear --model sonnet
+# 前の文脈が要る続き (自分の PR の review 修正など) だけ /clear を外す。task YAML の keep_context: true と揃える
+scripts/notify-worker.sh W1 "....worker1.yaml を確認してください。" --keep-context --model sonnet
 
 # Codex worker (W4。--model は自動無視される)
 scripts/notify-worker.sh W4 "新しいタスクがあります。{SQUAD_ROOT}/queue/projects/<project>/tasks/worker4.yaml を確認してください。"
 ```
 
+W1-W3 には毎回本文の前に `/clear` を送る (既定。`--clear` は互換のため受け付けるが何もしない)。
+外すのは `--keep-context` だけで、task YAML の `context.keep_context: true` と対にする。
 送信後に pane 末尾を表示するので着手を確認できる。モデル未指定 → worker 既定のまま。
 パス指定は絶対パス必須 (worker の cwd が PJ workspace のため相対パスは無効)。
 
@@ -597,21 +600,69 @@ Dispatcher はイベント要約（task_id / worker / 状態変化 / 成果物 /
 
 ### Dispatcher 自身
 
-- **コンテキスト残量が 20% を切ったら** `/compact` 実行。定期的な予防 compact はしない
-  （長いコンテキストを保っても指示追従は劣化しない一方、compact は状態を失う）
+`/compact` は使わない (要約の中身を選べず、確認待ちや約束が抜けても気付けない)。区切りは watchd が
+`BRIEF-REQUEST` で依頼し、brief を書いてから `/clear` する (ADR 0011)。
+
+**brief** は `dashboards/<session>-brief.md` (gitignore 済み)。dashboard に載る worker 状態やタスク表は
+写さず、次の 4 項目だけを書く。見出しの文言は変えない。
+
+```markdown
+# dispatcher brief: <session>
+- updated_at: <TZ 付き ISO8601>
+
+## 1. 人間への確認待ち
+質問、聞いた時刻、選択肢、答えが来たら何をするか。無ければ「- なし」だけを書く。
+## 2. 約束した次の行動
+誰に何をするか、何が起きたら (どの report が来たら) するか。
+## 3. 進行中のやりとり
+cross-review の往復、人間と相談中の論点、モデルを切り替えたまま戻していない worker など。
+## 4. 再開の手がかり
+読むべき dashboards/<pj>.md、最後に処理した report_id、未 ack の通知。
+```
+
+- **人間に質問して turn を終える前に** 1. を書く。答えを受けたら 1. から消す。1. に「- なし」以外の行が
+  あるあいだ watchd は区切らない。
+- **約束をしたとき** (「report が来たら W4 に review を出す」など) は 2. に書く。
+
+**BRIEF-REQUEST を受けたら** (watchd が次の 1 行を送る。`reason` は `ctx:52%` / `reports:10` / `hours:4` の形):
+
+```
+[BRIEF-REQUEST dispatcher reason=<ctx:52% | reports:10 | hours:4>] コンテキストを区切ります。dashboards/<session>-brief.md を 4 項目で書き直し、dashboards/<pj>.md も最新にしてから BRIEF-READY とだけ返してください。人間とのやりとりの途中など今は区切れないときは BRIEF-DEFER <理由> と返してください。
+```
+
+1. brief を上の形式で書き直し (Write で丸ごと書く)、動きのある `dashboards/<pj>.md` を最新にする。
+2. 書けたら `BRIEF-READY` とだけ返して turn を終える。他の文は付けない。watchd は brief の更新時刻と
+   この返事を見てから `/clear` する。
+3. 人間とのやりとりの途中など今は区切れないときは brief を書かず `BRIEF-DEFER <理由>` と返す。
+   watchd は 30 分は依頼しない。
+
+**RESUME を受けたら** (`/clear` の後に watchd が送る):
+
+```
+[RESUME dispatcher] /clear 後の再開です。dashboards/<session>-brief.md を読み、instructions/dispatcher.md の「セッション開始時（状態復元）」の 0-5 を行ってから、brief の 2. と 3. を続けてください。
+```
+
+brief を読み、「セッション開始時（状態復元）」の 0-5 を行ってから、brief の 2. と 3. を**人間に聞かずに**
+続けてよい。「勝手に再開・再起票はしない」は `RESUME` が無い起動時 (人間が起動した・人間が `/clear` した)
+の規則として残る。
+
 - タスクYAML は簡潔に書く。テンプレートの項目を埋めるに留め、
   水増しの説明セクションや要約の重複を足さない
 
 ### Worker 管理 (Claude のみ)
 
-- ワーカーの状態確認時にコンテキスト残量もチェック
-- 残量 20% 以下のワーカーには新タスクを振る前に `/clear` を指示
+- タスク通知の `/clear` は既定になった。`notify-worker.sh` は Codex 以外の worker に毎回 `/clear`
+  (Opencode は `/new`) を送ってからタスクを渡す (→「tmux 通知」)。
+- 前の文脈を残したいときだけ task YAML に `context.keep_context: true` を書く (`squad assign` が
+  `--keep-context` を付ける)。使うのは、同じ worker に前の文脈が要る続きを振るとき
+  (自分の PR の review 修正、同じタスクの差し戻しなど) に限る。
+- タスク途中の区切りは watchd が worker に `BRIEF-REQUEST` を送って行う。Dispatcher から `/clear` を
+  指示しなくてよい。`[BREAK-LIMIT]` が来たら pane と brief を確認する。
 - コンテキストリミットで停止したワーカーには `/clear` → タスク再送
 
 **pane ステータス行は全項目が「使用率」**（2026-08-20 の statusline.py 改修以降）。
 `Opus 5 | Usage | 5h:9%~09:09 | 7d:74%~8/24 | ctx:29%` の `ctx:29%` は 29% **使用済み**
-（残り 71%）で、**数字が大きい worker ほど危険**。80% を超えていたら
-`notify-worker.sh --clear` を使う。旧表記の `S:` / `W:` / `C:` は廃止。
+（残り 71%）で、**数字が大きい worker ほど危険**。旧表記の `S:` / `W:` / `C:` は廃止。
 （改修前は使用率と残量が同じ行に混在しており、W1 の `ctx 0%`＝枯渇を「クリーン」と
 読み違えて大規模タスクを投入した事故があった。）
 
