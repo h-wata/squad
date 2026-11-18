@@ -331,3 +331,27 @@ def test_next_rules_are_optional(tmp_path: Path) -> None:
     for data in (GOOD, {**GOOD, **rules}):
         path = _write(tmp_path, data)
         assert _item16(check_task_yaml(path, collect_task_id_locations([path]))) == ['OK', 'OK']
+
+
+def _item17(results: list) -> str:
+    return _statuses(results, 17)
+
+
+@pytest.mark.parametrize('value', [True, False])
+def test_keep_context_bool_is_ok(tmp_path: Path, value: bool) -> None:
+    path = _write(tmp_path, {**GOOD, 'context': {'keep_context': value}})
+    results = check_task_yaml(path, collect_task_id_locations([path]))
+    assert _item17(results) == 'OK'
+    assert not any(r.status == 'NG' for r in results)
+
+
+@pytest.mark.parametrize('value', ['true', 'yes', 1, 0, None, ['true']])
+def test_keep_context_non_bool_is_ng(tmp_path: Path, value: object) -> None:
+    path = _write(tmp_path, {**GOOD, 'context': {'keep_context': value}})
+    assert _item17(check_task_yaml(path, collect_task_id_locations([path]))) == 'NG'
+
+
+def test_keep_context_is_optional(tmp_path: Path) -> None:
+    for data in (GOOD, {**GOOD, 'context': {'workspace': str(tmp_path)}}):
+        path = _write(tmp_path, data)
+        assert _item17(check_task_yaml(path, collect_task_id_locations([path]))) == 'OK'

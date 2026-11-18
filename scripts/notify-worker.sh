@@ -9,20 +9,24 @@
 # 送信後に「届いたか (submitted)」と「走り出したか (started)」を別々に確認して報告する。
 #
 # 使い方:
-#   scripts/notify-worker.sh <W1|W2|W3|W4|window|pane> "<message>" [--model <opus|sonnet|haiku>] [--clear] [--no-new]
+#   scripts/notify-worker.sh <W1|W2|W3|W4|window|pane> "<message>" [--model <opus|sonnet|haiku>] [--keep-context] [--clear] [--no-new]
 #
 # 例:
 #   scripts/notify-worker.sh W2 "新しいタスクがあります。.../worker2.yaml を確認してください。"
 #   scripts/notify-worker.sh W1 "....worker1.yaml を確認してください。" --model sonnet
-#   scripts/notify-worker.sh W2 "....worker2.yaml を確認してください。" --clear --model sonnet
-#   (Opencode worker への --clear は /new + 起動時と同じ bootstrap を送り、「W{N} 待機中」を待つ)
+#   scripts/notify-worker.sh W2 "....worker2.yaml を確認してください。" --model sonnet
+#   (W1-W3 は既定で本文の前に /clear する。Opencode worker は /new + 起動時と同じ bootstrap を送り、「W{N} 待機中」を待つ)
+#   scripts/notify-worker.sh W2 "....worker2.yaml を確認してください。" --keep-context  # /clear しない
 #   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。"          # /new 自動送信
 #   scripts/notify-worker.sh W4 "....worker4.yaml を確認してください。" --no-new  # /new をスキップ
 #
 # 環境変数:
 #   SQUAD_SESSION  tmux セッション名 (既定: ros-agents)
 #
-# W4(Codex): 毎回 /new でフレッシュ会話を開始しクレジット累積を抑制。--no-new で抑制可。
+# タスク通知の /clear は既定 (ADR 0011)。前の文脈が要る続きのタスクだけ --keep-context で外す
+# (squad assign は task YAML の context.keep_context: true でこれを付ける)。
+# --clear は互換のため受け付けるが何もしない。Dispatcher / term / aux 宛ては /clear しない。
+# W4(Codex): 毎回 /new でフレッシュ会話を開始しクレジット累積を抑制。--keep-context か --no-new で抑制可。
 set -euo pipefail
 
 SESSION="${SQUAD_SESSION:-ros-agents}"
@@ -43,7 +47,7 @@ if [ -z "${SQUAD_SESSION:-}" ]; then
 fi
 
 usage() {
-  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -52,13 +56,14 @@ usage() {
 WORKER="$1"; shift
 MESSAGE="$1"; shift
 MODEL=""
-DO_CLEAR=0
+KEEP_CONTEXT=0
 NO_NEW=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) MODEL="${2:-}"; shift 2 ;;
-    --clear) DO_CLEAR=1; shift ;;
+    --keep-context) KEEP_CONTEXT=1; shift ;;
+    --clear) shift ;;  # 互換のため受け付ける。/clear は既定なので何もしない (ADR 0011)
     --no-new) NO_NEW=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown arg: $1" >&2; usage 1 ;;
@@ -77,6 +82,14 @@ case "${WORKER,,}" in
   *) echo "unknown worker/window: $WORKER (expected W1..W4, a window name like w1, or pane like 0.1)" >&2; exit 1 ;;
 esac
 IS_CODEX=$([ "$WIN" = "w4" ] && echo 1 || echo 0)
+# --keep-context は Codex では --no-new と同じ (/new を送らない)
+[ "$IS_CODEX" -eq 1 ] && [ "$KEEP_CONTEXT" -eq 1 ] && NO_NEW=1
+# タスク単位の /clear の対象は w1-w3 だけ。Dispatcher / term / aux に /clear を送ると
+# 作業中の文脈を消してしまう
+DO_CLEAR=0
+case "$WIN" in
+  w[1-3]) [ "$KEEP_CONTEXT" -eq 0 ] && DO_CLEAR=1 ;;
+esac
 # WORKER_NUM は Opencode の「W{N} 待機中」用。旧構成の pane (window 0 を 7 pane に分けていた頃) は
 # マージ前から動いているセッション用
 case "$WIN" in
@@ -248,11 +261,9 @@ send_line() {
   return 1
 }
 
-# --clear (Claude は /clear、Opencode は /new + bootstrap。Codex には /clear 概念が無いのでスキップ)
+# タスク単位の /clear (Claude は /clear、Opencode は /new + bootstrap。Codex は後段の /new)
 if [ "$DO_CLEAR" -eq 1 ]; then
-  if [ "$IS_CODEX" -eq 1 ]; then
-    echo "[notify-worker] W4(Codex) には --clear は無効。スキップします。" >&2
-  elif [ "$IS_OPENCODE" -eq 1 ]; then
+  if [ "$IS_OPENCODE" -eq 1 ]; then
     # /new が落ちると旧会話のまま bootstrap と本文が進むので、Opencode が出す
     # 「new session ses_...」の行が増えたことで届いたと確かめる (/new は短く、send_line の
     # 本文プローブ (ASCII 8 文字以上) では確認できない)

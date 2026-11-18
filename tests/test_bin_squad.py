@@ -132,3 +132,37 @@ def test_two_sessions_keep_default_and_warn(fake_root: Path, tmp_path: Path, pid
     assert a in r.stderr and b in r.stderr
     assert 'SQUAD_SESSION=<name>' in r.stderr
     assert len(r.stderr.strip().splitlines()) == 1
+
+
+def _assign_dry_run(tmp_path: Path, task_body: str) -> str:
+    task = tmp_path / 'worker2.yaml'
+    task.write_text(task_body)
+    r = _run(REPO / 'bin' / 'squad', 'assign', 'w2', str(task), '--dry-run', cwd=tmp_path, session='scratch-s')
+    assert r.returncode == 0, r.stderr
+    return next(ln for ln in r.stdout.splitlines() if ln.startswith('[assign] cmd:'))
+
+
+def test_assign_does_not_pass_keep_context_by_default(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\ncontext:\n  workspace: /x\n')
+    assert '--keep-context' not in cmd
+
+
+def test_assign_passes_keep_context_when_task_yaml_says_true(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\ncontext:\n  keep_context: true\n')
+    assert '--keep-context' in cmd
+
+
+@pytest.mark.parametrize('value', ['false', 'no'])
+def test_assign_ignores_keep_context_unless_true(tmp_path: Path, value: str) -> None:
+    cmd = _assign_dry_run(tmp_path, f'task_id: T\nagent: claude\ncontext:\n  keep_context: {value}\n')
+    assert '--keep-context' not in cmd
+
+
+def test_assign_ignores_keep_context_outside_context(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\nkeep_context: true\n')
+    assert '--keep-context' not in cmd
+
+
+def test_assign_passes_keep_context_to_codex_as_no_new(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: codex\ncontext:\n  keep_context: true\n')
+    assert '--keep-context' in cmd

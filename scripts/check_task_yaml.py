@@ -304,6 +304,16 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
         else:
             results.append(Result(16, 'OK', f'{key}: step={rule["step"]} assign={rule["assign"]}'))
 
+    # 17. context.keep_context (#105, 任意)。true なら squad assign が notify-worker.sh の /clear を外す
+    if isinstance(context, dict) and 'keep_context' in context:
+        keep = context['keep_context']
+        if isinstance(keep, bool):
+            results.append(Result(17, 'OK', f'context.keep_context: {keep}'))
+        else:
+            results.append(Result(17, 'NG', f'context.keep_context は true / false にしてください: {keep!r}'))
+    else:
+        results.append(Result(17, 'OK', 'context.keep_context はありません (既定: /clear する)'))
+
     return results
 
 
