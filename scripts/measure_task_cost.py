@@ -38,12 +38,14 @@ worker が task 着手前後に呼んで report YAML の `quota_5h_before_pct` �
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 import json
 import os
 from pathlib import Path
 import re
+import statistics
 import subprocess
 import sys
 
@@ -171,6 +173,64 @@ def parse_iso8601(value: str) -> datetime | None:
     # オフセット無しは worker が手元の時計で書いた値なので、ローカル時刻として読む
     # (UTC として読むと JST では 9 時間ずれる, #72)。naive の astimezone() はローカル時刻扱い
     return dt.astimezone(timezone.utc)
+
+
+def parse_aware_iso8601(value: str) -> datetime | None:
+    """TZ 付き ISO8601 だけを UTC の aware datetime にする. TZ 無しや読めない値は None."""
+    text = (value or '').strip()
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def extract_task_created_at(task_meta: dict[str, str]) -> tuple[str | None, str | None, str | None]:
+    """Task YAML の `created_at` を (UTC ISO8601, error, 元の値) にする (ADR 0011 Decision 6).
+
+    欠損は error=missing、読めない・TZ 無しは error=invalid。measured_at や mtime では代用しない。
+    """
+    raw = task_meta.get('created_at', '').strip()
+    if not raw:
+        return None, 'missing', None
+    parsed = parse_aware_iso8601(raw)
+    if parsed is None:
+        return None, 'invalid', raw
+    return parsed.isoformat(), None, raw
+
+
+def worker_dir_projects(project: str, worker: str) -> Path | None:
+    """Worker 専用の `config/claude-worker/<session>/w<n>/projects/` (ADR 0010). 無ければ None.
+
+    session は project の `.squad_session` から引く。
+    """
+    match = re.fullmatch(r'worker(\d+)', worker)
+    if not match:
+        return None
+    marker = QUEUE_ROOT / 'queue' / 'projects' / project / '.squad_session'
+    try:
+        session = marker.read_text(encoding='utf-8').strip()
+    except OSError:
+        return None
+    if not session or '/' in session or session.startswith('.'):
+        return None
+    path = REPO_ROOT / 'config' / 'claude-worker' / session / f'w{match.group(1)}' / 'projects'
+    return path if path.is_dir() else None
+
+
+def read_break_count(project: str, task_id: str) -> int:
+    """Brief の `break_count:` を読む. brief が無い・読めないなら 0."""
+    path = QUEUE_ROOT / 'queue' / 'projects' / project / 'briefs' / f'{task_id}.md'
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return 0
+    m = re.search(r'^\s*-\s*break_count:\s*(\d+)\s*$', text, re.MULTILINE)
+    return int(m.group(1)) if m else 0
 
 
 def session_dirs_for(task_text: str) -> list[Path]:
@@ -398,6 +458,11 @@ def measure(project: str, task_id: str) -> dict:
         # 拾うと誤った値になるので、usage は数えずに unknown とする (#72)
         attribution = 'unavailable'
         notes.append('agent: opencode は Claude Code の transcript を残さないため token は unknown')
+    elif worker_projects := worker_dir_projects(project, report_meta.get('worker', task_meta.get('assigned_to', ''))):
+        # worker 専用 dir があれば優先する。/clear で session が分かれても区間内を全部足せる (#105)
+        attribution = 'worker_dir'
+        # main の jsonl だけ (<session>/subagents/ 配下は数えない)
+        jsonl_paths = sorted(worker_projects.glob('*/*.jsonl'))
     elif session_id:
         exact_path = find_session_transcript(session_id)
         if exact_path is not None:
@@ -409,7 +474,7 @@ def measure(project: str, task_id: str) -> dict:
                 '見つからず approximate にフォールバック',
             )
 
-    if attribution == 'unavailable':
+    if attribution in ('unavailable', 'worker_dir'):
         pass
     elif attribution == 'approximate':
         session_dirs = session_dirs_for(task_text)
@@ -425,6 +490,7 @@ def measure(project: str, task_id: str) -> dict:
         if attribution != 'unavailable':
             notes.append('集計区間が不完全 (開始/終了のいずれかが不明) なため usage 集計をスキップ (unknown)')
         usage = {'corrupt_lines': 0, 'usage_missing': 0, 'session_ids': set(), 'matched_messages': 0}
+        sessions = 0
         totals = dict.fromkeys(('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens'), 0)
         has_usage = False
     else:
@@ -442,6 +508,7 @@ def measure(project: str, task_id: str) -> dict:
             notes.append('時間窓に一致する assistant message が 0 件 (usage は unknown)')
         has_usage = usage['matched_messages'] > 0
         totals = usage['totals']
+        sessions = len(usage['session_ids'] - {''})
 
     wall_clock_sec = (end - start).total_seconds() if (start is not None and end is not None) else None
 
@@ -449,6 +516,14 @@ def measure(project: str, task_id: str) -> dict:
     for label, delta in (('5h', quota['quota_5h_delta_pct']), ('7d', quota['quota_7d_delta_pct'])):
         if delta is not None and delta < 0:
             notes.append(f'quota_{label}_delta_pct が負 ({delta}) — 集計区間中に usage limit の reset を跨いだ可能性')
+
+    created_at, created_at_error, created_at_raw = extract_task_created_at(task_meta)
+    if task_path is None:
+        created_at_error = 'missing'
+    elif created_at_error == 'invalid':
+        notes.append(f'task YAML の created_at が TZ 付き ISO8601 として読めない: {created_at_raw}')
+    elif created_at_error == 'missing':
+        notes.append('task YAML に created_at が無い (task_created_at は null)')
 
     record = {
         'task_id': task_id,
@@ -463,6 +538,11 @@ def measure(project: str, task_id: str) -> dict:
         'output_tokens': totals['output_tokens'] if has_usage else None,
         'cache_read_tokens': totals['cache_read_tokens'] if has_usage else None,
         'cache_creation_tokens': totals['cache_creation_tokens'] if has_usage else None,
+        'total_tokens': sum(totals.values()) if has_usage else None,
+        'sessions': sessions,
+        'breaks': read_break_count(project, task_id),
+        'task_created_at': created_at,
+        'task_created_at_error': created_at_error,
         'wall_clock_sec': wall_clock_sec,
         'attribution': attribution,
         'quota_5h_delta_pct': quota['quota_5h_delta_pct'],
@@ -475,6 +555,76 @@ def measure(project: str, task_id: str) -> dict:
     if bench := extract_bench(task_text):
         record['bench'] = bench
     return record
+
+
+COMPARE_ATTRIBUTIONS = ('exact', 'worker_dir')
+
+
+def load_latest_records(path: Path) -> list[dict]:
+    """task_costs.jsonl を project + task_id ごとの最新 1 件 (後ろの行が新しい) にまとめる. 読むだけ."""
+    latest: dict[tuple[str, str], dict] = {}
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict):
+            latest[(str(rec.get('project')), str(rec.get('task_id')))] = rec
+    return list(latest.values())
+
+
+def _fmt_stat(values: list[int], func: Callable[[list[int]], float]) -> str:
+    return f'{func(values):.0f}' if values else '-'
+
+
+def compare(cutover: str, metrics_path: Path | None = None) -> str:
+    """Cutover 前後の total_tokens / cache_read_tokens を model x agent ごとに Markdown 表で返す (ADR 0011)."""
+    cut = parse_aware_iso8601(cutover)
+    if cut is None:
+        raise ValueError(f'cutover は TZ 付き ISO8601 で指定してください: {cutover!r}')
+    excluded = {'missing': 0, 'invalid': 0, '項目なし': 0, 'attribution 対象外': 0}
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for rec in load_latest_records(metrics_path or METRICS_PATH):
+        if rec.get('attribution') not in COMPARE_ATTRIBUTIONS:
+            excluded['attribution 対象外'] += 1
+            continue
+        if 'task_created_at' not in rec:
+            excluded['項目なし'] += 1
+            continue
+        created = parse_aware_iso8601(rec['task_created_at']) if isinstance(rec['task_created_at'], str) else None
+        if created is None:
+            # 保存値が null のとき理由は task_created_at_error (想定外の値は invalid 扱い)
+            excluded['missing' if rec.get('task_created_at_error') == 'missing' else 'invalid'] += 1
+            continue
+        side = 'before' if created < cut else 'after'
+        groups.setdefault((str(rec.get('model')), str(rec.get('agent')), side), []).append(rec)
+
+    lines = [
+        f'cutover: {cut.isoformat()}',
+        '',
+        '| model | agent | 期間 | 件数 | total_tokens 中央値 | total_tokens 平均 | cache_read_tokens 中央値 | '
+        'cache_read_tokens 平均 |',
+        '|---|---|---|---|---|---|---|---|',
+    ]
+    for (model, agent, side), recs in sorted(
+        groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2] != 'before')
+    ):
+        totals = [r['total_tokens'] for r in recs if isinstance(r.get('total_tokens'), int)]
+        caches = [r['cache_read_tokens'] for r in recs if isinstance(r.get('cache_read_tokens'), int)]
+        lines.append(
+            f'| {model} | {agent} | {side} | {len(recs)} | {_fmt_stat(totals, statistics.median)} | '
+            f'{_fmt_stat(totals, statistics.mean)} | {_fmt_stat(caches, statistics.median)} | '
+            f'{_fmt_stat(caches, statistics.mean)} |',
+        )
+    lines += ['', '除外した件数:']
+    lines += [f'- {reason}: {count}' for reason, count in excluded.items()]
+    return '\n'.join(lines)
 
 
 def summarize(record: dict) -> str:
@@ -501,7 +651,22 @@ def main() -> None:
             '手動で転記する運用を想定 (--project/--task-id とは併用しない)。'
         ),
     )
+    parser.add_argument(
+        '--compare',
+        action='store_true',
+        help='metrics/task_costs.jsonl を --cutover の前後で比べ、Markdown の表を出す (--cutover 必須)',
+    )
+    parser.add_argument('--cutover', help='--compare の境目。TZ 付き ISO8601 (例: 2026-11-18T17:00:00+09:00)')
     args = parser.parse_args()
+
+    if args.compare:
+        if not args.cutover:
+            parser.error('--compare には --cutover が必要です')
+        try:
+            print(compare(args.cutover))
+        except ValueError as e:
+            parser.error(str(e))
+        return
 
     if args.quota_snapshot:
         print(json.dumps(get_quota_snapshot(), ensure_ascii=False))

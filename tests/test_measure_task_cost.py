@@ -46,10 +46,10 @@ def _setup_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, 
     return tasks_dir, reports_dir
 
 
-def _write_task(tasks_dir: Path, *, mtime: datetime | None = None) -> Path:
+def _write_task(tasks_dir: Path, *, mtime: datetime | None = None, extra: str = '') -> Path:
     path = tasks_dir / 'worker1.yaml'
     path.write_text(
-        f'task_id: {TASK_ID}\nproject: {PROJECT}\nassigned_to: worker1\nagent: claude\nmodel: "sonnet"\n',
+        f'task_id: {TASK_ID}\nproject: {PROJECT}\nassigned_to: worker1\nagent: claude\nmodel: "sonnet"\n{extra}',
         encoding='utf-8',
     )
     if mtime is not None:
@@ -579,3 +579,221 @@ def test_transcript_under_per_worker_config_dir_is_found(tmp_path: Path, monkeyp
     record = mtc.measure(PROJECT, TASK_ID)
 
     assert record['attribution'] == 'exact'
+
+
+# --- #105 の 5: worker_dir 集計 / task_created_at / --compare ---
+
+
+def _setup_worker_dir(tmp_path: Path, session: str = 'sq', worker: str = 'w1') -> Path:
+    """config/claude-worker/<session>/w<n>/projects/<encoded-cwd>/ を作って返す."""
+    pj_dir = mtc.QUEUE_ROOT / 'queue' / 'projects' / PROJECT
+    (pj_dir / '.squad_session').write_text(session + '\n', encoding='utf-8')
+    d = mtc.REPO_ROOT / 'config' / 'claude-worker' / session / worker / 'projects' / '-work-ws'
+    d.mkdir(parents=True)
+    return d
+
+
+def test_worker_dir_sums_all_sessions_in_window_and_counts_breaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 7, 0, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat())
+    wdir = _setup_worker_dir(tmp_path)
+    brief_dir = mtc.QUEUE_ROOT / 'queue' / 'projects' / PROJECT / 'briefs'
+    brief_dir.mkdir()
+    (brief_dir / f'{TASK_ID}.md').write_text(f'# brief: {TASK_ID}\n- break_count: 2\n', encoding='utf-8')
+
+    u = {'input_tokens': 10, 'output_tokens': 20, 'cache_read_input_tokens': 100, 'cache_creation_input_tokens': 5}
+    (wdir / 'a.jsonl').write_text(
+        '\n'.join(
+            [
+                _assistant_line(start - timedelta(minutes=1), session_id='a', usage=u),
+                _assistant_line(start + timedelta(minutes=1), session_id='a', usage=u),
+            ]
+        )
+        + '\n',
+        encoding='utf-8',
+    )
+    (wdir / 'b.jsonl').write_text(
+        '\n'.join(
+            [
+                _assistant_line(start + timedelta(minutes=30), session_id='b', usage=u),
+                _assistant_line(end + timedelta(minutes=1), session_id='b', usage=u),
+            ]
+        )
+        + '\n',
+        encoding='utf-8',
+    )
+    sub = wdir / 'a' / 'subagents'
+    sub.mkdir(parents=True)
+    (sub / 'agent-x.jsonl').write_text(
+        _assistant_line(start + timedelta(minutes=2), session_id='x', usage=u) + '\n', encoding='utf-8'
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'worker_dir'
+    assert record['input_tokens'] == 20
+    assert record['cache_read_tokens'] == 200
+    assert record['total_tokens'] == 2 * (10 + 20 + 100 + 5)
+    assert record['sessions'] == 2
+    assert record['breaks'] == 2
+
+
+def test_worker_dir_preferred_over_session_id_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=(start + timedelta(hours=1)).isoformat(), session_id='sid-1')
+    wdir = _setup_worker_dir(tmp_path)
+    (wdir / 'sid-1.jsonl').write_text(
+        _assistant_line(start + timedelta(minutes=1), session_id='sid-1', usage={'input_tokens': 1}) + '\n',
+        encoding='utf-8',
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'worker_dir'
+
+
+def test_no_worker_dir_keeps_legacy_attribution_and_zero_breaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=(start + timedelta(hours=1)).isoformat())
+    session_dir = _session_dir_for_repo_root(mtc.CLAUDE_PROJECTS, mtc.REPO_ROOT)
+    (session_dir / 's.jsonl').write_text(
+        _assistant_line(start + timedelta(minutes=1), usage={'input_tokens': 3, 'output_tokens': 4}) + '\n',
+        encoding='utf-8',
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['attribution'] == 'approximate'
+    assert record['total_tokens'] == 7
+    assert record['sessions'] == 1
+    assert record['breaks'] == 0
+
+
+def test_total_tokens_is_none_when_usage_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _setup_repo(tmp_path, monkeypatch)
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['total_tokens'] is None
+    assert record['sessions'] == 0
+
+
+@pytest.mark.parametrize(
+    ('line', 'expected', 'error'),
+    [
+        ('created_at: "2026-11-18T17:09:46+09:00"\n', '2026-11-18T08:09:46+00:00', None),
+        ('created_at: "2026-11-18T08:09:46Z"\n', '2026-11-18T08:09:46+00:00', None),
+        ('', None, 'missing'),
+        ('created_at: ""\n', None, 'missing'),
+        ('created_at: "2026-11-18T17:09:46"\n', None, 'invalid'),
+        ('created_at: "yesterday"\n', None, 'invalid'),
+    ],
+)
+def test_task_created_at_three_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str, expected: str | None, error: str | None
+) -> None:
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    _write_task(tasks_dir, mtime=datetime(2030, 1, 1, tzinfo=timezone.utc), extra=line)
+    _write_report(reports_dir, completed_at='2026-11-18T10:00:00+00:00')
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['task_created_at'] == expected
+    assert record['task_created_at_error'] == error
+    if error == 'invalid':
+        assert 'created_at' in record['notes']
+
+
+def _rec(
+    task_id: str,
+    created: str | None,
+    *,
+    error: str | None = None,
+    attribution: str = 'worker_dir',
+    model: str = 'sonnet',
+    agent: str = 'claude',
+    total: int | None = 100,
+    cache: int | None = 60,
+    with_field: bool = True,
+    project: str = PROJECT,
+) -> dict:
+    rec = {
+        'task_id': task_id,
+        'project': project,
+        'model': model,
+        'agent': agent,
+        'attribution': attribution,
+        'total_tokens': total,
+        'cache_read_tokens': cache,
+    }
+    if with_field:
+        rec['task_created_at'] = created
+        rec['task_created_at_error'] = error
+    return rec
+
+
+def test_compare_splits_before_after_and_counts_exclusions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup_repo(tmp_path, monkeypatch)
+    recs = [
+        _rec('B1', '2026-11-18T00:00:00+00:00', total=100, cache=50),
+        _rec('B2', '2026-11-18T01:00:00+00:00', total=300, cache=150),
+        _rec('A1', '2026-11-18T09:00:00+00:00', total=40, cache=10),
+        _rec('EQ', '2026-11-18T08:00:00+00:00', total=60, cache=30),  # cutover ちょうど = 後
+        _rec('M1', None, error='missing'),
+        _rec('I1', None, error='invalid'),
+        _rec('I2', None, error='invalid'),
+        _rec('OLD', None, with_field=False),
+        _rec('ATT', '2026-11-18T00:00:00+00:00', attribution='approximate'),
+        _rec('B1', '2026-11-18T00:00:00+00:00', total=100, cache=50),  # 重複は最新 1 件にまとめる
+    ]
+    mtc.METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mtc.METRICS_PATH.write_text('\n'.join(json.dumps(r) for r in recs) + '\n', encoding='utf-8')
+    before_bytes = mtc.METRICS_PATH.read_bytes()
+
+    out = mtc.compare('2026-11-18T08:00:00+00:00')
+
+    assert mtc.METRICS_PATH.read_bytes() == before_bytes
+    assert '| sonnet | claude | before | 2 | 200 | 200 | 100 | 100 |' in out
+    assert '| sonnet | claude | after | 2 | 50 | 50 | 20 | 20 |' in out
+    assert 'missing: 1' in out
+    assert 'invalid: 2' in out
+    assert '項目なし: 1' in out
+    assert 'attribution 対象外: 1' in out
+
+
+def test_compare_cli_rejects_cutover_without_timezone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup_repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, 'argv', ['measure_task_cost.py', '--compare', '--cutover', '2026-11-18T08:00:00'])
+
+    with pytest.raises(SystemExit) as exc:
+        mtc.main()
+
+    assert exc.value.code != 0
+
+
+def test_compare_cli_prints_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _setup_repo(tmp_path, monkeypatch)
+    mtc.METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mtc.METRICS_PATH.write_text(json.dumps(_rec('A1', '2026-11-18T09:00:00+00:00')) + '\n', encoding='utf-8')
+    monkeypatch.setattr(sys, 'argv', ['measure_task_cost.py', '--compare', '--cutover', '2026-11-18T17:00:00+09:00'])
+
+    mtc.main()
+
+    assert '| sonnet | claude | after | 1 |' in capsys.readouterr().out
