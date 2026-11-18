@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+import zlib
 
 ROOT = Path(__file__).resolve().parent
 SOURCES = ('statusline', 'transcript')  # state に残す取得元 (優先順)。pane はこの後
@@ -168,6 +169,15 @@ def apply(state: dict, session: str | None, pane: dict | None = None) -> dict:
     """State の top-level (context_pct / model 等) を resolve の結果で揃える (dashboard 等の読み手用)."""
     state.update(resolve(state, session, pane))
     return state
+
+
+def prompt_crc32(text: str) -> int:
+    """Watchd_sent の照合に使う本文の crc32 (ADR 0011 の 4.).
+
+    UTF-8 のバイト列をそのまま (strip などの正規化をせずに) zlib.crc32 にかける。hook (on-event.sh) と
+    watchd_sent を書く側はこの関数を使い、計算法を 1 か所にそろえる。
+    """
+    return zlib.crc32(text.encode('utf-8'))
 
 
 def update_state(path: Path, fn: Callable[[dict], None]) -> dict:

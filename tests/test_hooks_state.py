@@ -17,12 +17,18 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+import threading
+import time
 import zlib
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 ON_EVENT = REPO / 'scripts' / 'hooks' / 'on-event.sh'
+sys.path.insert(0, str(REPO / 'squad'))
+import ctx  # noqa: E402
+
 WEB = '[squad-web 指示]'
 
 
@@ -338,3 +344,151 @@ def test_unwritable_state_dir_does_not_block_prompt(tmp_path: Path) -> None:
     assert (r.returncode, r.stdout) == (0, '')
     assert r2.returncode == 0
     assert not (state / 'dispatcher.json').exists()
+
+
+# ---------- state 更新の原子性と並行更新 (cross-review SQUAD-315) ----------
+
+
+class _LockFreeReader(threading.Thread):
+    """Watchd / squad ls と同じくロックを取らずに state を読み続け、読めなかった中身を集める."""
+
+    def __init__(self, path: Path, deadline: float) -> None:
+        super().__init__(daemon=True)
+        self.path, self.deadline = path, deadline
+        self.stop = threading.Event()
+        self.reads = 0
+        self.bad: list[str] = []
+
+    def run(self) -> None:
+        while not self.stop.is_set() and time.monotonic() < self.deadline:
+            try:
+                text = self.path.read_text()
+            except FileNotFoundError:
+                continue
+            self.reads += 1
+            try:
+                json.loads(text)
+            except ValueError:
+                self.bad.append(text[:80])
+
+
+def test_update_state_replaces_target_only_when_new_json_is_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """書き換えは別ファイルに全部書いてから os.replace で差し替える。それまで元のファイルは前の中身のまま.
+
+    ロックを取らない読み手 (watchd など) が書きかけの JSON を読まないための条件。決定的に確かめる。
+    """
+    path = tmp_path / 'state' / 'w1.json'
+    path.parent.mkdir()
+    old = {'stop_count': 1, 'status': 'busy'}
+    path.write_text(json.dumps(old))
+    calls: list[tuple[dict, dict]] = []
+    real_replace = os.replace
+
+    def spy(src: str | os.PathLike, dst: str | os.PathLike) -> None:
+        assert Path(dst) == path
+        calls.append((json.loads(Path(dst).read_text()), json.loads(Path(src).read_text())))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(ctx.os, 'replace', spy)
+
+    def bump(st: dict) -> None:
+        st['stop_count'] += 1
+        st['pad'] = 'x' * 100_000
+
+    ctx.update_state(path, bump)
+
+    assert len(calls) == 1, 'state を os.replace で差し替えていない (書き込み途中の JSON が読み手に見える)'
+    before, written = calls[0]
+    assert before == old  # 差し替えの直前まで、元のファイルは前の完全な JSON
+    assert written['stop_count'] == 2
+    assert json.loads(path.read_text()) == written
+    assert sorted(p.name for p in path.parent.iterdir()) == ['w1.json', 'w1.json.lock']  # 一時ファイルを残さない
+
+
+def test_concurrent_update_state_keeps_every_update(tmp_path: Path) -> None:
+    """20 スレッド x 25 回を同時に始めても、加算が 1 つも消えず、ロック無しの読み手も常に完全な JSON を読む."""
+    threads, rounds, timeout = 20, 25, 10.0
+    path = tmp_path / 'state' / 'dispatcher.json'
+    barrier = threading.Barrier(threads, timeout=timeout)
+    errors: list[BaseException] = []
+    reader = _LockFreeReader(path, time.monotonic() + timeout)
+
+    def bump(st: dict) -> None:
+        st['stop_count'] = st.get('stop_count', 0) + 1
+        st['pad'] = 'x' * 20_000  # 書き込みに時間がかかる大きさにして、途中を読む機会を作る
+
+    def work() -> None:
+        try:
+            barrier.wait()
+            for _ in range(rounds):
+                ctx.update_state(path, bump)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    workers = [threading.Thread(target=work, daemon=True) for _ in range(threads)]
+    reader.start()
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join(timeout)
+    reader.stop.set()
+    reader.join(timeout)
+
+    assert not any(t.is_alive() for t in workers), f'{timeout} 秒で終わらなかった'
+    assert errors == []
+    assert json.loads(path.read_text())['stop_count'] == threads * rounds
+    assert reader.bad == [], f'{len(reader.bad)}/{reader.reads} 回、書きかけの JSON を読んだ'
+
+
+def test_parallel_stop_hooks_keep_every_increment(tmp_path: Path) -> None:
+    """別プロセスの hook 20 本を同時に走らせても stop_count は 20 になり、state は常に読める JSON."""
+    hooks, timeout = 20, 60.0
+    state = tmp_path / 'state'
+    path = state / 'w1.json'
+    env = _env(state, worker='w1')
+    reader = _LockFreeReader(path, time.monotonic() + timeout)
+    reader.start()
+    # hook は stdin を読み切るまで待つので、全部起動してから stdin を閉じて同時に走らせる
+    procs = [
+        subprocess.Popen(
+            ['bash', str(ON_EVENT)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+        for _ in range(hooks)
+    ]
+    for p in procs:
+        p.stdin.write(json.dumps({'hook_event_name': 'Stop'}))
+    for p in procs:
+        p.stdin.close()
+    try:
+        results = [(p.wait(timeout), p.stderr.read()) for p in procs]
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        reader.stop.set()
+        reader.join(timeout)
+
+    assert [rc for rc, _ in results] == [0] * hooks, [err for _, err in results if err]
+    st = json.loads(path.read_text())
+    assert st['stop_count'] == hooks
+    assert st['last_event'] == 'Stop'
+    assert reader.bad == [], f'{len(reader.bad)}/{reader.reads} 回、書きかけの JSON を読んだ'
+
+
+# ---------- crc32 の計算法 (watchd_sent との取り決め) ----------
+
+
+def test_prompt_crc32_is_utf8_bytes_without_normalizing() -> None:
+    """Hook と watchd_sent を書く側がそろえる計算法。UTF-8 のバイト列をそのまま zlib.crc32 にかける."""
+    assert ctx.prompt_crc32('hello') == 907060870
+    text = f'{WEB} テストを足して\n'
+    assert ctx.prompt_crc32(text) == zlib.crc32(text.encode('utf-8'))
+    assert ctx.prompt_crc32(' a ') != ctx.prompt_crc32('a')  # 前後の空白を落とさない
+    assert ctx.prompt_crc32('a\n') != ctx.prompt_crc32('a')
