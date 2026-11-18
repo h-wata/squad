@@ -126,6 +126,29 @@ def test_window_extraction_only_counts_messages_inside_task_mtime_to_completed_a
     assert record['wall_clock_sec'] == 1800.0
 
 
+def test_window_endpoints_are_inclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ADR 0011 Decision 6: 区間は task YAML mtime から report completed_at まで。両端ちょうどの message は数える
+    tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
+    start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 21, 6, 30, 0, tzinfo=timezone.utc)
+    _write_task(tasks_dir, mtime=start)
+    _write_report(reports_dir, completed_at=end.isoformat())
+    session_dir = _session_dir_for_repo_root(mtc.CLAUDE_PROJECTS, mtc.REPO_ROOT)
+
+    just_before = _assistant_line(start - timedelta(seconds=1), usage={'input_tokens': 1000, 'output_tokens': 1000})
+    at_start = _assistant_line(start, usage={'input_tokens': 10, 'output_tokens': 1})
+    at_end = _assistant_line(end, usage={'input_tokens': 20, 'output_tokens': 2})
+    just_after = _assistant_line(end + timedelta(seconds=1), usage={'input_tokens': 1000, 'output_tokens': 1000})
+    (session_dir / 'session.jsonl').write_text(
+        '\n'.join([just_before, at_start, at_end, just_after]) + '\n', encoding='utf-8'
+    )
+
+    record = mtc.measure(PROJECT, TASK_ID)
+
+    assert record['input_tokens'] == 30
+    assert record['output_tokens'] == 3
+
+
 def test_usage_field_missing_is_recorded_as_unknown_not_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tasks_dir, reports_dir = _setup_repo(tmp_path, monkeypatch)
     start = datetime(2026, 8, 21, 6, 0, 0, tzinfo=timezone.utc)
@@ -772,6 +795,28 @@ def test_compare_splits_before_after_and_counts_exclusions(
     assert 'invalid: 2' in out
     assert '項目なし: 1' in out
     assert 'attribution 対象外: 1' in out
+
+
+def test_compare_ignores_corrupt_jsonl_lines_without_modifying_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_repo(tmp_path, monkeypatch)
+    good_before = json.dumps(_rec('B1', '2026-11-18T00:00:00+00:00', total=100, cache=50))
+    good_after = json.dumps(_rec('A1', '2026-11-18T09:00:00+00:00', total=40, cache=10))
+    content = (
+        '\n'.join(['{"task_id": "BROKEN", "project": ', good_before, 'not json at all', '', good_after, '{']) + '\n'
+    )
+    mtc.METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    mtc.METRICS_PATH.write_text(content, encoding='utf-8')
+    before_bytes = mtc.METRICS_PATH.read_bytes()
+
+    records = mtc.load_latest_records(mtc.METRICS_PATH)
+    out = mtc.compare('2026-11-18T08:00:00+00:00')
+
+    assert sorted(r['task_id'] for r in records) == ['A1', 'B1']
+    assert '| sonnet | claude | before | 1 | 100 |' in out
+    assert '| sonnet | claude | after | 1 | 40 |' in out
+    assert mtc.METRICS_PATH.read_bytes() == before_bytes
 
 
 def test_compare_cli_rejects_cutover_without_timezone(
