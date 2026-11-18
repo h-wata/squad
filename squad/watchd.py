@@ -49,6 +49,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import ctx  # noqa: E402
 from ledger import Claim  # noqa: E402
 from ledger import delivery_key  # noqa: E402
 from ledger import find_reports  # noqa: E402
@@ -89,6 +90,60 @@ ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
 WORKER_WINDOW = {1: 'w1', 2: 'w2', 3: 'w3', 4: 'w4'}
 CAPTURE_TAIL_LINES = 40
 HOOK_FRESH_SECONDS = 300
+
+# タスク途中の区切り (ADR 0011 の 2. と 5.)。境界はすべて「以上」
+BREAK_WORKERS = (1, 2, 3)  # Codex (w4) は /clear が無いので対象外
+BREAK_CTX_FRESH_SECONDS = 600  # context_at がこれより古い ctx は不明として扱う
+BREAK_QUIET_CYCLES = 2  # pane の hash がこのサイクル数続けて変わっていなければ待機中
+BREAK_REPLY_TIMEOUT = 600  # BRIEF-REQUEST の返事待ち (monotonic)
+BREAK_RETRY_SECONDS = 1800  # BRIEF-DEFER か返事なしの後、次に依頼するまで (monotonic)
+BREAK_COOLDOWN_SECONDS = 1800  # 区切った後、次の区切りまで (wall clock, state に残す)
+BREAK_LIMIT = 5  # 1 タスクで区切る回数の上限
+BREAK_CLEAR_WAIT = 1.5  # /clear の後、RESUME を送るまで
+BREAK_WAIT_EVENTS = ('Stop', 'idle_prompt')
+# 依頼文の末尾 (空白を除いた形)。pane に写った依頼文の中の BRIEF-READY / BRIEF-DEFER を返事と読まないよう、
+# これより後ろだけを返事として見る
+BRIEF_REQUEST_TAIL = 'BRIEF-DEFER<理由>と返してください。'
+BRIEF_REPLY_RE = re.compile(r'BRIEF-(READY|DEFER)')
+
+
+def brief_request_text(task_id: str, reason: str, brief: Path) -> str:
+    """BRIEF-REQUEST の文面 (ADR 0011 の 2.。instructions/worker.md と一字一句揃える)."""
+    return (
+        f'[BRIEF-REQUEST task_id={task_id} reason={reason}] コンテキストを区切ります。{brief} を '
+        'instructions/worker.md の 4 項目で書き直し、書けたら BRIEF-READY とだけ返してください。'
+        'バックグラウンド処理の完了待ちなど今は区切れないときは BRIEF-DEFER <理由> と返してください。'
+    )
+
+
+def resume_text(task_id: str, task_yaml: Path, brief: Path) -> str:
+    """RESUME の文面 (ADR 0011 の 2.。instructions/worker.md と一字一句揃える)."""
+    return (
+        f'[RESUME task_id={task_id}] /clear 後の再開です。{task_yaml} と {brief} を読み、'
+        'brief の「今の意図と次の一手」から続けてください。'
+    )
+
+
+def brief_reply(cap: str) -> str:
+    """Pane に出た依頼への返事 ('READY' / 'DEFER' / '')。依頼文より後ろの最後の 1 つを見る."""
+    flat = ''.join(cap.split())
+    pos = flat.rfind(BRIEF_REQUEST_TAIL)
+    tail = flat[pos + len(BRIEF_REQUEST_TAIL) :] if pos >= 0 else flat
+    found = BRIEF_REPLY_RE.findall(tail)
+    return found[-1] if found else ''
+
+
+def _parse_iso(value: object) -> float | None:
+    """TZ 付き ISO8601 を epoch 秒に。TZ が無ければ UTC とみなす。読めなければ None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def _cksum_table() -> list[int]:
@@ -203,6 +258,10 @@ class Config:
     # durable queue 経路を opt-in する。flag を外せば (既定に戻せば) 即座に従来動作へ rollback。
     notify_queue_enabled: bool = field(default_factory=lambda: _bool_env('WATCH_NOTIFY_QUEUE', False))
     approval_deny: str = field(default_factory=lambda: os.environ.get('WATCH_APPROVAL_DENY') or APPROVAL_DENY_DEFAULT)
+    # タスク途中の区切り (ADR 0011 の 2.)。どれも勘で決めた初期値
+    break_ctx_pct: int = field(default_factory=lambda: _int_env('WATCH_BREAK_CTX_PCT', 50))
+    break_stops: int = field(default_factory=lambda: _int_env('WATCH_BREAK_STOPS', 8))
+    break_minutes: int = field(default_factory=lambda: _int_env('WATCH_BREAK_MINUTES', 60))
 
     @property
     def notify_dir(self) -> Path:
@@ -364,6 +423,12 @@ class Watcher:
         # このサイクルで Dispatcher pane に何か送ったか (送った直後は待機中に見えても指示を重ねない, #85)
         self._sent_to_dispatcher = False
         self._instructions_sig: tuple[str, ...] | None = None
+        # タスク途中の区切り (ADR 0011 の 2.)。check_workers() が pending の worker を残し、
+        # check_context_breaks() が使う: n -> (task_path, task_m, project, task_id)
+        self._pending: dict[int, tuple[Path, str, str, str]] = {}
+        self._break_req: dict[int, dict] = {}  # 返事待ちの依頼 (watchd の中で完結するので state に残さない)
+        self._break_retry_at: dict[int, float] = {}  # BRIEF-DEFER / 返事なしの後、次に依頼してよい monotonic 時刻
+        self._worker_sent_at: dict[int, float] = {}  # watchd がこの worker に最後に送った wall clock
 
     # ---- ログ / 通知 ----
 
@@ -372,6 +437,14 @@ class Watcher:
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
+
+    def wall(self) -> float:
+        """Wall clock (テストで差し替える)。state に残して再起動をまたぐ時刻に使う."""
+        return time.time()
+
+    def mono(self) -> float:
+        """Monotonic clock (テストで差し替える)。watchd の中で完結する待ちに使う."""
+        return time.monotonic()
 
     def notify_dispatcher(self, msg: str) -> bool:
         """Dispatcher pane へ 1 メッセージ送る.
@@ -811,6 +884,7 @@ class Watcher:
 
     def check_workers(self) -> None:
         for n in (1, 2, 3, 4):
+            self._pending.pop(n, None)
             pane = self.tmux.target(WORKER_WINDOW[n])
             task_path = self.newest_file(f'tasks/worker{n}.yaml')
             task_m = mtime_str(task_path) if task_path else ''
@@ -836,6 +910,8 @@ class Watcher:
                 self.pane_stall[n] = 0
                 self.resume_count[n] = 0
                 continue
+            if task_path is not None:
+                self._pending[n] = (task_path, task_m, project, task_id)
 
             self._check_budget(n, task_path, task_meta, project or 'unknown', task_id)
 
@@ -852,6 +928,7 @@ class Watcher:
             if APPROVAL_RE.search(cap):
                 self.log(f'Worker{n}: 承認プロンプト検知 -> 自動受理')
                 self.auto_answer(pane, cap)
+                self._worker_sent_at[n] = self.wall()
                 self.pane_stall[n] = 0
                 self.pane_hash[n] = ''
                 continue
@@ -1031,6 +1108,229 @@ class Watcher:
         except (OSError, ValueError, json.JSONDecodeError):
             return ''
         return ev if 0 <= age <= HOOK_FRESH_SECONDS else ''
+
+    # ---- 3b. タスク途中の区切り (ADR 0011 の 2. と 5.) ----
+
+    def _break_eligible(self, n: int) -> bool:
+        """途中の /clear を当ててよい worker か (ADR 0011 の 5.。判定はここ 1 か所に置く).
+
+        start.sh が書く agents-<session>.json で `claude` の w1-w3 だけ。ファイルが無い・読めない・
+        値が不明・claude-local・opencode、および Codex (w4) は区切らない。
+        """
+        if n not in BREAK_WORKERS:
+            return False
+        path = _state_dir() / f'agents-{self.cfg.session}.json'
+        try:
+            agents = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return False
+        return isinstance(agents, dict) and agents.get(f'w{n}') == 'claude'
+
+    def _load_worker_state(self, n: int) -> dict:
+        try:
+            data = json.loads((_state_dir() / f'w{n}.json').read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _update_break(self, n: int, values: dict) -> dict:
+        """state/w<n>.json の break を values で更新する (hook と同じロックを取る)."""
+
+        def fn(data: dict) -> None:
+            brk = data.get('break')
+            data['break'] = {**(brk if isinstance(brk, dict) else {}), **values}
+
+        return ctx.update_state(_state_dir() / f'w{n}.json', fn)['break']
+
+    @staticmethod
+    def _stop_count(state: dict) -> int:
+        v = state.get('stop_count')
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+    def _break_state(self, n: int, state: dict, task_key: str) -> dict:
+        """このタスクの break を返す。別のタスクのものなら作り直す (stop_base はタスク開始時の stop_count)."""
+        brk = state.get('break')
+        if isinstance(brk, dict) and brk.get('task') == task_key:
+            return brk
+        return self._update_break(
+            n,
+            {
+                'task': task_key,
+                'stop_base': self._stop_count(state),
+                'break_count': 0,
+                'last_break_at': None,
+                'limit_notified': False,
+            },
+        )
+
+    def _break_reason(self, state: dict, brk: dict, task_meta_created: str, task_path: Path) -> str:
+        """区切る理由 (ctx:52% / stops:8 / minutes:60)。成立しなければ ''. 上から最初に成立したものを返す.
+
+        ctx は state の取得元 (statusline / transcript) だけで決め、pane は渡さない。pane の読み取りは
+        画面に写った依頼文の `reason=ctx:52%` も ctx と読むので、自分の送った文で区切りを繰り返しうる。
+        """
+        now = self.wall()
+        r = ctx.resolve(state, self.cfg.session)
+        pct = r.get('context_pct')
+        at = _parse_iso(r.get('context_at'))
+        if isinstance(pct, int) and at is not None and now - at <= BREAK_CTX_FRESH_SECONDS:
+            return f'ctx:{pct}%' if pct >= self.cfg.break_ctx_pct else ''
+        # ctx が不明: Stop の回数と経過時間で決める
+        stops = self._stop_count(state) - (brk.get('stop_base') or 0)
+        if stops >= self.cfg.break_stops:
+            return f'stops:{stops}'
+        base = _parse_iso(brk.get('last_break_at')) or _parse_iso(task_meta_created)
+        if base is None:
+            try:
+                base = task_path.stat().st_mtime
+            except OSError:
+                return ''
+        minutes = int((now - base) // 60)
+        if minutes >= self.cfg.break_minutes:
+            return f'minutes:{minutes}'
+        return ''
+
+    def _worker_waiting(self, n: int, state: dict, cap: str, task_id: str, task_m: str) -> bool:
+        """待機中か (ADR 0011 の 2.。すべて満たすとき)."""
+        if detect_status(cap)['status'] != 'idle':
+            return False
+        if self.pane_stall.get(n, 0) < BREAK_QUIET_CYCLES:
+            return False
+        if state.get('last_event') not in BREAK_WAIT_EVENTS:
+            return False
+        ev_at = _parse_iso(state.get('last_event_at'))
+        sent = self._worker_sent_at.get(n)
+        if ev_at is None or (sent is not None and ev_at <= sent):
+            return False
+        # 保留中の承認プロンプト (_hold_approval のキーは task_id:task_m:画面)
+        return not self.approval_held.get(n, '').startswith(f'{task_id}:{task_m}:')
+
+    def _send_line(self, pane: str, text: str) -> bool:
+        """本文と Enter を別々に送る (notify_dispatcher と同じ理由)."""
+        if not self.tmux.send_keys(pane, text):
+            return False
+        self.sleep(0.5)
+        return self.tmux.send_keys(pane, 'Enter')
+
+    def check_context_breaks(self) -> None:
+        """Pending の worker の ctx が溜まっていたら、brief を書かせて /clear し、brief から再開させる."""
+        for n in (1, 2, 3, 4):
+            info = self._pending.get(n)
+            req = self._break_req.get(n)
+            if info is None or not self._break_eligible(n):
+                if req is not None:
+                    self.log(f'Worker{n}: report が来たか対象外になったので区切りの依頼を捨てる')
+                    self._break_req.pop(n, None)
+                continue
+            task_path, task_m, project, task_id = info
+            if not task_id or ARCHIVE_NAME_UNSAFE_RE.search(task_id):
+                continue
+            if req is not None and req['task_m'] != task_m:
+                self.log(f'Worker{n}: task YAML が変わったので区切りの依頼を捨てる')
+                self._break_req.pop(n, None)
+                req = None
+            pane = self.tmux.target(WORKER_WINDOW[n])
+            if not self.tmux.pane_exists(pane):
+                continue
+            state = self._load_worker_state(n)
+            brk = self._break_state(n, state, f'{project}/{task_id}')
+            brief = self.cfg.projects_dir / project / 'briefs' / f'{task_id}.md'
+            if req is not None:
+                self._advance_break(n, pane, state, brief, task_path, task_id, task_m)
+                continue
+            count = brk.get('break_count') or 0
+            if count >= BREAK_LIMIT:
+                if not brk.get('limit_notified'):
+                    self._notify_break_limit(n, project, task_id, brief)
+                continue
+            if self.mono() < self._break_retry_at.get(n, float('-inf')):
+                continue
+            last = _parse_iso(brk.get('last_break_at'))
+            if last is not None and self.wall() - last < BREAK_COOLDOWN_SECONDS:
+                continue
+            cap = self.tmux.capture(pane)
+            if not self._worker_waiting(n, state, cap, task_id, task_m):
+                continue
+            created = parse_scalars(task_path.read_text(errors='replace')).get('created_at', '')
+            reason = self._break_reason(state, brk, created, task_path)
+            if reason:
+                self._request_brief(n, pane, brief, task_id, task_m, reason)
+
+    def _request_brief(self, n: int, pane: str, brief: Path, task_id: str, task_m: str, reason: str) -> None:
+        with contextlib.suppress(OSError):
+            brief.parent.mkdir(parents=True, exist_ok=True)
+        self.log(f'Worker{n}: コンテキストを区切る (task_id={task_id} reason={reason}) -> BRIEF-REQUEST')
+        requested = self.wall()
+        self._worker_sent_at[n] = requested
+        self._break_req[n] = {'task_m': task_m, 'wall': requested, 'mono': self.mono()}
+        if not self._send_line(pane, brief_request_text(task_id, reason, brief)):
+            self.log(f'[WARN] Worker{n} に BRIEF-REQUEST を送れず (30 分後にやり直す)')
+            self._break_req.pop(n, None)
+            self._break_retry_at[n] = self.mono() + BREAK_RETRY_SECONDS
+
+    def _advance_break(
+        self, n: int, pane: str, state: dict, brief: Path, task_path: Path, task_id: str, task_m: str
+    ) -> None:
+        """返事待ちの依頼を進める: READY なら /clear と RESUME、DEFER か 10 分経過なら 30 分後にやり直す."""
+        req = self._break_req[n]
+        if self.mono() - req['mono'] >= BREAK_REPLY_TIMEOUT:
+            self.log(f'Worker{n}: BRIEF-REQUEST に 10 分返事が無い -> /clear せず 30 分後にやり直す')
+            self._break_req.pop(n, None)
+            self._break_retry_at[n] = self.mono() + BREAK_RETRY_SECONDS
+            return
+        cap = self.tmux.capture(pane)
+        reply = brief_reply(cap)
+        if reply == 'DEFER':
+            self.log(f'Worker{n}: BRIEF-DEFER -> 30 分は依頼しない')
+            self._break_req.pop(n, None)
+            self._break_retry_at[n] = self.mono() + BREAK_RETRY_SECONDS
+            return
+        if reply != 'READY' or not self._worker_waiting(n, state, cap, task_id, task_m):
+            return
+        try:
+            fresh = brief.stat().st_mtime > req['wall']
+        except OSError:
+            fresh = False
+        if not fresh:
+            return  # brief が書き直されていなければ /clear しない (10 分で諦める)
+        self._break_req.pop(n, None)
+        self._worker_sent_at[n] = self.wall()
+        if not self._send_line(pane, '/clear'):
+            self.log(f'[WARN] Worker{n} に /clear を送れず (30 分後にやり直す)')
+            self._break_retry_at[n] = self.mono() + BREAK_RETRY_SECONDS
+            return
+        self.sleep(BREAK_CLEAR_WAIT)
+        sent = self._send_line(pane, resume_text(task_id, task_path, brief))
+        cur = self._load_worker_state(n)
+        prev = cur.get('break') if isinstance(cur.get('break'), dict) else {}
+        brk = self._update_break(
+            n,
+            {
+                'break_count': (prev.get('break_count') or 0) + 1,
+                'last_break_at': datetime.fromtimestamp(self.wall(), timezone.utc).isoformat(timespec='seconds'),
+                'stop_base': self._stop_count(cur),
+            },
+        )
+        self._worker_sent_at[n] = self.wall()
+        if not sent:
+            self.log(f'[WARN] Worker{n} に /clear の後の RESUME を送れず。pane を確認してください')
+        self.log(f'Worker{n}: /clear して brief から再開させた (break_count={brk.get("break_count")})')
+
+    def _notify_break_limit(self, n: int, project: str, task_id: str, brief: Path) -> None:
+        msg = (
+            f'[BREAK-LIMIT project={project} worker={n} task_id={task_id}] '
+            f'Worker{n} はこのタスクで {BREAK_LIMIT} 回区切りました。以後このタスクでは途中の区切りをしません。'
+            f'pane と brief ({brief}) を確認してください。'
+        )
+        if self._enqueue_notification(
+            project=project,
+            source='break-limit',
+            priority='low',
+            message=msg,
+            dedupe_key=f'break-limit:{project}:{n}:{task_id}',
+        ):
+            self._update_break(n, {'limit_notified': True})
+            self.log(f'Worker{n}: 区切りが上限 ({BREAK_LIMIT} 回) に達した -> [BREAK-LIMIT] 通知')
 
     # ---- 4. Discovery ----
 
@@ -1321,6 +1621,10 @@ class Watcher:
         self.deliver_instructions()
         self.sync_graph()
         self.check_workers()
+        try:
+            self.check_context_breaks()
+        except Exception as e:  # noqa: BLE001 (区切りの失敗で watcher を止めない。区切らない側に倒す)
+            self.log(f'[WARN] タスク途中の区切りの判定に失敗 (今回は区切らない): {e}')
 
         now = time.time()
         if now - self.last_discovery >= self.cfg.discovery_interval:

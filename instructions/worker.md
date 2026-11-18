@@ -368,13 +368,67 @@ report に混在させない。** `source_tree_status` が複数行になる場�
 
 ## コンテキスト管理ルール
 
-**タスク完了時:**
-- 報告出力後、コンテキスト残量 20% 以上なら `/compact`
-- 20% 以下なら `/clear` (次タスク通知を待つ)
+worker は自分に `/compact` や `/clear` を打たない。タスクの切れ目の `/clear` は Dispatcher の
+タスク通知 (notify-worker.sh) が送る。タスクの途中で区切るかは watchd が決め、次の流れで依頼してくる
+(ADR 0011)。大きな入力ファイル（PDF 等）は原本の代わりに要約ファイル（`*_summary.md` 等）を使う。
 
-**タスク実行中:**
-- 大きな入力ファイル（PDF 等）の原本の代わりに要約ファイル（`*_summary.md` 等）を使う
-- 10% 以下で `/clear` → 中間報告後に続行
+### brief
+
+パスは `queue/projects/<pj>/briefs/<task_id>.md`。形式は次に固定し、見出しの文言は変えない。
+全体で 200 行以内を目安にする。タスクが終わっても消さない。
+
+```markdown
+# brief: <task_id>
+- task_yaml: <絶対パス>
+- updated_at: <TZ 付き ISO8601>
+- break_count: <これまでに区切った回数>
+
+## 1. タスク文の写し
+task YAML の title / goal / acceptance_criteria と禁止事項を、ほぼそのまま写す。
+
+## 2. 今の意図と次の一手
+いま何をしようとしていたか。再開して最初に打つコマンドや開くファイル。
+
+## 3. 計画と完了条件
+### 済んだもの
+### 残っているもの
+acceptance_criteria の各項目と verify の attempt 回数を、済み / 残りに分けて書く。
+
+## 4. 再開の手がかり
+workspace、branch、最新 commit の SHA、未 commit の変更ファイル、PR URL、
+直前に走らせたコマンドと結果、verdict のパス。
+```
+
+`break_count` は watchd が `squad/state/w<N>.json` の `break.break_count` に残している値を写す
+(読めなければ前の brief の値。初回は 0)。
+
+### BRIEF-REQUEST を受けたら
+
+watchd は待機中の worker に次の 1 行を送る (`reason` は `ctx:52%` / `stops:8` / `minutes:60` の形):
+
+```
+[BRIEF-REQUEST task_id=<id> reason=<ctx:52% | stops:8 | minutes:60>] コンテキストを区切ります。<brief の絶対パス> を instructions/worker.md の 4 項目で書き直し、書けたら BRIEF-READY とだけ返してください。バックグラウンド処理の完了待ちなど今は区切れないときは BRIEF-DEFER <理由> と返してください。
+```
+
+1. 手を止め、書かれた brief のパスに上の形式で brief を書き直す (Write で丸ごと書く)。
+2. 書けたら `BRIEF-READY` とだけ返して turn を終える。他の文は付けない。watchd は brief の更新時刻と
+   この返事の両方を見てから `/clear` する。brief を書かずに `BRIEF-READY` を返しても `/clear` はされない。
+3. 今は区切れないとき (バックグラウンド処理の完了待ち、verifier の実行中など) は brief を書かず
+   `BRIEF-DEFER <理由>` と返す。watchd は 30 分は依頼しない。
+4. claude-local / opencode の worker には依頼が来ない。来たら `BRIEF-DEFER local-model` と返す。
+
+### RESUME を受けたら
+
+`/clear` の後、watchd は次の 1 行を送る:
+
+```
+[RESUME task_id=<id>] /clear 後の再開です。<task YAML の絶対パス> と <brief の絶対パス> を読み、brief の「今の意図と次の一手」から続けてください。
+```
+
+1. task YAML、brief の順に読む。
+2. `git -C <workspace> status -s` と `git -C <workspace> log --oneline -3` を打ち、brief の
+   「4. 再開の手がかり」と食い違いが無いか確かめる。食い違えば git を正として brief を直してから続ける。
+3. brief の「2. 今の意図と次の一手」から続ける。Dispatcher に確認は要らない。
 
 ## モデル切り替えルール
 
