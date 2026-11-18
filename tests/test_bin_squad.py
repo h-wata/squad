@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import uuid
 
 import pytest
@@ -132,3 +133,69 @@ def test_two_sessions_keep_default_and_warn(fake_root: Path, tmp_path: Path, pid
     assert a in r.stderr and b in r.stderr
     assert 'SQUAD_SESSION=<name>' in r.stderr
     assert len(r.stderr.strip().splitlines()) == 1
+
+
+def _assign_dry_run(tmp_path: Path, task_body: str) -> str:
+    task = tmp_path / 'worker2.yaml'
+    task.write_text(task_body)
+    r = _run(REPO / 'bin' / 'squad', 'assign', 'w2', str(task), '--dry-run', cwd=tmp_path, session='scratch-s')
+    assert r.returncode == 0, r.stderr
+    return next(ln for ln in r.stdout.splitlines() if ln.startswith('[assign] cmd:'))
+
+
+def test_assign_does_not_pass_keep_context_by_default(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\ncontext:\n  workspace: /x\n')
+    assert '--keep-context' not in cmd
+
+
+def test_assign_passes_keep_context_when_task_yaml_says_true(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\ncontext:\n  keep_context: true\n')
+    assert '--keep-context' in cmd
+
+
+@pytest.mark.parametrize('value', ['false', 'no'])
+def test_assign_ignores_keep_context_unless_true(tmp_path: Path, value: str) -> None:
+    cmd = _assign_dry_run(tmp_path, f'task_id: T\nagent: claude\ncontext:\n  keep_context: {value}\n')
+    assert '--keep-context' not in cmd
+
+
+def test_assign_ignores_keep_context_outside_context(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\nkeep_context: true\n')
+    assert '--keep-context' not in cmd
+
+
+def test_assign_passes_keep_context_to_codex_as_no_new(tmp_path: Path) -> None:
+    cmd = _assign_dry_run(tmp_path, 'task_id: T\nagent: codex\ncontext:\n  keep_context: true\n')
+    assert '--keep-context' in cmd
+
+
+def _check_item17(tmp_path: Path, body: str) -> str:
+    """Scripts/check_task_yaml.py の項目 17 の結果 (OK / NG)."""
+    sys.path.insert(0, str(REPO / 'scripts'))
+    from check_task_yaml import check_task_yaml
+
+    task = tmp_path / 'worker2.yaml'
+    task.write_text('task_id: T\nagent: claude\n' + body)
+    return next(r.status for r in check_task_yaml(task, {}) if r.item == 17)
+
+
+# 検査が OK にする値は、squad assign の実行時の意味と一致する (true は付く、false とキー無しは付かない)。
+# 検査が NG にする値 (yes / True / "true") は実行側がどう判定してもよい: 検査が止めるので不一致は起きない。
+@pytest.mark.parametrize(
+    ('body', 'expect_flag'),
+    [
+        ('context:\n  keep_context: true\n', True),
+        ('context:\n  keep_context: false\n', False),
+        ('context:\n  workspace: /x\n', False),
+        ('', False),
+    ],
+)
+def test_values_accepted_by_check_match_assign(tmp_path: Path, body: str, expect_flag: bool) -> None:
+    assert _check_item17(tmp_path, body) == 'OK'
+    assert ('--keep-context' in _assign_dry_run(tmp_path, 'task_id: T\nagent: claude\n' + body)) is expect_flag
+
+
+@pytest.mark.parametrize('raw', ['yes', 'True', '"true"', 'on'])
+def test_values_rejected_by_check_are_not_silently_accepted(tmp_path: Path, raw: str) -> None:
+    body = f'context:\n  keep_context: {raw}\n'
+    assert _check_item17(tmp_path, body) == 'NG'

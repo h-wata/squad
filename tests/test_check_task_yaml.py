@@ -331,3 +331,51 @@ def test_next_rules_are_optional(tmp_path: Path) -> None:
     for data in (GOOD, {**GOOD, **rules}):
         path = _write(tmp_path, data)
         assert _item16(check_task_yaml(path, collect_task_id_locations([path]))) == ['OK', 'OK']
+
+
+def _item17(results: list) -> str:
+    return _statuses(results, 17)
+
+
+def _write_keep_context(tmp_path: Path, raw: str) -> Path:
+    """keep_context の値を生テキストのまま書く (PyYAML の dump だと yes / "true" の書き方を作れない)."""
+    path = _write(tmp_path, GOOD)
+    path.write_text(path.read_text() + f'context:\n  keep_context: {raw}\n')
+    return path
+
+
+@pytest.mark.parametrize('raw', ['true', 'false', 'true  # 続きのタスク'])
+def test_keep_context_literal_true_false_is_ok(tmp_path: Path, raw: str) -> None:
+    path = _write_keep_context(tmp_path, raw)
+    results = check_task_yaml(path, collect_task_id_locations([path]))
+    assert _item17(results) == 'OK'
+    assert not any(r.status == 'NG' for r in results)
+
+
+# yes / True / on 等は PyYAML では bool だが、squad assign は生テキストの true だけを見る。
+# "true" は parse_block が引用符を外すので実行側では有効になるが、検査は NG にして書き方を揃えさせる
+@pytest.mark.parametrize(
+    'raw',
+    ['yes', 'no', 'True', 'TRUE', 'False', 'on', 'off', '"true"', "'true'", '"false"', '1', '0', '~', 'null', ''],
+)
+def test_keep_context_non_literal_is_ng(tmp_path: Path, raw: str) -> None:
+    path = _write_keep_context(tmp_path, raw)
+    assert _item17(check_task_yaml(path, collect_task_id_locations([path]))) == 'NG'
+
+
+def test_keep_context_flow_style_context_is_ng_because_assign_cannot_read_it(tmp_path: Path) -> None:
+    path = _write(tmp_path, GOOD)
+    path.write_text(path.read_text() + 'context: {keep_context: true}\n')
+    assert _item17(check_task_yaml(path, collect_task_id_locations([path]))) == 'NG'
+
+
+@pytest.mark.parametrize('value', [['true'], {'a': 1}])
+def test_keep_context_collection_is_ng(tmp_path: Path, value: object) -> None:
+    path = _write(tmp_path, {**GOOD, 'context': {'keep_context': value}})
+    assert _item17(check_task_yaml(path, collect_task_id_locations([path]))) == 'NG'
+
+
+def test_keep_context_is_optional(tmp_path: Path) -> None:
+    for data in (GOOD, {**GOOD, 'context': {'workspace': str(tmp_path)}}):
+        path = _write(tmp_path, data)
+        assert _item17(check_task_yaml(path, collect_task_id_locations([path]))) == 'OK'

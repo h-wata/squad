@@ -77,7 +77,7 @@ while True:
                 if line == '/new' and mode != 'drop-new':   # Opencode は /new で新しい会話を始める
                     transcript.append('new session ses_mock')
                 if 'とだけ出力して停止' in line and mode != 'never-ready':   # Opencode の bootstrap に答える
-                    transcript.append('W0 待機中')
+                    transcript.append('W1 待機中')
         elif ch == b'\x15':      # Ctrl-U
             if mode != 'blind-start':
                 buf = b''
@@ -121,11 +121,11 @@ def pane(tmp_path: Path) -> Iterator[tuple[str, Path]]:
         _tmux('kill-session', '-t', session)
 
 
-def _notify(session: str, mode: str = 'normal') -> subprocess.CompletedProcess:
+def _notify(session: str, mode: str = 'normal', *extra: str) -> subprocess.CompletedProcess:
     env = {**os.environ, 'SQUAD_SESSION': session, 'MOCK_MODE': mode}
     _tmux('set-environment', '-t', session, 'MOCK_MODE', mode)
     return subprocess.run(
-        ['bash', str(NOTIFY), '0.0', MSG],
+        ['bash', str(NOTIFY), '0.0', MSG, *extra],
         capture_output=True,
         text=True,
         env=env,
@@ -190,6 +190,105 @@ def test_does_not_repaste_when_body_already_landed(pane: tuple[str, Path], tmp_p
     assert lines[0].count(PROBE) == 1, lines[0]  # 本文が入力欄で積み上がっていない
 
 
+def _notify_worker_pane(session: str, *extra: str) -> subprocess.CompletedProcess:
+    # 旧構成の pane 0.1 (= W1) を宛先にする。専用 session の pane 0.1 を使うため、window 名は見ない
+    env = {**os.environ, 'SQUAD_SESSION': session}
+    return subprocess.run(
+        ['bash', str(NOTIFY), '0.1', MSG, *extra], capture_output=True, text=True, env=env, timeout=180, check=False
+    )
+
+
+@pytest.fixture
+def worker_pane(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """Pane 0.1 (W1 相当) にモック TUI を置いたテスト専用 session."""
+    session = f'squad310test-{uuid.uuid4().hex[:8]}'
+    mock = tmp_path / 'mock_tui.py'
+    mock.write_text(MOCK_TUI)
+    log = tmp_path / 'submitted.log'
+    _tmux('new-session', '-d', '-s', session, '-x', '100', '-y', '30', 'sleep 600')
+    _tmux('split-window', '-t', f'{session}:0', f'MOCK_LOG={log} python3 {mock}')
+    try:
+        time.sleep(1.0)
+        yield session, log
+    finally:
+        _tmux('kill-session', '-t', session)
+
+
+def test_task_notification_sends_clear_by_default(worker_pane: tuple[str, Path]) -> None:
+    """Claude worker へのタスク通知は既定で /clear を先に送る (ADR 0011 の 1)."""
+    session, log = worker_pane
+    proc = _notify_worker_pane(session)
+    assert proc.returncode == 0, proc.stderr
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert lines[0] == '/clear', lines
+    assert lines[1].count(PROBE) == 1, lines
+    assert len(lines) == 2, lines
+
+
+def test_keep_context_skips_clear(worker_pane: tuple[str, Path]) -> None:
+    """--keep-context を付けると /clear を送らない."""
+    session, log = worker_pane
+    proc = _notify_worker_pane(session, '--keep-context')
+    assert proc.returncode == 0, proc.stderr
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert len(lines) == 1 and lines[0].count(PROBE) == 1, lines
+
+
+def test_legacy_clear_flag_is_accepted_and_sends_clear_once(worker_pane: tuple[str, Path]) -> None:
+    """--clear は互換のため受け付けるが何もしない (二重に /clear しない)."""
+    session, log = worker_pane
+    proc = _notify_worker_pane(session, '--clear')
+    assert proc.returncode == 0, proc.stderr
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert lines.count('/clear') == 1, lines
+
+
+def test_dispatcher_target_is_not_cleared_by_default(pane: tuple[str, Path]) -> None:
+    """Worker ではない宛先 (Dispatcher) への通知は /clear しない."""
+    session, log = pane
+    proc = _notify(session)
+    assert proc.returncode == 0, proc.stderr
+    assert '/clear' not in log.read_text().splitlines()
+
+
+@pytest.fixture
+def codex_pane(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """Window 名 w4 (Codex) にモック TUI を置いたテスト専用 session."""
+    session = f'squad314test-{uuid.uuid4().hex[:8]}'
+    mock = tmp_path / 'mock_tui.py'
+    mock.write_text(MOCK_TUI)
+    log = tmp_path / 'submitted.log'
+    _tmux('new-session', '-d', '-s', session, '-n', 'w4', '-x', '100', '-y', '30', f'MOCK_LOG={log} python3 {mock}')
+    try:
+        time.sleep(1.0)
+        yield session, log
+    finally:
+        _tmux('kill-session', '-t', session)
+
+
+def _notify_w4(session: str, *extra: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, 'SQUAD_SESSION': session}
+    return subprocess.run(
+        ['bash', str(NOTIFY), 'W4', MSG, *extra], capture_output=True, text=True, env=env, timeout=180, check=False
+    )
+
+
+def test_codex_sends_new_by_default(codex_pane: tuple[str, Path]) -> None:
+    session, log = codex_pane
+    assert _notify_w4(session).returncode == 0
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert lines[0] == '/new' and '/clear' not in lines, lines
+
+
+def test_codex_keep_context_sends_neither_new_nor_clear(codex_pane: tuple[str, Path]) -> None:
+    """--keep-context は Codex では --no-new と同じ: /new も /clear も送らず本文だけ送る."""
+    session, log = codex_pane
+    proc = _notify_w4(session, '--keep-context')
+    assert proc.returncode == 0, proc.stderr
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert len(lines) == 1 and lines[0].count(PROBE) == 1, lines
+
+
 def _opencode_pane(tmp_path: Path, mode: str) -> tuple[str, Path]:
     """モックを ``opencode`` という名前で動かす session を作る (前面プロセス名で Opencode を判定するため).
 
@@ -201,17 +300,9 @@ def _opencode_pane(tmp_path: Path, mode: str) -> tuple[str, Path]:
     opencode = tmp_path / 'opencode'
     opencode.symlink_to(shutil.which('python3'))
     log = tmp_path / 'submitted.log'
-    _tmux(
-        'new-session',
-        '-d',
-        '-s',
-        session,
-        '-x',
-        '100',
-        '-y',
-        '30',
-        f'MOCK_LOG={log} MOCK_MODE={mode} exec {opencode} {mock}',
-    )
+    # W1 相当の pane 0.1 に opencode を置く (pane 0.0 は Dispatcher 扱いで既定では /clear されない)
+    _tmux('new-session', '-d', '-s', session, '-x', '100', '-y', '30', 'sleep 600')
+    _tmux('split-window', '-t', f'{session}:0', f'MOCK_LOG={log} MOCK_MODE={mode} exec {opencode} {mock}')
     time.sleep(1.0)
     return session, log
 
@@ -219,19 +310,19 @@ def _opencode_pane(tmp_path: Path, mode: str) -> tuple[str, Path]:
 def _notify_clear(session: str, wait: str) -> subprocess.CompletedProcess:
     env = {**os.environ, 'SQUAD_SESSION': session, 'SQUAD_BOOTSTRAP_WAIT': wait}
     return subprocess.run(
-        ['bash', str(NOTIFY), '0.0', MSG, '--clear'], capture_output=True, text=True, env=env, timeout=180, check=False
+        ['bash', str(NOTIFY), '0.1', MSG], capture_output=True, text=True, env=env, timeout=180, check=False
     )
 
 
 def test_clear_on_opencode_sends_new_and_bootstrap(tmp_path: Path) -> None:
-    """Opencode worker への --clear は /new → bootstrap → 「W{N} 待機中」を待って本文の順に送る (#71)."""
+    """Opencode worker へのタスク通知は /new → bootstrap → 「W{N} 待機中」を待って本文の順に送る (#71)."""
     session, log = _opencode_pane(tmp_path, 'normal')
     try:
         proc = _notify_clear(session, '20')
         assert proc.returncode == 0, proc.stderr
         lines = [ln for ln in log.read_text().splitlines() if ln]
         assert lines[0] == '/new', lines
-        assert 'あなたは squad の Worker 0 です' in lines[1], lines
+        assert 'あなたは squad の Worker 1 です' in lines[1], lines
         assert lines[2].count(PROBE) == 1, lines
         assert len(lines) == 3, lines  # /clear は送らない
     finally:

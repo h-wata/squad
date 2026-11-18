@@ -34,6 +34,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ctx  # noqa: E402
+from ledger import parse_block  # noqa: E402
 from ledger import ReportLedger  # noqa: E402
 from notify_queue import notify_dir_for  # noqa: E402
 from notify_queue import NotificationQueue  # noqa: E402
@@ -344,14 +345,19 @@ def cmd_assign(args: argparse.Namespace, cfg: dict) -> int:
     cmd = [str(NOTIFY_WORKER), to_notify_label(args.worker), msg]
     if model and not is_codex:
         cmd += ['--model', model]
+    # /clear は notify-worker.sh が既定で送る (ADR 0011)。外すのは context.keep_context: true のときだけ
+    keep_context = (parse_block(task_path.read_text(errors='replace'), 'context') or {}).get('keep_context') == 'true'
+    if keep_context:
+        cmd += ['--keep-context']
     if args.clear and not is_codex:
-        cmd += ['--clear']
+        cmd += ['--clear']  # 互換。notify-worker.sh 側では何もしない
     if args.no_new and is_codex:
         cmd += ['--no-new']
 
     print(f'[assign] {args.worker} ← {task_id} ({project}) "{title[:50]}"')
     print(
-        f'[assign] agent={agent or "?"} model={model or "-"} codex={is_codex} clear={args.clear} no_new={args.no_new}'
+        f'[assign] agent={agent or "?"} model={model or "-"} codex={is_codex} '
+        f'keep_context={keep_context} no_new={args.no_new}'
     )
     print(f'[assign] cmd: {" ".join(cmd)}')
 
@@ -590,7 +596,9 @@ def main(argv: list[str] | None = None) -> int:
     p_as = sub.add_parser('assign', help='dispatch a task YAML to a worker via notify-worker.sh')
     p_as.add_argument('worker', help='w1 / w2 / w3 / w4')
     p_as.add_argument('task_yaml', help='path to task YAML')
-    p_as.add_argument('--clear', action='store_true', help='/clear before sending (Claude only)')
+    p_as.add_argument(
+        '--clear', action='store_true', help='deprecated: /clear is now the default (use context.keep_context to skip)'
+    )
     p_as.add_argument('--no-new', action='store_true', help='skip /new (Codex/W4 only)')
     p_as.add_argument('--dry-run', action='store_true', help='print the cmd without executing')
     p_as.set_defaults(func=cmd_assign)
