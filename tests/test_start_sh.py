@@ -79,6 +79,7 @@ def _run_start(
         'SQUAD_DRY_RUN': '1',
         'SQUAD_CLAUDE_TOKEN_FILE': str(root / 'no-claude-token'),
     }
+    env.pop('SQUAD_STATE_DIR', None)  # agents-<session>.json を本番の state に書かない
     if extra_env:
         env.update(extra_env)
     if owned is not None:
@@ -422,6 +423,26 @@ def test_dispatcher_and_worker_settings_get_squad_statusline(tmp_path: Path) -> 
     assert disp['hooks'] == local['hooks']
 
 
+def test_settings_example_runs_on_event_for_user_prompt_submit(tmp_path: Path) -> None:
+    """UserPromptSubmit も Stop と同じ形で on-event.sh を呼ぶ (ADR 0011 の 4.)."""
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(root, workspace, 'testsess')
+
+    assert r.returncode == 0, r.stderr
+    hooks = json.loads((root / '.claude' / 'settings.local.json').read_text())['hooks']
+    expected = [
+        {
+            'hooks': [{'command': f'{root}/scripts/hooks/on-event.sh', 'timeout': 5, 'type': 'command'}],
+            'matcher': '',
+        }
+    ]
+    assert hooks['UserPromptSubmit'] == expected
+    assert hooks['Stop'] == expected
+
+
 def test_worker_settings_keep_statusline_with_rc_enabled(tmp_path: Path) -> None:
     root = _fake_root(tmp_path)
     workspace = tmp_path / 'ws'
@@ -433,6 +454,41 @@ def test_worker_settings_keep_statusline_with_rc_enabled(tmp_path: Path) -> None
     worker = _dry_run_settings(r.stdout, 'WORKER_SETTINGS_JSON')
     assert 'statusLine' in worker
     assert 'disableRemoteControl' not in worker
+
+
+def test_agents_state_file_lists_worker_kinds(tmp_path: Path) -> None:
+    """squad/state/agents-<session>.json に worker の種類を書く (ADR 0011 の 5.)."""
+    root = _fake_root(tmp_path)
+    shutil.copytree(REPO / 'config', root / 'config')
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r = _run_start(
+        root,
+        workspace,
+        'testsess',
+        extra_env={'SQUAD_W2_AGENT': 'claude-local', 'SQUAD_W3_AGENT': 'opencode'},
+    )
+
+    assert r.returncode == 0, r.stderr
+    agents = json.loads((root / 'squad' / 'state' / 'agents-testsess.json').read_text())
+    assert agents == {'w1': 'claude', 'w2': 'claude-local', 'w3': 'opencode'}
+
+
+def test_agents_state_file_is_rewritten_per_start(tmp_path: Path) -> None:
+    """起動のたびに今の設定で書き直す。session ごとに別ファイル."""
+    root = _fake_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    _run_start(root, workspace, 'sq-a', extra_env={'SQUAD_W1_AGENT': 'opencode'})
+    r = _run_start(root, workspace, 'sq-a')
+    _run_start(root, workspace, 'sq-b', extra_env={'SQUAD_W3_AGENT': 'opencode'})
+
+    assert r.returncode == 0, r.stderr
+    state = root / 'squad' / 'state'
+    assert json.loads((state / 'agents-sq-a.json').read_text()) == {'w1': 'claude', 'w2': 'claude', 'w3': 'claude'}
+    assert json.loads((state / 'agents-sq-b.json').read_text()) == {'w1': 'claude', 'w2': 'claude', 'w3': 'opencode'}
 
 
 def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@
 stdin に Claude Code の status line JSON を受け取り、1 行を出す:
     w1 | Opus 5.5 | ctx 12% | SQUAD-301
 同じ値を squad/state/<worker>.json の ctx_sources.statusline に書く (取得元 statusline と時刻つき)。
+session_id も残し、変わった時刻を last_clear_at に書く (ADR 0011)。
 JSON の項目は docs/statusline-stdin-json.md (実測)。ctx は context_window.used_percentage (使用済みの割合)。
 
 worker ID は env SQUAD_WORKER_ID (start.sh が worker の pane に設定する)。Dispatcher には無いので
@@ -85,6 +86,19 @@ def parse(data: object) -> dict:
     }
 
 
+def record_session(st: dict, session_id: object) -> None:
+    """Claude Code の session_id を残し、変わったときだけ last_clear_at を書く (ADR 0011 の 4.).
+
+    /clear すると session_id が変わるので、その時刻を「最後の /clear」とする。前の値が無いときも
+    新しい文脈の始まりとして書く。session_id が無い・文字列でない JSON では何も変えない。
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return
+    if st.get('session_id') != session_id:
+        st['session_id'] = session_id
+        st['last_clear_at'] = ctx.now_iso()
+
+
 def render(worker: str, values: dict, task_id: str) -> str:
     ctx_text = f'ctx {values["pct"]}%' if values['pct'] is not None else 'ctx 不明'
     parts = [worker, values['model'] or '-', ctx_text, task_id]
@@ -113,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
                 st['worker'] = worker
                 ctx.set_slot(st, 'statusline', session=session, **values)
                 ctx.apply(st, session)
+                record_session(st, data.get('session_id'))
 
             ctx.update_state(ctx.state_dir() / f'{worker}.json', write)
     return 0
