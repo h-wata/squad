@@ -151,6 +151,61 @@ def test_statusline_without_worker_id_does_not_write_state(tmp_path: Path) -> No
     assert not (tmp_path / 'state').exists()
 
 
+def _with_session_id(sid: object) -> str:
+    data = json.loads(_fixture('after_reply'))
+    if sid is None:
+        data.pop('session_id', None)
+    else:
+        data['session_id'] = sid
+    return json.dumps(data)
+
+
+def test_statusline_records_session_id_and_first_clear(tmp_path: Path) -> None:
+    """Session_id を state に残す。前の値が無いときも新しい文脈の始まりとして last_clear_at を書く (ADR 0011 の 4.)."""
+    r = _run_statusline(tmp_path, _with_session_id('sess-a'), '--name', 'dispatcher', worker=None)
+
+    assert r.returncode == 0, r.stderr
+    st = json.loads((tmp_path / 'state' / 'dispatcher.json').read_text())
+    assert st['session_id'] == 'sess-a'
+    at = datetime.fromisoformat(st['last_clear_at'])
+    assert at.tzinfo is not None
+    assert abs((datetime.now(timezone.utc) - at).total_seconds()) < 60
+
+
+def test_statusline_last_clear_at_only_changes_with_session_id(tmp_path: Path) -> None:
+    state = tmp_path / 'state' / 'dispatcher.json'
+    state.parent.mkdir()
+    state.write_text(json.dumps({'session_id': 'sess-a', 'last_clear_at': '2026-01-01T00:00:00+00:00'}))
+
+    r = _run_statusline(tmp_path, _with_session_id('sess-a'), '--name', 'dispatcher', worker=None)
+
+    assert r.returncode == 0, r.stderr
+    st = json.loads(state.read_text())
+    assert (st['session_id'], st['last_clear_at']) == ('sess-a', '2026-01-01T00:00:00+00:00')
+
+    r = _run_statusline(tmp_path, _with_session_id('sess-b'), '--name', 'dispatcher', worker=None)
+
+    assert r.returncode == 0, r.stderr
+    st = json.loads(state.read_text())
+    assert st['session_id'] == 'sess-b'
+    assert st['last_clear_at'] != '2026-01-01T00:00:00+00:00'
+    assert abs((datetime.now(timezone.utc) - datetime.fromisoformat(st['last_clear_at'])).total_seconds()) < 60
+
+
+@pytest.mark.parametrize('sid', [None, '', 123])
+def test_statusline_without_session_id_keeps_previous(tmp_path: Path, sid: object) -> None:
+    """Session_id が無い・文字列でない JSON では session_id も last_clear_at も変えない."""
+    state = tmp_path / 'state' / 'w1.json'
+    state.parent.mkdir()
+    state.write_text(json.dumps({'session_id': 'sess-a', 'last_clear_at': '2026-01-01T00:00:00+00:00'}))
+
+    r = _run_statusline(tmp_path, _with_session_id(sid))
+
+    assert r.returncode == 0, r.stderr
+    st = json.loads(state.read_text())
+    assert (st['session_id'], st['last_clear_at']) == ('sess-a', '2026-01-01T00:00:00+00:00')
+
+
 # ---------- transcript ----------
 
 

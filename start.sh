@@ -336,6 +336,20 @@ DISPATCHER_SETTINGS_JSON="$(_settings_json '--name dispatcher' 0)" && WORKER_SET
     exit 1
 }
 
+# --- worker の種類を state に残す (ADR 0011 の 5.) ---
+# watchd が途中の /clear を当てるかの判定に使う。pane タイトルは Claude Code が上書きし、config.json は
+# w1-w3 を常に claude と書くので、どちらも使えない。書けなくても起動は止めない (watchd は区切らない側に倒す)。
+AGENTS_STATE_DIR="${SQUAD_STATE_DIR:-$SCRIPT_DIR/squad/state}"
+AGENTS_FILE="$AGENTS_STATE_DIR/agents-$SESSION_NAME.json"
+AGENTS_FILE="$AGENTS_FILE" W1="${WORKER_AGENTS[1]}" W2="${WORKER_AGENTS[2]}" W3="${WORKER_AGENTS[3]}" python3 -c "
+import json, os, pathlib
+path = pathlib.Path(os.environ['AGENTS_FILE'])
+path.parent.mkdir(parents=True, exist_ok=True)
+tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+tmp.write_text(json.dumps({f'w{n}': os.environ[f'W{n}'] for n in (1, 2, 3)}) + '\n')
+os.replace(tmp, path)
+" || echo "警告: $AGENTS_FILE を書けませんでした (watchd は途中の /clear を当てません)" >&2
+
 # SQUAD_DRY_RUN=1: settings/scaffold の pre-flight のみ実行して tmux には触れずに終了
 # (fresh clone 検証・CI での再利用向け。既存の tmux 起動セッションを巻き込まずに検証できる)
 if [ "${SQUAD_DRY_RUN:-0}" = "1" ]; then

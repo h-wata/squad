@@ -47,6 +47,18 @@
                 ],
                 "matcher": ""
             }
+        ],
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "command": "{SQUAD_ROOT}/scripts/hooks/on-event.sh",
+                        "timeout": 5,
+                        "type": "command"
+                    }
+                ],
+                "matcher": ""
+            }
         ]
     },
     "permissions": {

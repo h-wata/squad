@@ -33,6 +33,13 @@
 
 ### Added
 
+- brief と /clear で再開する仕組み (ADR 0011) の土台として、state と hook を広げた (#105)。start.sh が
+  `squad/state/agents-<session>.json` に w1-w3 の種類 (`claude` / `claude-local` / `opencode`) を書く。
+  `scripts/statusline.py` が Claude Code の `session_id` を state に残し、変わった時刻を `last_clear_at` に書く。
+  `scripts/hooks/on-event.sh` は Stop ごとに `stop_count` を 1 足し、`UserPromptSubmit` を受けて、
+  `watchd_sent` と照合して人間の入力なら `last_human_prompt_at` を書く。window 名 `dispatcher` は
+  Dispatcher として扱う。既存の `.claude/settings.local.json` には `UserPromptSubmit` hook が入らないので、
+  `.claude/settings.local.json.example` から手で写す。
 - squad 用の status line を足し、ctx の取り方を直した (#105 の 1)。`scripts/statusline.py` が
   `w1 | Opus 5.5 | ctx 12% | SQUAD-301` の 1 行を出し、同じ値を `squad/state/<worker>.json` に取得元
   `statusline` と時刻つきで書く。start.sh は Dispatcher と worker の `--settings` にこの statusLine を足す
