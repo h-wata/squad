@@ -20,6 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 import sys
 
 import yaml
@@ -304,13 +305,24 @@ def check_task_yaml(path: Path, task_id_locations: dict[str, list[Path]]) -> lis
         else:
             results.append(Result(16, 'OK', f'{key}: step={rule["step"]} assign={rule["assign"]}'))
 
-    # 17. context.keep_context (#105, 任意)。true なら squad assign が notify-worker.sh の /clear を外す
+    # 17. context.keep_context (#105, 任意)。true なら squad assign が notify-worker.sh の /clear を外す。
+    # squad assign は stdlib の parse_block で生テキストの `true` だけを有効にするため、PyYAML で bool になる
+    # yes / True / on や、引用符付きの "true" は NG にする (検査 OK なのに実行時に /clear される不一致を防ぐ)
     if isinstance(context, dict) and 'keep_context' in context:
         keep = context['keep_context']
-        if isinstance(keep, bool):
-            results.append(Result(17, 'OK', f'context.keep_context: {keep}'))
+        raw_match = re.search(r'^[ \t]+keep_context[ \t]*:[ \t]*(.*?)[ \t]*$', text, re.MULTILINE)
+        raw = raw_match.group(1).split(' #', 1)[0].strip() if raw_match else ''
+        assign_value = (parse_block(text, 'context') or {}).get('keep_context')
+        if raw in ('true', 'false') and isinstance(keep, bool) and assign_value == raw:
+            results.append(Result(17, 'OK', f'context.keep_context: {raw}'))
         else:
-            results.append(Result(17, 'NG', f'context.keep_context は true / false にしてください: {keep!r}'))
+            results.append(
+                Result(
+                    17,
+                    'NG',
+                    f'context.keep_context は引用符なし小文字の true / false にしてください: {raw or keep!r}',
+                )
+            )
     else:
         results.append(Result(17, 'OK', 'context.keep_context はありません (既定: /clear する)'))
 

@@ -251,6 +251,44 @@ def test_dispatcher_target_is_not_cleared_by_default(pane: tuple[str, Path]) -> 
     assert '/clear' not in log.read_text().splitlines()
 
 
+@pytest.fixture
+def codex_pane(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """Window 名 w4 (Codex) にモック TUI を置いたテスト専用 session."""
+    session = f'squad314test-{uuid.uuid4().hex[:8]}'
+    mock = tmp_path / 'mock_tui.py'
+    mock.write_text(MOCK_TUI)
+    log = tmp_path / 'submitted.log'
+    _tmux('new-session', '-d', '-s', session, '-n', 'w4', '-x', '100', '-y', '30', f'MOCK_LOG={log} python3 {mock}')
+    try:
+        time.sleep(1.0)
+        yield session, log
+    finally:
+        _tmux('kill-session', '-t', session)
+
+
+def _notify_w4(session: str, *extra: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, 'SQUAD_SESSION': session}
+    return subprocess.run(
+        ['bash', str(NOTIFY), 'W4', MSG, *extra], capture_output=True, text=True, env=env, timeout=180, check=False
+    )
+
+
+def test_codex_sends_new_by_default(codex_pane: tuple[str, Path]) -> None:
+    session, log = codex_pane
+    assert _notify_w4(session).returncode == 0
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert lines[0] == '/new' and '/clear' not in lines, lines
+
+
+def test_codex_keep_context_sends_neither_new_nor_clear(codex_pane: tuple[str, Path]) -> None:
+    """--keep-context は Codex では --no-new と同じ: /new も /clear も送らず本文だけ送る."""
+    session, log = codex_pane
+    proc = _notify_w4(session, '--keep-context')
+    assert proc.returncode == 0, proc.stderr
+    lines = [ln for ln in log.read_text().splitlines() if ln]
+    assert len(lines) == 1 and lines[0].count(PROBE) == 1, lines
+
+
 def _opencode_pane(tmp_path: Path, mode: str) -> tuple[str, Path]:
     """モックを ``opencode`` という名前で動かす session を作る (前面プロセス名で Opencode を判定するため).
 
