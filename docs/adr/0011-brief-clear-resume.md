@@ -169,10 +169,21 @@ hook (`scripts/hooks/on-event.sh`) が transcript の usage を `ctx_sources.tra
 - transcript の最後の assistant メッセージが `AskUserQuestion` の tool_use で、tool_result がまだ無い
 
 人間の入力は次で見分ける。hook に `UserPromptSubmit` を足し、on-event.sh は window 名 `dispatcher`
-を worker `dispatcher` に解決する (`SQUAD_WORKER_ID` は足さない)。watchd は Dispatcher に送るたびに本文の
-crc32 と時刻を `state/dispatcher.json` の `watchd_sent` (直近 20 件) に残す。hook は入力の crc32 が
-そこに無ければ人間の入力として `last_human_prompt_at` を書く。web の指示は watchd が送るが人間の依頼
-なので、これも人間の入力に数える。分からないときは人間の入力に倒す (区切らない側)。
+を worker `dispatcher` に解決する (`SQUAD_WORKER_ID` は足さない)。watchd は Dispatcher に送るたびに
+`state/dispatcher.json` の `watchd_sent` (直近 20 件) に `{"crc32": <本文の crc32>, "at": <時刻>,
+"human_origin": <bool>}` を残す。`human_origin` は `deliver_instructions()` が送る web の指示
+(`[squad-web 指示]` で始まる本文) だけ `true`、report 通知など他はすべて `false` にする。
+
+hook は入力ごとに次の順で判定し、最初に当てはまったもので決める。
+
+1. 入力が `[squad-web 指示]` で始まる: crc32 が `watchd_sent` にあっても人間の入力とし、
+   `last_human_prompt_at` を書く。
+2. crc32 が `watchd_sent` にあり、その記録の `human_origin` が `true`: 人間の入力とし、
+   `last_human_prompt_at` を書く。
+3. crc32 が `watchd_sent` にあり、その記録の `human_origin` が `false`: watchd の送信とし、
+   `last_human_prompt_at` は書かない。
+4. それ以外 (crc32 が無い、`watchd_sent` や `human_origin` が無い・読めない・壊れている、入力が読めない):
+   照合できないので人間の入力とし、`last_human_prompt_at` を書く (区切らない側)。
 
 **流れ**は 2. と同じで、文面だけ変える:
 
@@ -205,10 +216,17 @@ crc32 と時刻を `state/dispatcher.json` の `watchd_sent` (直近 20 件) に
   `exact` / `approximate` を使う。session は project の `.squad_session` から引く。
 - `metrics/task_costs.jsonl` のレコードに `total_tokens`、`sessions` (数えた session の数)、`breaks`
   (brief の `break_count`、brief が無ければ 0) を足す。
+- 同じレコードに `task_created_at` も足す。値の正は task YAML の `created_at` で、TZ 付き ISO8601 として
+  読めたものを UTC に揃えて保存する。`measured_at` や task YAML の mtime では代用しない (実装前に始まり
+  実装後に終わったタスクを「後」に数えてしまうため)。`created_at` が無いときは `task_created_at: null` と
+  `task_created_at_error: "missing"`、読めない・TZ が無いときは `null` と `"invalid"` を保存し、`notes` に
+  元の値を書く。読めたときの `task_created_at_error` は `null`。
 - 比較は `measure_task_cost.py --compare --cutover <ISO8601>` で出す。`task_costs.jsonl` を
   project + task_id ごとに最新 1 件へまとめ、`attribution` が `exact` か `worker_dir` のものだけを使う。
-  cutover より前に task YAML が作られたものを「前」、以後を「後」とし、model × agent ごとに件数、
-  `total_tokens` と `cache_read_tokens` の中央値と平均を Markdown の表で標準出力に出す。cutover には
+  保存した `task_created_at` が cutover より前のものを「前」、cutover 以上のものを「後」とし、model × agent
+  ごとに件数、`total_tokens` と `cache_read_tokens` の中央値と平均を Markdown の表で標準出力に出す。
+  `task_created_at` が `null` のもの、この項目が無い既存レコードは比較から外し、表の下に理由ごとの件数
+  (`missing` / `invalid` / 項目なし (この ADR より前のレコード) / `attribution` が対象外) を出す。cutover には
   実装 PR を merge した時刻を使い、CHANGELOG に書く。
 
 ### 7. instructions の書き換え
