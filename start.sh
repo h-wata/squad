@@ -109,7 +109,11 @@ if [ "$ANY_CLAUDE_LOCAL" = "1" ] || [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
     # 新しい CLAUDE_CONFIG_DIR は初回オンボーディング (テーマ選択 / セキュリティ注意 /
     # フォルダ信頼 / bypass 確認) を出す。tmux の pane には答える人がいないので、
     # 起動前に「済んだこと」にしておく。workspace ごとの信頼も先に入れる。
-    WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" SESSION_NAME="$SESSION_NAME" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
+    # トークンがあるときは Dispatcher も <session>/dispatcher を CLAUDE_CONFIG_DIR にして起動する
+    # (下の dispatcher window の起動行)。worker と同じく生成物の dir なので、同じ準備をここでする。
+    # $WORKER_CONFIG_DIR 直下の settings.json / .claude.json はユーザーの持ち物なので書かない (PR #121 B2)。
+    WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" SESSION_NAME="$SESSION_NAME" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" \
+        INIT_DISPATCHER_DIR="$CLAUDE_WORKER_NO_ASK" python3 -c "
 import json, os, pathlib, shlex
 
 base = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
@@ -119,8 +123,10 @@ try:
     kioku = src['mcpServers']['kioku_mesh']
 except (OSError, ValueError, KeyError, TypeError):
     kioku = None
-for n in (1, 2, 3):
-    cfg_dir = base / os.environ['SESSION_NAME'] / f'w{n}'
+cfg_dirs = [base / os.environ['SESSION_NAME'] / f'w{n}' for n in (1, 2, 3)]
+if os.environ['INIT_DISPATCHER_DIR'] == '1':
+    cfg_dirs.append(base / os.environ['SESSION_NAME'] / 'dispatcher')
+for cfg_dir in cfg_dirs:
     cfg_dir.mkdir(parents=True, exist_ok=True)
     # statusLine は repo の statusline.py を絶対パスで指す (相対だとディレクトリ構成に依存する, #105)。
     settings = json.loads((base / 'settings.base.json').read_text())
@@ -462,6 +468,55 @@ fi
 WORKER_ROWS_ARG_Q="$(printf '%q' "SQUAD_WORKER_ROWS=$WORKER_ROWS")"
 OPENCODE_NOTE_ARG_Q="$(printf '%q' "SQUAD_OPENCODE_WORKER_NOTE=$DISPATCHER_OPENCODE_NOTE")"
 
+# --- 起動行は短い 1 行で送る (SQUAD-325) ---
+# 起動直後の pane は bash がまだ .bashrc を読んでいて readline を始めておらず、端末は canonical
+# mode のまま入力を貯める。canonical mode の行バッファは 4096 バイト (N_TTY_BUF_SIZE) で、
+# 4096 バイト目以降は改行まで捨てられる。dispatcher / w1-w3 の起動行は 4.3〜4.7KB あるため、
+# send-keys で丸ごと送ると途中で切れ、閉じていない引用符のせいで bash が続きの入力待ち (>) で
+# 止まることがある (2026-11-18 に dispatcher で発生)。readline の準備が間に合えば切れないので
+# 起きたり起きなかったりする。
+# そこで起動行はファイルに書き、pane には「. <ファイル>」だけを送る。source なので pane の
+# 対話シェルで直接打った場合と同じに動く (cd も残り、前面プロセスも claude / codex のまま)。
+# ファイルには claude-local の ANTHROPIC_AUTH_TOKEN が入りうるので 600 で作る。後始末は 3 段 (PR #121 B1):
+#   1. pane が読み込んだら最初の行で自分を消す (source は実行前にファイル全体を読むので、消しても続きは走る)。
+#   2. start.sh が途中で止まったら (send-keys の失敗を含む)、EXIT trap が作ったファイルをすべて消す。
+#   3. 送り終えたら、時限付きの子プロセスが SQUAD_LAUNCH_FILE_TTL 秒 (既定 120) 後に残りを消す。
+#      pane が読む前に死んだときの分。読み済みなら消すものが無いだけ。
+# 名前は起動ごとに一意 (<window>.XXXXXX) にして、前回の起動の 3. が今回のファイルを消さないようにする。
+LAUNCH_DIR="$AGENTS_STATE_DIR/launch-$SESSION_NAME"
+LAUNCH_FILE_TTL="${SQUAD_LAUNCH_FILE_TTL:-120}"
+case "$LAUNCH_FILE_TTL" in
+    '' | *[!0-9]*)
+        echo "エラー: SQUAD_LAUNCH_FILE_TTL は秒数 (0 以上の整数) で指定してください: '$LAUNCH_FILE_TTL'" >&2
+        exit 1
+        ;;
+esac
+LAUNCH_FILES=()
+_remove_launch_files() {
+    if [ "${#LAUNCH_FILES[@]}" -gt 0 ]; then
+        command rm -f -- "${LAUNCH_FILES[@]}"
+    fi
+}
+trap _remove_launch_files EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+launch_in_window() {
+    # $1: window 名、$2: pane の対話シェルに打たせたいコマンド行
+    local f
+    (umask 077 && mkdir -p "$LAUNCH_DIR") && chmod 700 "$LAUNCH_DIR" \
+        && f="$(mktemp "$LAUNCH_DIR/$1.XXXXXX")" || {
+        echo "エラー: 起動用ファイルを $LAUNCH_DIR に作れませんでした" >&2
+        exit 1
+    }
+    LAUNCH_FILES+=("$f")
+    printf '%s\n%s\n' 'command rm -f -- "${BASH_SOURCE[0]}"' "$2" >"$f" || {
+        echo "エラー: 起動用ファイル $f を書けませんでした" >&2
+        exit 1
+    }
+    tmux send-keys -t "$SESSION_NAME:$1" ". $(printf '%q' "$f")" Enter
+}
+
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "既存のセッション '$SESSION_NAME' を終了します..."
@@ -469,6 +524,12 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
 fi
 
 echo "マルチエージェントシステムを起動します..."
+
+# 前回の起動が後始末の前に落ちた (kill -9 等) ときの起動用ファイル。同じ名前の session は
+# いま終了させたので、ここに残っているものを読む pane はもう無い。
+if [ -d "$LAUNCH_DIR" ]; then
+    find "$LAUNCH_DIR" -maxdepth 1 -type f -delete
+fi
 
 # エージェントごとに window を作る (#95)。名前は prefix + w の一覧に出る。
 #   dispatcher / w1 / w2 / w3 / w4 (Codex, 無効時は作らない) / term / aux
@@ -526,7 +587,14 @@ tmux send-keys -t "$SESSION_NAME:aux" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 #   Dispatcher は YAML 管理のみでコードを書かないため off、Worker 1-3 は実装担当のため
 #   full。プラグイン未導入なら無視されるだけで無害。レベルを変えたい場合はここを編集
 #   (lite/full/ultra)。導入手順は README の「Ponytail 連携 (任意)」参照。
-tmux send-keys -t "$SESSION_NAME:dispatcher" "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\"" Enter
+# トークンがあれば worker と同じ流儀の専用 config dir (<session>/dispatcher) で起動し、
+# グローバルの ask ルール (rm 等) で止まらないようにする。権限モードは --settings の auto mode のまま
+# (bypass にはしない)。
+DISPATCHER_NO_ASK_ENV=""
+if [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
+    DISPATCHER_NO_ASK_ENV="CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/dispatcher") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" "
+fi
+launch_in_window dispatcher "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off ${DISPATCHER_NO_ASK_ENV}claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\""
 
 # w1-w3 window: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
@@ -538,7 +606,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
@@ -554,12 +622,12 @@ for n in 1 2 3; do
         # --mini: フルTUI (opentui キャンバス描画) が narrow pane で SIGILL クラッシュ
         # するのを確認したため、軽量な最小インタラクティブUIに切り替えて回避。
         # --auto --prompt での起動と send-keys での対話継続はそのまま使える。
-        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q" Enter
+        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q"
     elif [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
         # ask を外した claude worker。起動の形は claude-local と同じで、認証だけ OAuth トークン。
-        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     else
-        tmux send-keys -t "$SESSION_NAME:w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\"" Enter
+        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     fi
 done
 
@@ -570,7 +638,16 @@ done
 # SQUAD_WORKER_ID は Codex の hook 機構があれば squad と連携するための識別子 (将来用、Claude hook には未対応)。
 # SQUAD_ENABLE_CODEX=0 の場合、codex CLI を使わない環境向けに w4 window 自体を作らない。
 if [ "$ENABLE_CODEX" = "1" ]; then
-    tmux send-keys -t "$SESSION_NAME:w4" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 SQUAD_SESSION=$SESSION_NAME_Q codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\"" Enter
+    launch_in_window w4 "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w4 SQUAD_SESSION=$SESSION_NAME_Q codex --cd $WORKSPACE_Q --add-dir $SCRIPT_DIR_Q --dangerously-bypass-approvals-and-sandbox \"\$(python3 $RENDER_SCRIPT_Q $CODEX_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q)\""
+fi
+
+# 送り終えた起動用ファイルの後始末を時限付きの子プロセスに渡す (上の「後始末は 3 段」の 3.)。
+# 渡したら EXIT trap の対象から外す (最後の tmux attach が失敗しても、pane が読む前に消さないように)。
+if [ "${#LAUNCH_FILES[@]}" -gt 0 ]; then
+    # shellcheck disable=SC2016  # $1 / $@ は子の bash で展開する
+    nohup bash -c 'sleep "$1" && shift && command rm -f -- "$@"' _ "$LAUNCH_FILE_TTL" "${LAUNCH_FILES[@]}" \
+        >/dev/null 2>&1 &
+    LAUNCH_FILES=()
 fi
 
 # 監視デーモン (watcher) をバックグラウンド起動

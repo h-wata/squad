@@ -10,12 +10,14 @@ SQUAD_DRY_RUN=1 で settings/scaffold の pre-flight だけを実行させ、tmu
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -511,3 +513,267 @@ def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
     assert b_cfg['model'] == json.loads((root / 'config/claude-worker/settings.base.json').read_text())['model']
     # statusLine は repo の statusline.py を絶対パスで指す
     assert b_cfg['statusLine'] == {'type': 'command', 'command': f'python3 {root / "scripts" / "statusline.py"}'}
+
+
+# --- 起動行を短い 1 行で送る (SQUAD-325) ---
+# 起動直後の pane は canonical mode で、1 行 4096 バイト目以降が捨てられる。dispatcher / w1-w3 の
+# 起動行は 4KB を超えるため、send-keys では「. <起動用ファイル>」だけを送る。
+
+_SEND_KEYS_LIMIT = 1024  # canonical mode の上限 4096 より十分小さい値で押さえる
+
+_FAKE_TMUX_LOGGING = """#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:2] == ['has-session']:
+    sys.exit(1)
+with open(os.environ['FAKE_TMUX_LOG'], 'a', encoding='utf-8') as f:
+    f.write(json.dumps(sys.argv[1:]) + '\\n')
+# FAKE_TMUX_FAIL_TARGET に一致する window への send-keys だけ失敗させる
+fail = os.environ.get('FAKE_TMUX_FAIL_TARGET')
+if fail and sys.argv[1:2] == ['send-keys'] and sys.argv[sys.argv.index('-t') + 1].endswith(':' + fail):
+    sys.exit(1)
+"""
+
+# 起動用ファイルを source したときに呼ばれる偽 claude。引数と認証まわりの環境変数を書き出す。
+_FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FAKE_CLAUDE_OUT'], 'w', encoding='utf-8') as f:
+    json.dump({'argv': sys.argv[1:], 'cwd': os.getcwd(),
+               'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'),
+               'token': os.environ.get('CLAUDE_CODE_OAUTH_TOKEN')}, f)
+"""
+
+
+def _live_root(tmp_path: Path) -> Path:
+    """隔離 root を作る。SQUAD_DRY_RUN なしで tmux まで進める用で、watcher は何もしない stub にする."""
+    root = _fake_root(tmp_path)
+    # 追跡ファイルだけを写す。手元で start.sh を動かした後の config/claude-worker/.claude.json 等が混ざると
+    # 「トークンなしでは .claude.json を作らない」の確認が手元の状態に左右される。
+    tracked = subprocess.run(
+        ['git', '-C', str(REPO), 'ls-files', '-z', 'config', 'scripts', 'instructions'],
+        capture_output=True,
+        check=True,
+    ).stdout.decode()
+    for rel in filter(None, tracked.split('\0')):
+        dst = root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, dst)
+    watch = root / 'watch.sh'
+    watch.write_text('#!/bin/bash\nexit 0\n')
+    watch.chmod(0o755)
+    return root
+
+
+def _run_start_live(
+    root: Path, workspace: Path, tmp_path: Path, *, token: Path | None, extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    fake_bin = tmp_path / 'fake-tmux-log-bin'
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / 'tmux').write_text(_FAKE_TMUX_LOGGING)
+    (fake_bin / 'tmux').chmod(0o755)
+    log = tmp_path / 'tmux.log'
+    env = {
+        **os.environ,
+        'SQUAD_SESSION': 'sq325t',
+        'SQUAD_CLAUDE_TOKEN_FILE': str(token or (root / 'no-claude-token')),
+        'SQUAD_OWNED_PROJECTS': 'pj',
+        'FAKE_TMUX_LOG': str(log),
+        'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+        **(extra_env or {}),
+    }
+    for k in ('SQUAD_DRY_RUN', 'SQUAD_STATE_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'):
+        env.pop(k, None)
+    r = subprocess.run(
+        [shutil.which('bash') or 'bash', str(root / 'start.sh'), str(workspace)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    calls = [json.loads(ln) for ln in log.read_text().splitlines()] if log.exists() else []
+    return r, calls
+
+
+def _send_keys(calls: list[list[str]]) -> dict[str, str]:
+    """送り先 window 名から send-keys で送った文字列への dict を返す."""
+    out = {}
+    for c in calls:
+        if c[0] == 'send-keys':
+            out[c[c.index('-t') + 1].split(':', 1)[1]] = c[c.index('-t') + 2]
+    return out
+
+
+def _source_launch_file(line: str, tmp_path: Path) -> dict:
+    """send-keys の 1 行を対話シェルと同じく bash で評価し、偽 claude が受け取った内容を返す."""
+    fake_bin = tmp_path / 'fake-claude-bin'
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / 'claude').write_text(_FAKE_CLAUDE)
+    (fake_bin / 'claude').chmod(0o755)
+    out = tmp_path / 'claude-out.json'
+    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}', 'FAKE_CLAUDE_OUT': str(out)}
+    for k in ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'):
+        env.pop(k, None)
+    r = subprocess.run(
+        [shutil.which('bash') or 'bash', '-c', line], env=env, capture_output=True, text=True, check=False, timeout=30
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads(out.read_text())
+
+
+def test_launch_lines_are_short_for_every_agent_kind(tmp_path: Path) -> None:
+    """どの worker の種類でも、send-keys で送る 1 行は canonical mode の上限より十分短い."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy-token\n')
+
+    r, calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=token,
+        extra_env={'SQUAD_W2_AGENT': 'claude-local', 'SQUAD_W3_AGENT': 'opencode'},
+    )
+
+    assert r.returncode == 0, r.stderr
+    sent = _send_keys(calls)
+    assert set(sent) >= {'dispatcher', 'w1', 'w2', 'w3', 'w4'}
+    launch_dir = root / 'squad' / 'state' / 'launch-sq325t'
+    assert launch_dir.stat().st_mode & 0o777 == 0o700
+    for window, line in sent.items():
+        assert len(line.encode()) <= _SEND_KEYS_LIMIT, (window, len(line.encode()))
+        if window in ('term', 'aux'):
+            continue
+        # 名前は起動ごとに一意 (<window>.XXXXXX)。前回の起動の後始末が今回のファイルを消さないように
+        assert line.startswith(f'. {launch_dir / window}.'), line
+        f = Path(line[2:])
+        assert f.parent == launch_dir, line
+        # claude-local の ANTHROPIC_AUTH_TOKEN が入るので本人だけが読める
+        assert f.stat().st_mode & 0o777 == 0o600, window
+        # 中身は元の起動行そのもの (4KB を超えるものがあるからファイルに逃がしている)
+        assert f.read_text().splitlines()[1].startswith('cd '), window
+
+
+def test_dispatcher_launch_with_token_uses_dedicated_config_dir(tmp_path: Path) -> None:
+    """トークンがあれば Dispatcher は専用の CLAUDE_CONFIG_DIR (<session>/dispatcher) + OAuth トークンで起動する."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy-token\n')
+
+    r, calls = _run_start_live(root, workspace, tmp_path, token=token)
+
+    assert r.returncode == 0, r.stderr
+    line = _send_keys(calls)['dispatcher']
+    launch_file = Path(line[2:])
+    # トークン本体はファイルにも書かず、起動時に $(cat) で読む
+    assert 'dummy-token' not in launch_file.read_text()
+    got = _source_launch_file(line, tmp_path)
+    dispatcher_dir = root / 'config' / 'claude-worker' / 'sq325t' / 'dispatcher'
+    assert got['config_dir'] == str(dispatcher_dir)
+    assert got['token'] == 'dummy-token'
+    assert got['cwd'] == str(root)
+    assert got['argv'][got['argv'].index('--model') + 1] == 'opus'
+    # system prompt (Worker 表を含む dispatcher.md) が最後まで渡っている
+    prompt = got['argv'][got['argv'].index('--append-system-prompt') + 1]
+    assert '| Worker 3 | w3 |' in prompt
+    # 読み込んだら消える
+    assert not launch_file.exists()
+    # Dispatcher の config dir も初回確認を済ませてある (済んでいないとオンボーディング画面で止まる)
+    state = json.loads((dispatcher_dir / '.claude.json').read_text())
+    assert state['hasCompletedOnboarding'] is True
+    assert state['projects'][str(root)]['hasTrustDialogAccepted'] is True
+
+
+def test_dispatcher_launch_without_token_keeps_default_config(tmp_path: Path) -> None:
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r, calls = _run_start_live(root, workspace, tmp_path, token=None)
+
+    assert r.returncode == 0, r.stderr
+    got = _source_launch_file(_send_keys(calls)['dispatcher'], tmp_path)
+    assert got['config_dir'] is None
+    assert got['token'] is None
+    assert not (root / 'config' / 'claude-worker' / '.claude.json').exists()
+    assert not (root / 'config' / 'claude-worker' / 'sq325t' / 'dispatcher').exists()
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_dispatcher_launch_with_token_leaves_root_config_untouched(tmp_path: Path) -> None:
+    """config/claude-worker 直下の settings.json / .claude.json はユーザーの持ち物なので書かない (PR #121 B2)."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy-token\n')
+    base = root / 'config' / 'claude-worker'
+    (base / 'settings.json').write_text('{"model": "opus", "env": {"MY_SETTING": "1"}}\n')
+    (base / '.claude.json').write_text('{"userOwned": true}\n')
+    before = {n: _sha256(base / n) for n in ('settings.json', '.claude.json')}
+
+    r, _calls = _run_start_live(root, workspace, tmp_path, token=token)
+
+    assert r.returncode == 0, r.stderr
+    assert {n: _sha256(base / n) for n in ('settings.json', '.claude.json')} == before
+
+
+def _launch_files(root: Path, session: str = 'sq325t') -> list[Path]:
+    d = root / 'squad' / 'state' / f'launch-{session}'
+    return sorted(d.iterdir()) if d.exists() else []
+
+
+def test_launch_files_are_removed_when_send_keys_fails(tmp_path: Path) -> None:
+    """send-keys が失敗して start.sh が止まっても、作った起動用ファイルを残さない (PR #121 B1).
+
+    claude-local の起動用ファイルには ANTHROPIC_AUTH_TOKEN が平文で入る。
+    """
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r, calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=None,
+        extra_env={
+            'SQUAD_W1_AGENT': 'claude-local',
+            'SQUAD_LOCAL_AUTH_TOKEN': 'sk-secret-b1',
+            'FAKE_TMUX_FAIL_TARGET': 'w1',
+        },
+    )
+
+    assert r.returncode != 0
+    # dispatcher の分は送れていて、w1 で止まった
+    assert 'dispatcher' in _send_keys(calls)
+    assert _launch_files(root) == []
+
+
+def test_unread_launch_files_expire(tmp_path: Path) -> None:
+    """send-keys は通ったが pane が読まなかった (先に死んだ等) 起動用ファイルも、時間が来たら消す (PR #121 B1)."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r, _calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=None,
+        extra_env={'SQUAD_W1_AGENT': 'claude-local', 'SQUAD_LAUNCH_FILE_TTL': '1'},
+    )
+
+    assert r.returncode == 0, r.stderr
+    # 偽 tmux は誰も source しないので、後始末が無ければ残り続ける
+    deadline = time.monotonic() + 15
+    while _launch_files(root) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert _launch_files(root) == []
