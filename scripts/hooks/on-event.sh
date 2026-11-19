@@ -166,6 +166,8 @@ def merge(data):
         data['last_event_message'] = msg[:200]
     data['updated_at'] = data['last_event_at']
     if transcript:
+        # watchd が最後の AskUserQuestion の答え待ちを見て Dispatcher を区切らない (ADR 0011 の 4.)
+        data['transcript_path'] = transcript
         ctx.set_slot(data, 'transcript', session=session, **ctx.transcript_slot(tokens, data, session))
         ctx.apply(data, session)
 

@@ -346,6 +346,18 @@ def test_unwritable_state_dir_does_not_block_prompt(tmp_path: Path) -> None:
     assert not (state / 'dispatcher.json').exists()
 
 
+def test_transcript_path_is_kept_for_ask_user_check(tmp_path: Path) -> None:
+    """Watchd は transcript の最後の AskUserQuestion を見て Dispatcher を区切らない (ADR 0011 の 4.)."""
+    state = tmp_path / 'state'
+    t = tmp_path / 't.jsonl'
+    t.write_text('')
+
+    r = _run(_env(state), {'hook_event_name': 'Stop', 'transcript_path': str(t)})
+
+    assert r.returncode == 0, r.stderr
+    assert _state(state)['transcript_path'] == str(t)
+
+
 # ---------- state 更新の原子性と並行更新 (cross-review SQUAD-315) ----------
 
 
