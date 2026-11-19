@@ -511,3 +511,174 @@ def test_worker_config_dirs_are_per_session(tmp_path: Path) -> None:
     assert b_cfg['model'] == json.loads((root / 'config/claude-worker/settings.base.json').read_text())['model']
     # statusLine は repo の statusline.py を絶対パスで指す
     assert b_cfg['statusLine'] == {'type': 'command', 'command': f'python3 {root / "scripts" / "statusline.py"}'}
+
+
+# --- 起動行を短い 1 行で送る (SQUAD-325) ---
+# 起動直後の pane は canonical mode で、1 行 4096 バイト目以降が捨てられる。dispatcher / w1-w3 の
+# 起動行は 4KB を超えるため、send-keys では「. <起動用ファイル>」だけを送る。
+
+_SEND_KEYS_LIMIT = 1024  # canonical mode の上限 4096 より十分小さい値で押さえる
+
+_FAKE_TMUX_LOGGING = """#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:2] == ['has-session']:
+    sys.exit(1)
+with open(os.environ['FAKE_TMUX_LOG'], 'a', encoding='utf-8') as f:
+    f.write(json.dumps(sys.argv[1:]) + '\\n')
+"""
+
+# 起動用ファイルを source したときに呼ばれる偽 claude。引数と認証まわりの環境変数を書き出す。
+_FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['FAKE_CLAUDE_OUT'], 'w', encoding='utf-8') as f:
+    json.dump({'argv': sys.argv[1:], 'cwd': os.getcwd(),
+               'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'),
+               'token': os.environ.get('CLAUDE_CODE_OAUTH_TOKEN')}, f)
+"""
+
+
+def _live_root(tmp_path: Path) -> Path:
+    """隔離 root を作る。SQUAD_DRY_RUN なしで tmux まで進める用で、watcher は何もしない stub にする."""
+    root = _fake_root(tmp_path)
+    for d in ('config', 'scripts', 'instructions'):
+        shutil.copytree(REPO / d, root / d)
+    watch = root / 'watch.sh'
+    watch.write_text('#!/bin/bash\nexit 0\n')
+    watch.chmod(0o755)
+    return root
+
+
+def _run_start_live(
+    root: Path, workspace: Path, tmp_path: Path, *, token: Path | None, extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+    fake_bin = tmp_path / 'fake-tmux-log-bin'
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / 'tmux').write_text(_FAKE_TMUX_LOGGING)
+    (fake_bin / 'tmux').chmod(0o755)
+    log = tmp_path / 'tmux.log'
+    env = {
+        **os.environ,
+        'SQUAD_SESSION': 'sq325t',
+        'SQUAD_CLAUDE_TOKEN_FILE': str(token or (root / 'no-claude-token')),
+        'SQUAD_OWNED_PROJECTS': 'pj',
+        'FAKE_TMUX_LOG': str(log),
+        'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+        **(extra_env or {}),
+    }
+    for k in ('SQUAD_DRY_RUN', 'SQUAD_STATE_DIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'):
+        env.pop(k, None)
+    r = subprocess.run(
+        [shutil.which('bash') or 'bash', str(root / 'start.sh'), str(workspace)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+    calls = [json.loads(ln) for ln in log.read_text().splitlines()] if log.exists() else []
+    return r, calls
+
+
+def _send_keys(calls: list[list[str]]) -> dict[str, str]:
+    """送り先 window 名から send-keys で送った文字列への dict を返す."""
+    out = {}
+    for c in calls:
+        if c[0] == 'send-keys':
+            out[c[c.index('-t') + 1].split(':', 1)[1]] = c[c.index('-t') + 2]
+    return out
+
+
+def _source_launch_file(line: str, tmp_path: Path) -> dict:
+    """send-keys の 1 行を対話シェルと同じく bash で評価し、偽 claude が受け取った内容を返す."""
+    fake_bin = tmp_path / 'fake-claude-bin'
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / 'claude').write_text(_FAKE_CLAUDE)
+    (fake_bin / 'claude').chmod(0o755)
+    out = tmp_path / 'claude-out.json'
+    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}', 'FAKE_CLAUDE_OUT': str(out)}
+    for k in ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'):
+        env.pop(k, None)
+    r = subprocess.run(
+        [shutil.which('bash') or 'bash', '-c', line], env=env, capture_output=True, text=True, check=False, timeout=30
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads(out.read_text())
+
+
+def test_launch_lines_are_short_for_every_agent_kind(tmp_path: Path) -> None:
+    """どの worker の種類でも、send-keys で送る 1 行は canonical mode の上限より十分短い."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy-token\n')
+
+    r, calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=token,
+        extra_env={'SQUAD_W2_AGENT': 'claude-local', 'SQUAD_W3_AGENT': 'opencode'},
+    )
+
+    assert r.returncode == 0, r.stderr
+    sent = _send_keys(calls)
+    assert set(sent) >= {'dispatcher', 'w1', 'w2', 'w3', 'w4'}
+    launch_dir = root / 'squad' / 'state' / 'launch-sq325t'
+    assert launch_dir.stat().st_mode & 0o777 == 0o700
+    for window, line in sent.items():
+        assert len(line.encode()) <= _SEND_KEYS_LIMIT, (window, len(line.encode()))
+        if window in ('term', 'aux'):
+            continue
+        assert line == f'. {launch_dir / (window + ".sh")}', line
+        f = launch_dir / f'{window}.sh'
+        # claude-local の ANTHROPIC_AUTH_TOKEN が入るので本人だけが読める
+        assert f.stat().st_mode & 0o777 == 0o600, window
+        # 中身は元の起動行そのもの (4KB を超えるものがあるからファイルに逃がしている)
+        assert f.read_text().splitlines()[1].startswith('cd '), window
+
+
+def test_dispatcher_launch_with_token_uses_worker_config_dir(tmp_path: Path) -> None:
+    """トークンがあれば Dispatcher も worker と同じ CLAUDE_CONFIG_DIR + OAuth トークンで起動する."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy-token\n')
+
+    r, calls = _run_start_live(root, workspace, tmp_path, token=token)
+
+    assert r.returncode == 0, r.stderr
+    line = _send_keys(calls)['dispatcher']
+    launch_file = Path(line[2:])
+    # トークン本体はファイルにも書かず、起動時に $(cat) で読む
+    assert 'dummy-token' not in launch_file.read_text()
+    got = _source_launch_file(line, tmp_path)
+    assert got['config_dir'] == str(root / 'config' / 'claude-worker')
+    assert got['token'] == 'dummy-token'
+    assert got['cwd'] == str(root)
+    assert got['argv'][got['argv'].index('--model') + 1] == 'opus'
+    # system prompt (Worker 表を含む dispatcher.md) が最後まで渡っている
+    prompt = got['argv'][got['argv'].index('--append-system-prompt') + 1]
+    assert '| Worker 3 | w3 |' in prompt
+    # 読み込んだら消える
+    assert not launch_file.exists()
+    # Dispatcher の config dir も初回確認を済ませてある (済んでいないとオンボーディング画面で止まる)
+    state = json.loads((root / 'config' / 'claude-worker' / '.claude.json').read_text())
+    assert state['hasCompletedOnboarding'] is True
+    assert state['projects'][str(root)]['hasTrustDialogAccepted'] is True
+
+
+def test_dispatcher_launch_without_token_keeps_default_config(tmp_path: Path) -> None:
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r, calls = _run_start_live(root, workspace, tmp_path, token=None)
+
+    assert r.returncode == 0, r.stderr
+    got = _source_launch_file(_send_keys(calls)['dispatcher'], tmp_path)
+    assert got['config_dir'] is None
+    assert got['token'] is None
+    assert not (root / 'config' / 'claude-worker' / '.claude.json').exists()

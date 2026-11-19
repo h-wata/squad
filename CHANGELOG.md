@@ -31,6 +31,11 @@
 
 ### Fixed
 
+- `start.sh` が dispatcher / w1-w3 / w4 の起動行を send-keys で丸ごと送るのをやめ、`squad/state/launch-<session>/<window>.sh`
+  (権限 600、読み込むと消える) に書いて `. <ファイル>` だけを送る (SQUAD-325)。起動直後の pane は readline の準備前で
+  canonical mode のため、1 行 4096 バイト目以降が捨てられる。dispatcher / w1-w3 の起動行は 4.3〜4.7KB あり、
+  途中で切れて bash が続きの入力待ち (`>`) で止まることがあった。あわせて、OAuth トークンがあるときは Dispatcher も
+  worker と同じ `config/claude-worker` を `CLAUDE_CONFIG_DIR` にして起動し、その dir の初回確認も start.sh で済ませる。
 - `squad ls` / `squad web` の作業中判定で、画面下の空行を落としてから末尾を取る (#95)。背の高い
   pane で出力が画面の上にあると、作業中を待機中と読んでいた (watchd は #85 で修正済み)。
 - `squad web` の稼働状況の遅れ 2 件 (#84)。watchd が tasks/ 以下 (archive 含む) の task YAML の変化
