@@ -4,6 +4,9 @@
 
 ### Changed
 
+- start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
+  Claude Code は worktree でも main repo のルートで project 設定を引くため、書かないと「Allow external CLAUDE.md file
+  imports?」で止まっていた。
 - watchd が Dispatcher のコンテキストも区切る (#105 の 4)。ctx 50% 以上、ctx 不明なら最後の /clear から
   `[REPORT` 10 件か 4 時間で `BRIEF-REQUEST` を送り、`dashboards/<session>-brief.md` の更新と `BRIEF-READY` を見てから
   `/clear` と `RESUME` を送る。待機中でない、人間の入力から 20 分未満、brief に確認待ちがある、`AskUserQuestion` の

@@ -114,7 +114,22 @@ if [ "$ANY_CLAUDE_LOCAL" = "1" ] || [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
     # $WORKER_CONFIG_DIR 直下の settings.json / .claude.json はユーザーの持ち物なので書かない (PR #121 B2)。
     WORKER_CONFIG_DIR="$WORKER_CONFIG_DIR" SESSION_NAME="$SESSION_NAME" WORKSPACE="$WORKSPACE" SCRIPT_DIR="$SCRIPT_DIR" \
         INIT_DISPATCHER_DIR="$CLAUDE_WORKER_NO_ASK" python3 -c "
-import json, os, pathlib, shlex
+import json, os, pathlib, shlex, subprocess
+
+
+def project_keys(d):
+    # git worktree で起動すると Claude Code は main repo のルートを project 設定の key にする (SQUAD-331)。
+    keys = [d]
+    try:
+        out = subprocess.run(['git', '-C', d, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        main = str(pathlib.Path(out).parent)
+        if out and main not in keys:
+            keys.append(main)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return keys
+
 
 base = pathlib.Path(os.environ['WORKER_CONFIG_DIR'])
 # ~/.claude.json の user MCP は worker からは見えない。worker が使う kioku_mesh だけ写す。
@@ -142,7 +157,7 @@ for cfg_dir in cfg_dirs:
     projects = data.setdefault('projects', {})
     # CLAUDE.md が ~/.claude 配下を import していると、外部 import の許可確認でも止まる。
     # worker からは ~/.claude の skills も見えないので、読み込まない側で確認済みにしておく。
-    for d in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']):
+    for d in dict.fromkeys(k for b in (os.environ['WORKSPACE'], os.environ['SCRIPT_DIR']) for k in project_keys(b)):
         proj = projects.setdefault(d, {})
         proj['hasTrustDialogAccepted'] = True
         proj['hasClaudeMdExternalIncludesWarningShown'] = True
