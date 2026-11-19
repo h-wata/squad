@@ -281,3 +281,28 @@ hook は入力ごとに次の順で判定し、最初に当てはまったもの
 - `measure_task_cost.py` の `worker_dir` 集計は、同じ worker が区間内に別のタスクを並行していないことを
   前提にする。worker は 1 度に 1 タスクなので成り立つが、区間がずれると前後のタスクの末尾が混ざりうる。
   トークン無しで `~/.claude` を使う worker は従来の集計のままで、`/clear` をまたいだ分が抜ける。
+
+## 追記 (2026-11-19): PR #120 の実装で確定した細則
+
+PR #120 (Dispatcher の区切り) の cross-review と実装報告で、この ADR が定めていなかった扱いが 6 件
+見つかった。Decision は変えず、現行実装の挙動を書き留める。
+
+- **`[REPORT` の「配達」の数え方。** 4. の完了報告の件数は、有効な report で `_enqueue_notification()` が
+  成功した時点で `state/dispatcher.json` の `report_notified_at` に時刻を足して数える
+  (`_record_report_notified()`)。成功の中身は `WATCH_NOTIFY_QUEUE=1` なら通知 queue への enqueue 成功、
+  既定の `0` なら Dispatcher window への直送成功 (`notify_dispatcher()` の戻り値)。形式不正で通知しない
+  report は数えない。
+- **brief が読めないとき。** Dispatcher brief が読めない (`OSError`)、または「## 1. 人間への確認待ち」の
+  見出しが無いときは、確認待ちあり (区切らない側) として扱う。brief ファイルが存在しないときだけ
+  確認待ち無しとする (`brief_question_pending()`)。
+- **`transcript_path` の保存。** 4. の AskUserQuestion の判定のため、hook が state に `transcript_path` を
+  書き (`scripts/hooks/on-event.sh`)、watchd がそのパスの transcript を読む。
+- **テストの state 隔離。** watchd は Dispatcher に送るたびに `state/dispatcher.json` へ書くので、テストは
+  `SQUAD_STATE_DIR` を tmp にする。`tests/conftest.py` の autouse fixture が全テストに設定し、本番の
+  `squad/state` を汚さない。
+- **Dispatcher の agents ファイルが無いとき。** 5. のとおり `agents-<session>.json` が無い・読めない・
+  dict でないときは Dispatcher も区切らない (`_break_eligible()`)。start.sh を通らずに動いている
+  session には当てない。
+- **hook の Dispatcher 解決 (既知の制約)。** on-event.sh は window 名 `dispatcher` を、session に関係なく
+  worker `dispatcher`、つまり `state/dispatcher.json` に解決する。複数の session で動かすと Dispatcher の
+  state を共有する。この ADR では変えない。
