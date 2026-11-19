@@ -23,6 +23,10 @@
 - `settings.base.json`: worker 用 user 設定のひな形 (追跡する)
 - `<session>/w<n>/`: worker ごとの `CLAUDE_CONFIG_DIR` (追跡しない)。start.sh が起動のたびに
   `settings.base.json` を `settings.json` として書き出し、`.claude.json` の初回確認を済ませる
+- `<session>/dispatcher/`: OAuth トークンを置いたときの Dispatcher の `CLAUDE_CONFIG_DIR` (追跡しない)。
+  `<session>/w<n>/` と同じく、start.sh が起動のたびに `settings.json` を書き出し、`.claude.json` の初回確認を済ませる
+- このディレクトリ直下の `settings.json` / `.claude.json` などは start.sh が作るものではない。あってもユーザーの
+  持ち物として扱い、start.sh は書き込まない
 
 worker ごとに分けるのは、Claude Code が `/model` などでこの `settings.json` を書き換えるため。
 1 つを共有すると、1 人の切り替えが他の worker の既定モデルと repo の追跡ファイルに波及する。
@@ -36,7 +40,8 @@ worker ごとに分けるのは、Claude Code が `/model` などでこの `sett
   `ANTHROPIC_AUTH_TOKEN` で認証するため、このディレクトリに credentials は要らない。
 - **Claude モデルの worker** (`claude`): `claude setup-token` で発行した長期トークンを
   `~/.config/squad/claude-oauth-token` (`SQUAD_CLAUDE_TOKEN_FILE` で変更可、権限 600) に置くと、
-  start.sh は claude worker もこのディレクトリで起動し、`CLAUDE_CODE_OAUTH_TOKEN` で認証する。
+  start.sh は claude worker と Dispatcher もこのディレクトリの下 (`<session>/w<n>/`、`<session>/dispatcher/`)
+  で起動し、`CLAUDE_CODE_OAUTH_TOKEN` で認証する。
   トークンは pane のコマンド行に出さず、起動時に `$(cat ...)` で読む。ファイルが無ければ従来どおり
   `~/.claude` の設定 (ask あり) で起動する。
 
