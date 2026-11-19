@@ -39,6 +39,11 @@
   (claude-local の分には `ANTHROPIC_AUTH_TOKEN` が入るため)。あわせて、OAuth トークンがあるときは Dispatcher も
   専用の `config/claude-worker/<session>/dispatcher` を `CLAUDE_CONFIG_DIR` にして起動し、その dir の初回確認も
   start.sh で済ませる。`config/claude-worker` 直下の `settings.json` / `.claude.json` には書き込まない。
+- `start.sh` の起動用ファイルに秘匿値を書かない (SQUAD-332, Refs #121)。claude-local の `ANTHROPIC_AUTH_TOKEN` は
+  `config/claude-worker/<session>/local-auth-token` (権限 600、起動のたびに書き直す) に置き、OAuth トークンと同じく pane が
+  source した時点で `$(cat)` で読む。start.sh が SIGKILL されたときや後始末の子が死んだときに起動用ファイルが残っても、
+  トークンは漏れない。`SQUAD_LAUNCH_FILE_TTL` の既定は 120 秒から 3600 秒にした。TTL は pane の準備完了を見ないので、
+  `.bashrc` の遅い pane が読む前に消して起動を壊さないようにした。
 - `squad ls` / `squad web` の作業中判定で、画面下の空行を落としてから末尾を取る (#95)。背の高い
   pane で出力が画面の上にあると、作業中を待機中と読んでいた (watchd は #85 で修正済み)。
 - `squad web` の稼働状況の遅れ 2 件 (#84)。watchd が tasks/ 以下 (archive 含む) の task YAML の変化

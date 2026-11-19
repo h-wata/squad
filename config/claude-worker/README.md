@@ -25,6 +25,9 @@
   `settings.base.json` を `settings.json` として書き出し、`.claude.json` の初回確認を済ませる
 - `<session>/dispatcher/`: OAuth トークンを置いたときの Dispatcher の `CLAUDE_CONFIG_DIR` (追跡しない)。
   `<session>/w<n>/` と同じく、start.sh が起動のたびに `settings.json` を書き出し、`.claude.json` の初回確認を済ませる
+- `<session>/local-auth-token`: claude-local worker の `ANTHROPIC_AUTH_TOKEN` (`SQUAD_LOCAL_AUTH_TOKEN` の値、追跡しない、
+  権限 600)。start.sh が起動のたびに書き直し、起動用ファイルからは `$(cat ...)` で読む。値を起動用ファイルや pane の
+  コマンド行に出さないため
 - このディレクトリ直下の `settings.json` / `.claude.json` などは start.sh が作るものではない。あってもユーザーの
   持ち物として扱い、start.sh は書き込まない
 

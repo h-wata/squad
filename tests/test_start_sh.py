@@ -539,7 +539,8 @@ import json, os, sys
 with open(os.environ['FAKE_CLAUDE_OUT'], 'w', encoding='utf-8') as f:
     json.dump({'argv': sys.argv[1:], 'cwd': os.getcwd(),
                'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'),
-               'token': os.environ.get('CLAUDE_CODE_OAUTH_TOKEN')}, f)
+               'token': os.environ.get('CLAUDE_CODE_OAUTH_TOKEN'),
+               'local_token': os.environ.get('ANTHROPIC_AUTH_TOKEN')}, f)
 """
 
 
@@ -777,3 +778,88 @@ def test_unread_launch_files_expire(tmp_path: Path) -> None:
     while _launch_files(root) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert _launch_files(root) == []
+
+
+# --- 起動用ファイルに秘匿値を書かない (SQUAD-332, PR #121 merge 後 re-review の B1) ---
+# 起動用ファイルは start.sh が SIGKILL されたときや後始末の子が死んだときに残りうる。残っても困らないよう、
+# トークンは本文に展開せず、pane が source した時点で 600 のトークンファイルから $(cat) で読む。
+
+
+def test_launch_files_contain_no_tokens(tmp_path: Path) -> None:
+    """OAuth / claude-local のどちらのトークンも、起動用ファイルと send-keys の行に出ない."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('oauth-secret-332\n')
+
+    r, calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=token,
+        extra_env={'SQUAD_W2_AGENT': 'claude-local', 'SQUAD_LOCAL_AUTH_TOKEN': 'local-secret-332'},
+    )
+
+    assert r.returncode == 0, r.stderr
+    sent = _send_keys(calls)
+    files = _launch_files(root)
+    assert files, 'fake tmux は source しないので起動用ファイルは残っているはず'
+    for f in files:
+        body = f.read_text()
+        assert 'oauth-secret-332' not in body, f
+        assert 'local-secret-332' not in body, f
+    for window, line in sent.items():
+        assert 'secret-332' not in line, window
+    # pane が source した時点でトークンファイルから読まれ、claude には値が届く
+    got = _source_launch_file(sent['w2'], tmp_path)
+    assert got['local_token'] == 'local-secret-332'
+    token_file = root / 'config' / 'claude-worker' / 'sq325t' / 'local-auth-token'
+    assert token_file.stat().st_mode & 0o777 == 0o600
+    got = _source_launch_file(sent['w1'], tmp_path)
+    assert got['token'] == 'oauth-secret-332'
+
+
+def _cleanup_ttls(launch_dir: Path) -> list[int]:
+    """launch_dir のファイルを消す後始末の子プロセスに渡った TTL (秒) を /proc から拾う."""
+    ttls = []
+    for cmdline in Path('/proc').glob('[0-9]*/cmdline'):
+        try:
+            argv = cmdline.read_bytes().split(b'\0')
+        except OSError:
+            continue
+        args = [a.decode(errors='replace') for a in argv if a]
+        if any(a.startswith(f'{launch_dir}/') for a in args) and '_' in args:
+            ttls.append(int(args[args.index('_') + 1]))
+    return ttls
+
+
+def test_default_launch_file_ttl_outlives_slow_pane(tmp_path: Path) -> None:
+    """既定の TTL は .bashrc の遅い pane より十分長い (後始末は掃除だけで、起動を壊さない)."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+
+    r, _calls = _run_start_live(root, workspace, tmp_path, token=None)
+
+    assert r.returncode == 0, r.stderr
+    ttls = _cleanup_ttls(root / 'squad' / 'state' / 'launch-sq325t')
+    assert ttls, '後始末の子プロセスが見つからない'
+    assert min(ttls) >= 3600, ttls
+    assert _launch_files(root)
+
+
+def test_stale_launch_files_are_removed_on_restart(tmp_path: Path) -> None:
+    """前回の起動が後始末の前に落ちて残した起動用ファイルは、同じ session を作り直すときに消す."""
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    launch_dir = root / 'squad' / 'state' / 'launch-sq325t'
+    launch_dir.mkdir(parents=True)
+    stale = launch_dir / 'w1.OLD123'
+    stale.write_text('echo stale\n')
+
+    r, _calls = _run_start_live(root, workspace, tmp_path, token=None)
+
+    assert r.returncode == 0, r.stderr
+    assert not stale.exists()

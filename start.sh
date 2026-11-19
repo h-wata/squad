@@ -477,14 +477,19 @@ OPENCODE_NOTE_ARG_Q="$(printf '%q' "SQUAD_OPENCODE_WORKER_NOTE=$DISPATCHER_OPENC
 # 起きたり起きなかったりする。
 # そこで起動行はファイルに書き、pane には「. <ファイル>」だけを送る。source なので pane の
 # 対話シェルで直接打った場合と同じに動く (cd も残り、前面プロセスも claude / codex のまま)。
-# ファイルには claude-local の ANTHROPIC_AUTH_TOKEN が入りうるので 600 で作る。後始末は 3 段 (PR #121 B1):
+# 起動用ファイルには秘匿値を書かない (SQUAD-332)。OAuth トークンも claude-local の ANTHROPIC_AUTH_TOKEN も、
+# pane が source した時点で 600 のトークンファイルから $(cat) で読む。start.sh が SIGKILL されたときや
+# 後始末の子が死んだときにファイルが残っても、トークンは漏れない。ファイル自体も 600 で作る。
+# 後始末は掃除が目的で、3 段ある:
 #   1. pane が読み込んだら最初の行で自分を消す (source は実行前にファイル全体を読むので、消しても続きは走る)。
 #   2. start.sh が途中で止まったら (send-keys の失敗を含む)、EXIT trap が作ったファイルをすべて消す。
-#   3. 送り終えたら、時限付きの子プロセスが SQUAD_LAUNCH_FILE_TTL 秒 (既定 120) 後に残りを消す。
-#      pane が読む前に死んだときの分。読み済みなら消すものが無いだけ。
+#   3. 送り終えたら、時限付きの子プロセスが SQUAD_LAUNCH_FILE_TTL 秒 (既定 3600) 後に残りを消す。
+#      pane が読む前に死んだときの分。TTL は pane の準備完了を見ないので、.bashrc の遅い pane が
+#      読む前に消して起動を壊さないよう十分長くしてある。
+#   これらが効かなくても、同じ session を作り直すときに前回の残りを消す (下の find -delete)。
 # 名前は起動ごとに一意 (<window>.XXXXXX) にして、前回の起動の 3. が今回のファイルを消さないようにする。
 LAUNCH_DIR="$AGENTS_STATE_DIR/launch-$SESSION_NAME"
-LAUNCH_FILE_TTL="${SQUAD_LAUNCH_FILE_TTL:-120}"
+LAUNCH_FILE_TTL="${SQUAD_LAUNCH_FILE_TTL:-3600}"
 case "$LAUNCH_FILE_TTL" in
     '' | *[!0-9]*)
         echo "エラー: SQUAD_LAUNCH_FILE_TTL は秒数 (0 以上の整数) で指定してください: '$LAUNCH_FILE_TTL'" >&2
@@ -516,6 +521,22 @@ launch_in_window() {
     }
     tmux send-keys -t "$SESSION_NAME:$1" ". $(printf '%q' "$f")" Enter
 }
+
+# claude-local の ANTHROPIC_AUTH_TOKEN の置き場。値は SQUAD_LOCAL_AUTH_TOKEN (既定 sk-local-dummy) で、
+# start.sh の環境にしか無く pane には継承されない。起動用ファイルにも argv にも tmux の環境にも載せず、
+# OAuth トークンと同じく 600 のファイルに置いて pane 側で $(cat) する。printf は builtin なので
+# 書き込みで値が argv に出ることもない。worker の CLAUDE_CONFIG_DIR と同じ <session> の下に置き、
+# 起動のたびに書き直す。
+LOCAL_AUTH_TOKEN_FILE="$WORKER_CONFIG_DIR/$SESSION_NAME/local-auth-token"
+if [ "$ANY_CLAUDE_LOCAL" = "1" ]; then
+    (umask 077 && mkdir -p "$(dirname "$LOCAL_AUTH_TOKEN_FILE")" \
+        && printf '%s' "$LOCAL_AUTH_TOKEN" >"$LOCAL_AUTH_TOKEN_FILE.tmp" \
+        && chmod 600 "$LOCAL_AUTH_TOKEN_FILE.tmp" \
+        && mv -f "$LOCAL_AUTH_TOKEN_FILE.tmp" "$LOCAL_AUTH_TOKEN_FILE") || {
+        echo "エラー: $LOCAL_AUTH_TOKEN_FILE を書けませんでした" >&2
+        exit 1
+    }
+fi
 
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -606,7 +627,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
+        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=\"\$(cat $(printf '%q' "$LOCAL_AUTH_TOKEN_FILE"))\" ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
