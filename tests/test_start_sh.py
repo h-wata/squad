@@ -385,6 +385,56 @@ def test_claude_token_file_with_worker_config_starts(tmp_path: Path) -> None:
     assert proj['hasClaudeMdExternalIncludesWarningShown'] is True
 
 
+def _git_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """Tmp に main repo と、その git worktree を作って (main, worktree) を返す."""
+    main = tmp_path / 'main-repo'
+    main.mkdir()
+    git = ['git', '-c', 'user.name=t', '-c', 'user.email=t@example.com']
+    subprocess.run([*git, '-C', str(main), 'init', '-q'], check=True)
+    subprocess.run([*git, '-C', str(main), 'commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+    wt = tmp_path / 'wt'
+    subprocess.run([*git, '-C', str(main), 'worktree', 'add', '-q', '-b', 'wtbranch', str(wt)], check=True)
+    return main, wt
+
+
+def test_worktree_workspace_also_marks_main_repo_root(tmp_path: Path) -> None:
+    """Claude Code は git worktree では main repo のルートで project 設定を引く.
+
+    worktree のパスにしか書かないと、worktree 起動時だけ外部 import の確認で止まる (SQUAD-331).
+    """
+    root = _fake_root(tmp_path)
+    shutil.copytree(REPO / 'config', root / 'config')
+    main, wt = _git_worktree(tmp_path)
+    token = tmp_path / 'token'
+    token.write_text('dummy\n')
+
+    r = _run_start(root, wt, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+
+    assert r.returncode == 0, r.stderr
+    base = root / 'config/claude-worker/testsess'
+    for name in ('w1', 'w2', 'w3', 'dispatcher'):
+        projects = json.loads((base / name / '.claude.json').read_text())['projects']
+        for key in (str(wt), str(main)):
+            assert projects[key]['hasTrustDialogAccepted'] is True, (name, key)
+            assert projects[key]['hasClaudeMdExternalIncludesWarningShown'] is True, (name, key)
+
+
+def test_non_git_workspace_still_initializes(tmp_path: Path) -> None:
+    """Git repo でない WORKSPACE でも初期化は失敗せず、元の key だけが入る."""
+    root = _fake_root(tmp_path)
+    shutil.copytree(REPO / 'config', root / 'config')
+    workspace = tmp_path / 'plain-ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('dummy\n')
+
+    r = _run_start(root, workspace, 'testsess', extra_env={'SQUAD_CLAUDE_TOKEN_FILE': str(token)})
+
+    assert r.returncode == 0, r.stderr
+    projects = json.loads((root / 'config/claude-worker/testsess/dispatcher/.claude.json').read_text())['projects']
+    assert projects[str(workspace)]['hasClaudeMdExternalIncludesWarningShown'] is True
+
+
 def test_blank_token_file_is_ignored(tmp_path: Path) -> None:
     """空白だけのトークンでは有効にしない (設定が無くても従来どおり起動する)."""
     root = _fake_root(tmp_path)  # config/ をコピーしない
