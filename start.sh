@@ -522,6 +522,16 @@ launch_in_window() {
     tmux send-keys -t "$SESSION_NAME:$1" ". $(printf '%q' "$f")" Enter
 }
 
+# 起動行の先頭に付ける、トークンファイルの確認 (SQUAD-341, PR #123 B2)。起動用ファイルはトークンを $(cat) で
+# 読むので、pane が source した時点でファイルが無い・空・読めないと、空のトークンで claude が起動して認証の
+# 無い agent が残る。確認に通らなければ、エラーを出して source を return 1 で終わらせ、claude を起動しない
+# (source 中の return はそのファイルの読み込みだけを終わらせる)。値は従来どおり $(cat) で読み、ここには出さない。
+token_file_guard() {
+    local q
+    q="$(printf '%q' "$1")"
+    printf 'if [ ! -r %s ] || [ ! -s %s ]; then echo "エラー: トークンファイルが無いか、空か、読めません。claude を起動しません:" %s >&2; return 1; fi; ' "$q" "$q" "$q"
+}
+
 # claude-local の ANTHROPIC_AUTH_TOKEN の置き場。値は SQUAD_LOCAL_AUTH_TOKEN (既定 sk-local-dummy) で、
 # start.sh の環境にしか無く pane には継承されない。起動用ファイルにも argv にも tmux の環境にも載せず、
 # OAuth トークンと同じく 600 のファイルに置いて pane 側で $(cat) する。printf は builtin なので
@@ -612,10 +622,12 @@ tmux send-keys -t "$SESSION_NAME:aux" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 # グローバルの ask ルール (rm 等) で止まらないようにする。権限モードは --settings の auto mode のまま
 # (bypass にはしない)。
 DISPATCHER_NO_ASK_ENV=""
+DISPATCHER_TOKEN_GUARD=""
 if [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
+    DISPATCHER_TOKEN_GUARD="$(token_file_guard "$CLAUDE_TOKEN_FILE")"
     DISPATCHER_NO_ASK_ENV="CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/dispatcher") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" "
 fi
-launch_in_window dispatcher "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off ${DISPATCHER_NO_ASK_ENV}claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\""
+launch_in_window dispatcher "${DISPATCHER_TOKEN_GUARD}cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off ${DISPATCHER_NO_ASK_ENV}claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\""
 
 # w1-w3 window: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
@@ -627,7 +639,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=\"\$(cat $(printf '%q' "$LOCAL_AUTH_TOKEN_FILE"))\" ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
+        launch_in_window "w$n" "$(token_file_guard "$LOCAL_AUTH_TOKEN_FILE")cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=\"\$(cat $(printf '%q' "$LOCAL_AUTH_TOKEN_FILE"))\" ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
@@ -646,7 +658,7 @@ for n in 1 2 3; do
         launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q"
     elif [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
         # ask を外した claude worker。起動の形は claude-local と同じで、認証だけ OAuth トークン。
-        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
+        launch_in_window "w$n" "$(token_file_guard "$CLAUDE_TOKEN_FILE")cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     else
         launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     fi

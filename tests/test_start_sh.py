@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import time
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -653,8 +655,9 @@ def test_launch_lines_are_short_for_every_agent_kind(tmp_path: Path) -> None:
         assert f.parent == launch_dir, line
         # claude-local の ANTHROPIC_AUTH_TOKEN が入るので本人だけが読める
         assert f.stat().st_mode & 0o777 == 0o600, window
-        # 中身は元の起動行そのもの (4KB を超えるものがあるからファイルに逃がしている)
-        assert f.read_text().splitlines()[1].startswith('cd '), window
+        # 中身は元の起動行そのもの (4KB を超えるものがあるからファイルに逃がしている)。
+        # トークンを読む行は先頭にトークンファイルの確認が付く (SQUAD-341)
+        assert f.read_text().splitlines()[1].startswith(('cd ', 'if [ ! -r ')), window
 
 
 def test_dispatcher_launch_with_token_uses_dedicated_config_dir(tmp_path: Path) -> None:
@@ -863,3 +866,64 @@ def test_stale_launch_files_are_removed_on_restart(tmp_path: Path) -> None:
 
     assert r.returncode == 0, r.stderr
     assert not stale.exists()
+
+
+# --- トークンファイルが無い・空・読めないときは claude を起動しない (SQUAD-341, PR #123 の B2) ---
+# 起動用ファイルはトークンを $(cat) で読む。そのままだと読めなくても空のトークンで claude が起動し、
+# 認証の無い worker が残る。pane が source した時点でファイルを確かめ、だめなら source を失敗させる。
+
+
+def _break_token_file(path: Path, how: str) -> None:
+    if how == 'missing':
+        path.rename(path.with_name(path.name + '.moved'))
+    elif how == 'empty':
+        path.write_text('')
+    else:  # unreadable
+        path.chmod(0o000)
+
+
+@pytest.mark.parametrize('how', ['missing', 'empty', 'unreadable'])
+@pytest.mark.parametrize('window', ['w1', 'w2', 'dispatcher'])
+def test_launch_refuses_without_readable_token(tmp_path: Path, window: str, how: str) -> None:
+    """w2 は claude-local (local-auth-token)、w1 と dispatcher は OAuth トークンファイルを読む."""
+    if how == 'unreadable' and os.geteuid() == 0:
+        pytest.skip('root は権限 000 のファイルも読めてしまう')
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('oauth-secret-341\n')
+
+    r, calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=token,
+        extra_env={'SQUAD_W2_AGENT': 'claude-local', 'SQUAD_LOCAL_AUTH_TOKEN': 'local-secret-341'},
+    )
+    assert r.returncode == 0, r.stderr
+    token_file = token if window != 'w2' else root / 'config' / 'claude-worker' / 'sq325t' / 'local-auth-token'
+
+    fake_bin = tmp_path / 'fake-claude-bin'
+    fake_bin.mkdir()
+    (fake_bin / 'claude').write_text(_FAKE_CLAUDE)
+    (fake_bin / 'claude').chmod(0o755)
+    out = tmp_path / 'claude-out.json'
+    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}', 'FAKE_CLAUDE_OUT': str(out)}
+    _break_token_file(token_file, how)
+    try:
+        res = subprocess.run(
+            [shutil.which('bash') or 'bash', '-c', _send_keys(calls)[window]],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    finally:
+        if how == 'unreadable':
+            token_file.chmod(0o600)
+
+    assert res.returncode != 0
+    assert not out.exists(), 'claude が起動された'
+    assert 'トークンファイル' in res.stderr, res.stderr
