@@ -540,8 +540,17 @@ with open(os.environ['FAKE_CLAUDE_OUT'], 'w', encoding='utf-8') as f:
 def _live_root(tmp_path: Path) -> Path:
     """隔離 root を作る。SQUAD_DRY_RUN なしで tmux まで進める用で、watcher は何もしない stub にする."""
     root = _fake_root(tmp_path)
-    for d in ('config', 'scripts', 'instructions'):
-        shutil.copytree(REPO / d, root / d)
+    # 追跡ファイルだけを写す。手元で start.sh を動かした後の config/claude-worker/.claude.json 等が混ざると
+    # 「トークンなしでは .claude.json を作らない」の確認が手元の状態に左右される。
+    tracked = subprocess.run(
+        ['git', '-C', str(REPO), 'ls-files', '-z', 'config', 'scripts', 'instructions'],
+        capture_output=True,
+        check=True,
+    ).stdout.decode()
+    for rel in filter(None, tracked.split('\0')):
+        dst = root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, dst)
     watch = root / 'watch.sh'
     watch.write_text('#!/bin/bash\nexit 0\n')
     watch.chmod(0o755)
