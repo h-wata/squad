@@ -902,6 +902,60 @@ def test_default_launch_file_ttl_outlives_slow_pane(tmp_path: Path) -> None:
     assert _launch_files(root)
 
 
+def test_pane_sourcing_after_ttl_fails_closed_without_launching(tmp_path: Path) -> None:
+    """TTL を超えて pane の初期化が遅れ、起動用ファイルが消えた後に source しても、claude は起動しない (SQUAD-343).
+
+    実時間で既定 TTL は待たず SQUAD_LAUNCH_FILE_TTL=1 で再現する。期限切れは安全側 (source 失敗) に倒れ、
+    ファイルも秘匿値も残らない。
+    """
+    root = _live_root(tmp_path)
+    workspace = tmp_path / 'ws'
+    workspace.mkdir()
+    token = tmp_path / 'token'
+    token.write_text('oauth-secret-343\n')
+
+    r, calls = _run_start_live(
+        root,
+        workspace,
+        tmp_path,
+        token=token,
+        extra_env={
+            'SQUAD_W2_AGENT': 'claude-local',
+            'SQUAD_LOCAL_AUTH_TOKEN': 'local-secret-343',
+            'SQUAD_LAUNCH_FILE_TTL': '1',
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    sent = _send_keys(calls)
+    # pane がまだ読んでいない間に TTL が来て、後始末の子がすべて消す
+    deadline = time.monotonic() + 15
+    while _launch_files(root) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert _launch_files(root) == []
+
+    fake_bin = tmp_path / 'fake-claude-bin'
+    fake_bin.mkdir()
+    (fake_bin / 'claude').write_text(_FAKE_CLAUDE)
+    (fake_bin / 'claude').chmod(0o755)
+    out = tmp_path / 'claude-out.json'
+    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}', 'FAKE_CLAUDE_OUT': str(out)}
+    for window in ('dispatcher', 'w1', 'w2'):
+        res = subprocess.run(
+            [shutil.which('bash') or 'bash', '-c', sent[window]],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert res.returncode != 0, window
+        assert 'No such file' in res.stderr, (window, res.stderr)
+        assert 'secret-343' not in res.stdout + res.stderr, window
+    # 偽 claude は一度も起動していない
+    assert not out.exists()
+    assert _launch_files(root) == []
+
+
 def test_stale_launch_files_are_removed_on_restart(tmp_path: Path) -> None:
     """前回の起動が後始末の前に落ちて残した起動用ファイルは、同じ session を作り直すときに消す."""
     root = _live_root(tmp_path)
