@@ -108,7 +108,7 @@ case "$(basename "$CLI")" in
         if [ "${SQUAD_WORKER_AGENT:-}" = "claude-local" ]; then
             ENV_CMD+=(-u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_MODEL
                 -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_MAX_CONTEXT_TOKENS
-                -u SQUAD_WORKER_AGENT)
+                -u SQUAD_WORKER_AGENT -u CLAUDE_CODE_OAUTH_TOKEN)
         fi
         # worker の claude は CLAUDE_CODE_OAUTH_TOKEN を子プロセスに渡さず、認証情報のない
         # CLAUDE_CONFIG_DIR だけが残るため、claude -p が Not logged in で落ちる。start.sh と同じ

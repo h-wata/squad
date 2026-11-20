@@ -105,6 +105,8 @@ def test_token_is_filled_from_file_without_leaking(tmp_path: Path) -> None:
     assert TOKEN_FROM_FILE not in proc.stdout + proc.stderr
 
 
+# 注: 次の 3 テストは単独では補完ブロックの有無を検出しない (ブロックを消しても通る)。
+# 陽性テスト test_token_is_filled_from_file_without_leaking と組で意味を持つ。
 def test_existing_token_env_wins(tmp_path: Path) -> None:
     extra = {**_token_file(tmp_path, TOKEN_FROM_FILE), 'CLAUDE_CODE_OAUTH_TOKEN': TOKEN_FROM_ENV}
     _run(tmp_path, extra)
@@ -117,5 +119,7 @@ def test_blank_or_missing_token_file_is_ignored(tmp_path: Path) -> None:
 
 
 def test_claude_local_does_not_get_token(tmp_path: Path) -> None:
-    _run(tmp_path, {**LOCAL_ENV, **_token_file(tmp_path, TOKEN_FROM_FILE)})
+    """claude-local には、ファイルのトークンも既存の CLAUDE_CODE_OAUTH_TOKEN も渡さない (SQUAD-346 B1)."""
+    extra = {**LOCAL_ENV, **_token_file(tmp_path, TOKEN_FROM_FILE), 'CLAUDE_CODE_OAUTH_TOKEN': TOKEN_FROM_ENV}
+    _run(tmp_path, extra)
     assert _token_seen(tmp_path) == 'unset'
