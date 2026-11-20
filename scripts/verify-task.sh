@@ -110,6 +110,20 @@ case "$(basename "$CLI")" in
                 -u ANTHROPIC_SMALL_FAST_MODEL -u CLAUDE_CONFIG_DIR -u CLAUDE_CODE_MAX_CONTEXT_TOKENS
                 -u SQUAD_WORKER_AGENT)
         fi
+        # worker の claude は CLAUDE_CODE_OAUTH_TOKEN を子プロセスに渡さず、認証情報のない
+        # CLAUDE_CONFIG_DIR だけが残るため、claude -p が Not logged in で落ちる。start.sh と同じ
+        # トークンファイルから補う。既に env にあるときは上書きしない。claude-local には渡さない。
+        # 値は変数経由で env にだけ載せる (argv に出さない)。set -x でも値が出ないよう trace を止める。
+        if [ "${SQUAD_WORKER_AGENT:-}" != "claude-local" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            TOKEN_FILE="${SQUAD_CLAUDE_TOKEN_FILE:-$HOME/.config/squad/claude-oauth-token}"
+            case "$-" in *x*) XTRACE_WAS_ON=1 ;; *) XTRACE_WAS_ON=0 ;; esac
+            { set +x; } 2>/dev/null
+            if [ -r "$TOKEN_FILE" ] && grep -q '[^[:space:]]' "$TOKEN_FILE"; then
+                CLAUDE_CODE_OAUTH_TOKEN="$(cat "$TOKEN_FILE")"
+                export CLAUDE_CODE_OAUTH_TOKEN
+            fi
+            [ "$XTRACE_WAS_ON" = "1" ] && set -x
+        fi
         printf '%s' "$PROMPT" | "${ENV_CMD[@]}" "$CLI" -p --model "$MODEL" \
             --permission-mode bypassPermissions \
             --allowedTools 'Bash Read Write Grep Glob' \
