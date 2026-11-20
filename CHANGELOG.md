@@ -4,6 +4,10 @@
 
 ### Changed
 
+- `scripts/eval_trajectory.py` を追加し、`bench_report.py` に実行過程の列を足した (SQUAD-354)。task の transcript から
+  tool 呼び出し・エラー・リトライ・verify の実施・記憶 MCP と `squad trace` の利用・workspace 外への書き込み・承認保留
+  パターンに当たる Bash・外部書き込みとその重複を数え、`metrics/task_evals.jsonl` に 1 行追記する。`bench_report.py` は
+  このファイルがあるときだけ、(project, task_id) で結合した中央値を suite x config の行に出す。
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
   Claude Code は worktree でも main repo のルートで project 設定を引くため、書かないと「Allow external CLAUDE.md file
   imports?」で止まっていた。
