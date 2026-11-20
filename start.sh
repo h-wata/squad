@@ -492,14 +492,19 @@ OPENCODE_NOTE_ARG_Q="$(printf '%q' "SQUAD_OPENCODE_WORKER_NOTE=$DISPATCHER_OPENC
 # 起きたり起きなかったりする。
 # そこで起動行はファイルに書き、pane には「. <ファイル>」だけを送る。source なので pane の
 # 対話シェルで直接打った場合と同じに動く (cd も残り、前面プロセスも claude / codex のまま)。
-# ファイルには claude-local の ANTHROPIC_AUTH_TOKEN が入りうるので 600 で作る。後始末は 3 段 (PR #121 B1):
+# 起動用ファイルには秘匿値を書かない (SQUAD-332)。OAuth トークンも claude-local の ANTHROPIC_AUTH_TOKEN も、
+# pane が source した時点で 600 のトークンファイルから $(cat) で読む。start.sh が SIGKILL されたときや
+# 後始末の子が死んだときにファイルが残っても、トークンは漏れない。ファイル自体も 600 で作る。
+# 後始末は掃除が目的で、3 段ある:
 #   1. pane が読み込んだら最初の行で自分を消す (source は実行前にファイル全体を読むので、消しても続きは走る)。
 #   2. start.sh が途中で止まったら (send-keys の失敗を含む)、EXIT trap が作ったファイルをすべて消す。
-#   3. 送り終えたら、時限付きの子プロセスが SQUAD_LAUNCH_FILE_TTL 秒 (既定 120) 後に残りを消す。
-#      pane が読む前に死んだときの分。読み済みなら消すものが無いだけ。
+#   3. 送り終えたら、時限付きの子プロセスが SQUAD_LAUNCH_FILE_TTL 秒 (既定 3600) 後に残りを消す。
+#      pane が読む前に死んだときの分。TTL は pane の準備完了を見ないので、.bashrc の遅い pane が
+#      読む前に消して起動を壊さないよう十分長くしてある。
+#   これらが効かなくても、同じ session を作り直すときに前回の残りを消す (下の find -delete)。
 # 名前は起動ごとに一意 (<window>.XXXXXX) にして、前回の起動の 3. が今回のファイルを消さないようにする。
 LAUNCH_DIR="$AGENTS_STATE_DIR/launch-$SESSION_NAME"
-LAUNCH_FILE_TTL="${SQUAD_LAUNCH_FILE_TTL:-120}"
+LAUNCH_FILE_TTL="${SQUAD_LAUNCH_FILE_TTL:-3600}"
 case "$LAUNCH_FILE_TTL" in
     '' | *[!0-9]*)
         echo "エラー: SQUAD_LAUNCH_FILE_TTL は秒数 (0 以上の整数) で指定してください: '$LAUNCH_FILE_TTL'" >&2
@@ -531,6 +536,32 @@ launch_in_window() {
     }
     tmux send-keys -t "$SESSION_NAME:$1" ". $(printf '%q' "$f")" Enter
 }
+
+# 起動行の先頭に付ける、トークンファイルの確認 (SQUAD-341, PR #123 B2)。起動用ファイルはトークンを $(cat) で
+# 読むので、pane が source した時点でファイルが無い・空・読めないと、空のトークンで claude が起動して認証の
+# 無い agent が残る。確認に通らなければ、エラーを出して source を return 1 で終わらせ、claude を起動しない
+# (source 中の return はそのファイルの読み込みだけを終わらせる)。値は従来どおり $(cat) で読み、ここには出さない。
+token_file_guard() {
+    local q
+    q="$(printf '%q' "$1")"
+    printf 'if [ ! -r %s ] || [ ! -s %s ]; then echo "エラー: トークンファイルが無いか、空か、読めません。claude を起動しません:" %s >&2; return 1; fi; ' "$q" "$q" "$q"
+}
+
+# claude-local の ANTHROPIC_AUTH_TOKEN の置き場。値は SQUAD_LOCAL_AUTH_TOKEN (既定 sk-local-dummy) で、
+# start.sh の環境にしか無く pane には継承されない。起動用ファイルにも argv にも tmux の環境にも載せず、
+# OAuth トークンと同じく 600 のファイルに置いて pane 側で $(cat) する。printf は builtin なので
+# 書き込みで値が argv に出ることもない。worker の CLAUDE_CONFIG_DIR と同じ <session> の下に置き、
+# 起動のたびに書き直す。
+LOCAL_AUTH_TOKEN_FILE="$WORKER_CONFIG_DIR/$SESSION_NAME/local-auth-token"
+if [ "$ANY_CLAUDE_LOCAL" = "1" ]; then
+    (umask 077 && mkdir -p "$(dirname "$LOCAL_AUTH_TOKEN_FILE")" \
+        && printf '%s' "$LOCAL_AUTH_TOKEN" >"$LOCAL_AUTH_TOKEN_FILE.tmp" \
+        && chmod 600 "$LOCAL_AUTH_TOKEN_FILE.tmp" \
+        && mv -f "$LOCAL_AUTH_TOKEN_FILE.tmp" "$LOCAL_AUTH_TOKEN_FILE") || {
+        echo "エラー: $LOCAL_AUTH_TOKEN_FILE を書けませんでした" >&2
+        exit 1
+    }
+fi
 
 # 既存セッションがあれば終了
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -606,10 +637,12 @@ tmux send-keys -t "$SESSION_NAME:aux" "cd $WORKSPACE_Q && echo 'Aux-Shell ready 
 # グローバルの ask ルール (rm 等) で止まらないようにする。権限モードは --settings の auto mode のまま
 # (bypass にはしない)。
 DISPATCHER_NO_ASK_ENV=""
+DISPATCHER_TOKEN_GUARD=""
 if [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
+    DISPATCHER_TOKEN_GUARD="$(token_file_guard "$CLAUDE_TOKEN_FILE")"
     DISPATCHER_NO_ASK_ENV="CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/dispatcher") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" "
 fi
-launch_in_window dispatcher "cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off ${DISPATCHER_NO_ASK_ENV}claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\""
+launch_in_window dispatcher "${DISPATCHER_TOKEN_GUARD}cd $SCRIPT_DIR_Q && SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=off ${DISPATCHER_NO_ASK_ENV}claude --model $DISPATCHER_MODEL_Q --allowedTools \"$DISPATCHER_TOOLS\" --add-dir $WORKSPACE_Q --settings $DISPATCHER_SETTINGS_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $DISPATCHER_MD_Q $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $DISPATCHER_CODEX_NOTE_ARG_Q $WORKER_ROWS_ARG_Q $OPENCODE_NOTE_ARG_Q)\""
 
 # w1-w3 window: Worker 1-3 (Claude, ワークスペースで起動)
 # SQUAD_WORKER_ID: squad の hook script が「自分が誰か」を解決するための識別子。
@@ -621,7 +654,7 @@ for n in 1 2 3; do
         # Claude Code のまま、モデルだけローカル LLM に向ける。--append-system-prompt も
         # サブエージェントも hook もそのまま効くので、起動の形は claude worker と同じ。
         # 違いは CLAUDE_CONFIG_DIR (ask 回避) と ANTHROPIC_* (ゲートウェイ認証) だけ。
-        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=$(printf '%q' "$LOCAL_AUTH_TOKEN") ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
+        launch_in_window "w$n" "$(token_file_guard "$LOCAL_AUTH_TOKEN_FILE")cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_WORKER_AGENT=claude-local SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") ANTHROPIC_BASE_URL=$(printf '%q' "$LOCAL_BASE_URL") ANTHROPIC_AUTH_TOKEN=\"\$(cat $(printf '%q' "$LOCAL_AUTH_TOKEN_FILE"))\" ANTHROPIC_MODEL=$(printf '%q' "$LOCAL_MODEL") ANTHROPIC_SMALL_FAST_MODEL=$(printf '%q' "$LOCAL_MODEL") CLAUDE_CODE_MAX_CONTEXT_TOKENS=$(printf '%q' "$LOCAL_CONTEXT_TOKENS") claude --permission-mode bypassPermissions --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     elif [ "${WORKER_AGENTS[$n]}" = "opencode" ]; then
         # 指示本文は先にレンダリングしてファイルへ。--prompt には bootstrap だけを渡す
         # (理由は opencode_bootstrap 定義箇所のコメント参照)。
@@ -640,7 +673,7 @@ for n in 1 2 3; do
         launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q opencode -m $OPENCODE_MODEL_Q --auto --mini --prompt $_bs_q $WORKSPACE_Q"
     elif [ "$CLAUDE_WORKER_NO_ASK" = "1" ]; then
         # ask を外した claude worker。起動の形は claude-local と同じで、認証だけ OAuth トークン。
-        launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
+        launch_in_window "w$n" "$(token_file_guard "$CLAUDE_TOKEN_FILE")cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full CLAUDE_CONFIG_DIR=$(printf '%q' "$WORKER_CONFIG_DIR/$SESSION_NAME/w$n") CLAUDE_CODE_OAUTH_TOKEN=\"\$(cat $(printf '%q' "$CLAUDE_TOKEN_FILE"))\" claude --permission-mode bypassPermissions --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     else
         launch_in_window "w$n" "cd $WORKSPACE_Q && SQUAD_WORKER_ID=w$n SQUAD_SESSION=$SESSION_NAME_Q PONYTAIL_DEFAULT_MODE=full claude --allowedTools \"$WORKER_TOOLS\" --add-dir $SCRIPT_DIR_Q --settings $WORKER_SETTINGS_FILE_Q --append-system-prompt \"\$(python3 $RENDER_SCRIPT_Q $WORKER_MD_Q N=$n $SQUAD_ROOT_ARG_Q $SQUAD_SESSION_ARG_Q $WORKER_AGENT_ARG_CLAUDE_Q)\""
     fi
