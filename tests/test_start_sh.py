@@ -938,7 +938,14 @@ def test_pane_sourcing_after_ttl_fails_closed_without_launching(tmp_path: Path) 
     (fake_bin / 'claude').write_text(_FAKE_CLAUDE)
     (fake_bin / 'claude').chmod(0o755)
     out = tmp_path / 'claude-out.json'
-    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ["PATH"]}', 'FAKE_CLAUDE_OUT': str(out)}
+    # 診断メッセージ ('No such file') はロケールで変わるので C に固定する
+    env = {
+        **os.environ,
+        'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+        'FAKE_CLAUDE_OUT': str(out),
+        'LC_ALL': 'C',
+        'LANG': 'C',
+    }
     for window in ('dispatcher', 'w1', 'w2'):
         res = subprocess.run(
             [shutil.which('bash') or 'bash', '-c', sent[window]],
