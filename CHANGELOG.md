@@ -4,6 +4,12 @@
 
 ### Changed
 
+- watchd が report を配達したら (ledger に delivered を記録した後)、同じ task_id の `tasks/worker{N}.yaml` を
+  `tasks/archive/worker{N}_<task_id>.yaml` へ移す (SQUAD-355)。停電や tmux 再起動の後、W4 が残った task YAML を読んで
+  完了済みの review を再実行し、report / review を上書きしていた。移すのは status が `completed` / `failed` の report と
+  status の無い review だけで、`blocked` や progress の report では残す。task YAML の task_id が違うとき、または report
+  より新しいとき (同じ task_id で差し戻した後) も残す。同じ名前があれば `_<YYYYMMDDHHMMSS>` を付ける。`[NEXT]` の解決と
+  `scripts/check_report_yaml.py` は、tasks/ 直下に同じ task が無ければ退避先を見る。
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
   Claude Code は worktree でも main repo のルートで project 設定を引くため、書かないと「Allow external CLAUDE.md file
   imports?」で止まっていた。

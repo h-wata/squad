@@ -314,7 +314,8 @@ task-yaml-author に渡した場合はその値を、task-yaml-author に選ば�
   になったのを確認してからタスク通知。誤送信したら `Escape` で中断してやり直す。
 - **停電 / tmux 再起動からの復旧時は W4 を最初に止める**。W4 は残っている `worker4.yaml` を
   読んで自動的に再実行を始め、完了済みレビューを焼き直したうえ report / review YAML を
-  上書きする。`Escape` 2 回 → `/new` でリセットしてから、report/review の mtime を見て
+  上書きする。watchd は配達した task の YAML を `tasks/archive/worker{N}_<task_id>.yaml` へ移すので
+  (SQUAD-355)、残っているのは未配達・`blocked`・progress の task だけになったが、それでも止める。`Escape` 2 回 → `/new` でリセットしてから、report/review の mtime を見て
   未処理の成果物を回収する。Claude W1-W3 はコンテキストを失って待つだけなので task 再通知でよい。
 - `queue/projects/<pj>/.squad_session` に担当 session 名を書くと、その project の
   report-bridge / 停止検知 / discovery はその session の watcher だけが行う。マーカーが
@@ -469,7 +470,8 @@ task YAML に `next_on_pass` / `next_on_fail` を書いておくと、watchd が
   飛ばしてよいのはユーザーが明示的に中止したときだけ
 - `[NEXT none]`: 選ばれた側 (例: fail なのに `next_on_fail` が無い) が未記入。従来どおり Dispatcher が判断する
 - `[NEXT unresolved reason=...]`: 次手を推測せずに止めた印。reason ごとに次を確認してから手で決める
-  - `task_id_mismatch`: task YAML が次のタスクで上書き済み。`tasks/archive/` の元の task を見る
+  - `task_id_mismatch`: task YAML が次のタスクで上書き済みで、`tasks/archive/` にも同じ task_id が無い。
+    元の task を探して手で決める (watchd は配達時に退避した `tasks/archive/` の task を自動で見る)
   - `task_yaml_missing` / `task_yaml_unreadable`: task YAML が無いか `task_id` を読めない
   - `verify_status:<値>`: report の `verify_status` が pass / skipped / fail のどれでもない
   - `invalid_rule`: 選ばれた `next_on_*` に `step` / `assign` が無いか、使えない値がある
@@ -655,7 +657,8 @@ brief を読み、「セッション開始時（状態復元）」の 0-5 を行
   (Opencode は `/new`) を送ってからタスクを渡す (→「tmux 通知」)。
 - 前の文脈を残したいときだけ task YAML に `context.keep_context: true` を書く (`squad assign` が
   `--keep-context` を付ける)。使うのは、同じ worker に前の文脈が要る続きを振るとき
-  (自分の PR の review 修正、同じタスクの差し戻しなど) に限る。
+  (自分の PR の review 修正、同じタスクの差し戻しなど) に限る。完了した task の YAML は配達時に
+  `tasks/archive/` へ移っているので、差し戻しも `tasks/worker{N}.yaml` に新しく書く (`blocked` の task は残る)。
 - タスク途中の区切りは watchd が worker に `BRIEF-REQUEST` を送って行う。Dispatcher から `/clear` を
   指示しなくてよい。`[BREAK-LIMIT]` が来たら pane と brief を確認する。
 - コンテキストリミットで停止したワーカーには `/clear` → タスク再送

@@ -11,6 +11,7 @@ FakeTmux (subprocess を使わない) に差し替えて検証する。旧 test_
 from __future__ import annotations
 
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -1662,9 +1663,8 @@ class TestReportArchiveCopy:
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
         write_report(d, task_id='T1')
         w.report_bridge()
-        # Dispatcher が T1 を閉じて T2 を発注し、worker が同じ report ファイルを上書きする
-        (d / 'tasks' / 'archive').mkdir()
-        shutil.move(d / 'tasks' / 'worker1.yaml', d / 'tasks' / 'archive' / 'worker1_T1.yaml')
+        # watchd が T1 を退避し (SQUAD-355)、Dispatcher が T2 を発注し、worker が同じ report ファイルを上書きする
+        assert (d / 'tasks' / 'archive' / 'worker1_T1.yaml').is_file()
         (d / 'tasks' / 'worker1.yaml').write_text('task_id: T2\n')
         write_report(d, report_id=ID2, task_id='T2')
         w.report_bridge()
@@ -1948,3 +1948,321 @@ def test_two_watchers_on_one_session_send_once(watcher: tuple[Watcher, Path]) ->
     p.write_text(json.dumps({**data, 'delivered_at': '2026-11-06T00:00:00+00:00'}))  # 相手が渡し終えた
     w.deliver_instructions()
     assert w.tmux.sent == []
+
+
+class TestArchiveTaskOnDeliver:
+    """SQUAD-355: report を配達したら同じ task_id の tasks/worker{N}.yaml を tasks/archive/ へ退避する.
+
+    再起動した worker (とくに W4) が残った task YAML を読んで完了済みの task を再実行し、
+    report / review を上書きする事故を防ぐ。退避した後も次手 [NEXT] / measure_task_cost /
+    check_report_yaml / keep_context の差し戻しが task YAML を引けることも確かめる。
+    """
+
+    TASK = 'task_id: T1\ntitle: x\n' + TestNextTransition.RULES
+
+    @staticmethod
+    def _setup(w: Watcher, queue: Path, n: int = 1, task: str = TASK) -> Path:
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'tasks' / f'worker{n}.yaml').write_text(task)
+        w.refresh_owned_projects()
+        return d
+
+    @staticmethod
+    def _archived(d: Path) -> list[str]:
+        archive = d / 'tasks' / 'archive'
+        return sorted(p.name for p in archive.iterdir()) if archive.is_dir() else []
+
+    def test_completed_report_moves_task_yaml_to_archive(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue)
+        src = d / 'tasks' / 'worker1.yaml'
+        os.utime(src, (1_700_000_000, 1_700_000_000))
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        assert not src.exists()
+        moved = d / 'tasks' / 'archive' / 'worker1_T1.yaml'
+        assert moved.read_text() == self.TASK
+        assert moved.stat().st_mtime == 1_700_000_000  # graph sync / trace が発注時刻に使うので保つ
+        assert self._archived(d) == ['worker1_T1.yaml']  # 一時ファイルを残さない
+        [msg] = queued(w)
+        assert '[NEXT rule=on_pass step=cross-review' in msg  # 退避は次手を決めた後
+        assert w.ledger.is_delivered('pj', ID1)
+
+    def test_failed_report_and_review_also_archive(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue)
+        (d / 'tasks' / 'worker4.yaml').write_text('task_id: T1-review\n')
+        write_report(d, task_id='T1', status='failed', verify_status='fail')
+        (d / 'reports' / 'worker4_review.yaml').write_text('task_id: T1-review\nverdict: approve\n')
+        w.report_bridge()
+        assert self._archived(d) == ['worker1_T1.yaml', 'worker4_T1-review.yaml']
+        assert not (d / 'tasks' / 'worker4.yaml').exists()
+
+    @pytest.mark.parametrize('status', ['blocked', 'in_progress', 'progress', 'completed_pending_user_approval'])
+    def test_non_terminal_report_keeps_task_yaml(self, watcher: tuple[Watcher, Path], status: str) -> None:
+        """Progress や blocked では退避しない。後で completed が来たときに退避する."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', status=status, verify_status='fail')
+        w.report_bridge()
+        assert len(queued(w)) == 1
+        assert (d / 'tasks' / 'worker1.yaml').read_text() == self.TASK
+        assert self._archived(d) == []
+        write_report(d, report_id=ID2, task_id='T1', status='completed', verify_status='pass')
+        w.report_bridge()
+        assert self._archived(d) == ['worker1_T1.yaml']
+
+    def test_blocked_review_keeps_task_yaml(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue, n=4, task='task_id: R1\n')
+        (d / 'reports' / 'worker4_review.yaml').write_text('task_id: R1\nstatus: blocked\n')
+        w.report_bridge()
+        assert (d / 'tasks' / 'worker4.yaml').exists()
+
+    def test_next_task_already_written_is_not_moved(self, watcher: tuple[Watcher, Path]) -> None:
+        """Dispatcher が次の task を書いた後に前の report が配達されても、次の task は動かさない."""
+        w, queue = watcher
+        d = self._setup(w, queue, task='task_id: T2\n')
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        assert (d / 'tasks' / 'worker1.yaml').read_text() == 'task_id: T2\n'
+        assert self._archived(d) == []
+
+    def test_invalid_report_does_not_archive(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, report_id=None, task_id='T1')
+        w.report_bridge()
+        assert len(queued(w, '[REPORT-INVALID')) == 1
+        assert (d / 'tasks' / 'worker1.yaml').exists()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root では権限チェックが効かないため skip')
+    def test_queue_write_failure_does_not_archive(self, watcher: tuple[Watcher, Path]) -> None:
+        """配達 (queue への書込み) に失敗したら退避しない。実 filesystem の権限で queue を壊す."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        notifications = w.nq.dir
+        notifications.mkdir(parents=True)
+        os.chmod(notifications, 0o500)
+        try:
+            w.report_bridge()
+            assert not w.ledger.is_delivered('pj', ID1)
+            assert (d / 'tasks' / 'worker1.yaml').exists()
+            assert self._archived(d) == []
+        finally:
+            os.chmod(notifications, 0o755)
+
+    def test_ledger_commit_failure_does_not_archive(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        monkeypatch.setattr(w.ledger, 'commit', lambda *_a: False)
+        w.report_bridge()
+        assert len(queued(w)) == 1  # queue には積めた
+        assert (d / 'tasks' / 'worker1.yaml').exists()
+        assert self._archived(d) == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root では権限チェックが効かないため skip')
+    def test_unwritable_tasks_dir_keeps_delivery(self, watcher: tuple[Watcher, Path]) -> None:
+        """退避に失敗しても配達は確定し、watcher は止まらない (task YAML は残る)."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        tasks = d / 'tasks'
+        os.chmod(tasks, 0o500)
+        try:
+            w.report_bridge()
+        finally:
+            os.chmod(tasks, 0o755)
+        assert w.ledger.is_delivered('pj', ID1)
+        assert (tasks / 'worker1.yaml').read_text() == self.TASK
+
+    def test_name_collision_follows_archive_convention(self, watcher: tuple[Watcher, Path]) -> None:
+        """同じ名前が既にあれば上書きせず worker{N}_<task_id>_<YYYYMMDDHHMMSS>.yaml にする."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        archive = d / 'tasks' / 'archive'
+        archive.mkdir()
+        (archive / 'worker1_T1.yaml').write_text('task_id: T1\ntitle: old\n')
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        names = self._archived(d)
+        assert names[0] == 'worker1_T1.yaml'
+        assert (archive / 'worker1_T1.yaml').read_text() == 'task_id: T1\ntitle: old\n'
+        assert len(names) == 2 and re.fullmatch(r'worker1_T1_\d{14}\.yaml', names[1])
+        assert (archive / names[1]).read_text() == self.TASK
+
+    def test_same_content_already_archived_is_not_duplicated(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue)
+        archive = d / 'tasks' / 'archive'
+        archive.mkdir()
+        (archive / 'worker1_T1.yaml').write_text(self.TASK)  # Dispatcher が手で cp 済み
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        assert self._archived(d) == ['worker1_T1.yaml']
+        assert not (d / 'tasks' / 'worker1.yaml').exists()
+
+    def test_stale_report_after_redispatch_keeps_task_yaml(self, watcher: tuple[Watcher, Path]) -> None:
+        """Report より後に同じ task_id で差し戻された task YAML は、古い report の配達で動かさない."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        report = write_report(d, task_id='T1', verify_status='pass')
+        os.utime(report, (1000, 1000))
+        os.utime(d / 'tasks' / 'worker1.yaml', (2000, 2000))  # 差し戻しで書き直された
+        w.report_bridge()
+        assert len(queued(w)) == 1
+        assert (d / 'tasks' / 'worker1.yaml').exists()
+        assert self._archived(d) == []
+
+    def test_unsafe_task_id_stays_in_archive_dir(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = self._setup(w, queue, task='task_id: ../../x\n')
+        write_report(d, task_id='../../x', verify_status='pass')
+        w.report_bridge()
+        assert self._archived(d) == ['worker1_.._.._x.yaml']
+
+    # ---- (ii) resolve_next ----
+
+    def test_later_report_resolves_next_from_archive(self, watcher: tuple[Watcher, Path]) -> None:
+        """退避後に同じ task の別 report (再提出・review の書き直し) が来ても次手を解決する."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        write_report(d, report_id=ID2, task_id='T1', status='failed', verify_status='fail')
+        w.report_bridge()
+        msgs = queued(w)
+        assert len(msgs) == 2
+        assert msgs[1].endswith('[NEXT rule=on_fail step=human-inbox assign=dispatcher]')
+
+    def test_resolve_next_prefers_current_then_archive(self, tmp_path: Path) -> None:
+        tasks = tmp_path / 'tasks'
+        (tasks / 'archive').mkdir(parents=True)
+        task = tasks / 'worker1.yaml'
+        meta = {'task_id': 'T1', 'verify_status': 'pass'}
+        (tasks / 'archive' / 'worker1_T1.yaml').write_text(self.TASK)
+        assert resolve_next(task, meta).startswith('[NEXT rule=on_pass step=cross-review')  # 現役が無い
+        task.write_text('task_id: T2\n' + TestNextTransition.RULES)  # 次の task で上書き済み
+        assert resolve_next(task, meta).startswith('[NEXT rule=on_pass step=cross-review')
+        task.write_text('task_id: T1\nnext_on_pass:\n  step: merge\n  assign: dispatcher\n')  # 同じ task の再発注
+        assert resolve_next(task, meta) == '[NEXT rule=on_pass step=merge assign=dispatcher]'
+
+    def test_resolve_next_picks_newest_archive_of_the_same_task(self, tmp_path: Path) -> None:
+        archive = tmp_path / 'tasks' / 'archive'
+        archive.mkdir(parents=True)
+        old = archive / 'worker1_T1.yaml'
+        old.write_text('task_id: T1\nnext_on_pass:\n  step: old\n  assign: dispatcher\n')
+        os.utime(old, (1_700_000_000, 1_700_000_000))
+        (archive / 'worker1_T1_20261121000000.yaml').write_text(self.TASK)
+        (archive / 'worker1_T1_x.yaml').write_text('task_id: T1_x\n')  # 名前は当たるが別 task
+        (archive / 'worker2_T1.yaml').write_text('task_id: T1\n')  # 別 worker
+        meta = {'task_id': 'T1', 'verify_status': 'pass'}
+        assert resolve_next(tmp_path / 'tasks' / 'worker1.yaml', meta).startswith(
+            '[NEXT rule=on_pass step=cross-review'
+        )
+
+    def test_resolve_next_keeps_reasons_when_archive_has_nothing(self, tmp_path: Path) -> None:
+        tasks = tmp_path / 'tasks'
+        (tasks / 'archive').mkdir(parents=True)
+        (tasks / 'archive' / 'worker1_T9.yaml').write_text('task_id: T9\n')
+        task = tasks / 'worker1.yaml'
+        meta = {'task_id': 'T1', 'verify_status': 'pass'}
+        assert resolve_next(task, meta) == '[NEXT unresolved reason=task_yaml_missing]'
+        task.write_text('task_id: T2\n')
+        assert resolve_next(task, meta) == '[NEXT unresolved reason=task_id_mismatch]'
+
+    # ---- (iii) measure_task_cost / check_report_yaml ----
+
+    def test_measure_task_cost_finds_archived_task(
+        self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
+        import measure_task_cost as mtc  # noqa: PLC0415
+
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        monkeypatch.setattr(mtc, 'QUEUE_ROOT', queue.parent)
+        assert mtc.find_task_yaml('pj', 'T1') == d / 'tasks' / 'archive' / 'worker1_T1.yaml'
+
+    def test_check_report_yaml_finds_archived_task(self, watcher: tuple[Watcher, Path]) -> None:
+        """退避後に report を検査しても verify: の有無を判定でき、verdict の裏取りを飛ばさない."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
+        from check_report_yaml import check_report_yaml  # noqa: PLC0415
+
+        w, queue = watcher
+        d = self._setup(w, queue, task='task_id: T1\nverify:\n  commands:\n    - "pytest -q"\n')
+        p = write_report(d, task_id='T1', worker='worker1', verdict_path='""', assumptions='none')
+        w.report_bridge()
+        assert not (d / 'tasks' / 'worker1.yaml').exists()
+        [item2] = [r for r in check_report_yaml(p) if r.item == 2]
+        assert item2.status == 'NG'  # verify: があるのに verdict_path が空 (WARN で素通りしない)
+
+    # ---- (i) keep_context の差し戻し ----
+
+    def test_keep_context_followup_after_archive(self, watcher: tuple[Watcher, Path]) -> None:
+        """退避後に Dispatcher が keep_context: true の続きを書いても、assign と次の退避が成り立つ."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        followup = d / 'tasks' / 'worker1.yaml'
+        assert not followup.exists()  # 書き手は Read 無しで新規 Write できる
+        followup.write_text('task_id: T1-fix\nagent: claude\ncontext:\n  keep_context: true\n')
+        squad_bin = Path(__file__).resolve().parent.parent / 'bin' / 'squad'
+        r = subprocess.run(
+            [str(squad_bin), 'assign', 'w1', str(followup), '--dry-run'],
+            capture_output=True,
+            text=True,
+            env={**os.environ, 'SQUAD_SESSION': 'scratch-s'},
+            check=False,
+        )
+        assert r.returncode == 0, r.stderr
+        assert '--keep-context' in next(ln for ln in r.stdout.splitlines() if ln.startswith('[assign] cmd:'))
+        write_report(d, report_id=ID2, task_id='T1-fix', verify_status='pass')
+        w.report_bridge()
+        assert self._archived(d) == ['worker1_T1-fix.yaml', 'worker1_T1.yaml']
+
+    def test_keep_context_redispatch_with_same_task_id(self, watcher: tuple[Watcher, Path]) -> None:
+        """同じ task_id で差し戻した 2 回目の task YAML も、1 回目を上書きせずに退避する."""
+        w, queue = watcher
+        d = self._setup(w, queue)
+        write_report(d, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        second = 'task_id: T1\ntitle: fix\ncontext:\n  keep_context: true\n'
+        (d / 'tasks' / 'worker1.yaml').write_text(second)
+        write_report(d, report_id=ID2, task_id='T1', verify_status='pass')
+        w.report_bridge()
+        names = self._archived(d)
+        assert names[0] == 'worker1_T1.yaml' and len(names) == 2
+        assert (d / 'tasks' / 'archive' / names[0]).read_text() == self.TASK
+        assert (d / 'tasks' / 'archive' / names[1]).read_text() == second
+
+    # ---- 再起動しても再実行しない ----
+
+    def test_restart_leaves_nothing_to_rerun(self, watcher: tuple[Watcher, Path], tmp_path: Path) -> None:
+        """配達後に watchd / worker が再起動しても、完了済み task を通知・再実行させない."""
+        w, queue = watcher
+        d = self._setup(w, queue, n=4, task='task_id: R1\n')
+        (d / 'reports' / 'worker4_review.yaml').write_text('task_id: R1\nverdict: approve\n')
+        w.report_bridge()
+        # 再起動した W4 が読む tasks/worker4.yaml はもう無い
+        assert not (d / 'tasks' / 'worker4.yaml').exists()
+        w2 = Watcher(cfg=w.cfg, tmux=FakeTmux('testsess'))  # watchd の再起動
+        w2.sleep = lambda _s: None
+        w2.cfg.stall_cycles = 1
+        w2.refresh_owned_projects()
+        w2.tmux.captures['testsess:w4'] = ['idle screen']
+        w2.report_bridge()
+        w2.check_workers()
+        w2.check_workers()
+        assert 4 not in w2._pending  # noqa: SLF001 実行中の task として扱わない (区切り・RESUME の対象にしない)
+        assert w2.tmux.sent == []
+        assert len(queued(w2)) == 1  # 配達済みの review を再通知しない (1 件は最初の配達分)
+        assert not [e for e in w2.nq.unacked() if '停止' in e['message']]
+        assert not (d / 'tasks' / 'worker4.yaml').exists()  # 退避を戻さない
