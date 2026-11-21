@@ -10,7 +10,13 @@
 索引 (`queue/.graph.db`) から数えるので、先に `squad graph sync` を実行しておく。索引が無ければ `-`。
 
 使い方:
-  bench_report.py [--metrics <jsonl>] [--graph-db <db>]
+  bench_report.py [--metrics <jsonl>] [--graph-db <db>] [--evals <jsonl>]
+
+`metrics/task_evals.jsonl` (scripts/eval_trajectory.py の出力) があれば、(project, task_id) で結合して
+実行過程の指標の中央値を列に足す。同じ task の測り直しは最後の 1 行を使う。無ければ列は出さない。
+`attribution` が exact 以外 (時間窓の fallback) の行は中央値から除き、除外件数を表の下に出す。
+`verify_ran` は author の transcript 内の verifier 呼び出しだけを見る (verifier の transcript が時間窓から
+観測できなければ false になる)。
 """
 
 from __future__ import annotations
@@ -26,6 +32,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from measure_task_cost import METRICS_PATH  # noqa: E402
 from measure_task_cost import QUEUE_ROOT  # noqa: E402
 
+EVAL_COLUMNS = (
+    'tool_calls',
+    'tool_errors',
+    'retries',
+    'writes_outside_workspace',
+    'deny_pattern_matches',
+    'external_write_dups',
+)
 COLUMNS = ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'wall_clock_sec', 'attempts')
 
 
@@ -74,30 +88,68 @@ def result_counts(db_path: Path, records: list[dict]) -> dict[tuple[str, str], i
         conn.close()
 
 
+def load_task_evals(path: Path) -> dict[tuple[str, str], dict]:
+    """task_evals.jsonl を (project, task_id) ごとに最後の 1 行だけ返す. ファイルが無ければ空."""
+    latest: dict[tuple[str, str], dict] = {}
+    if not path.is_file():
+        return latest
+    for line in path.read_text(encoding='utf-8').splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and 'project' in rec and 'task_id' in rec:
+            latest[str(rec['project']), str(rec['task_id'])] = rec
+    return latest
+
+
 def _median(values: list) -> str:
     nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
     return f'{median(nums):.0f}' if nums else '-'
 
 
-def render(records: list[dict], counts: dict[tuple[str, str], int] | None) -> list[str]:
+def _is_exact(evals: dict[tuple[str, str], dict] | None, rec: dict) -> bool:
+    return (evals or {}).get((rec['project'], rec['task_id']), {}).get('attribution') == 'exact'
+
+
+def render(
+    records: list[dict], counts: dict[tuple[str, str], int] | None, evals: dict[tuple[str, str], dict] | None = None
+) -> list[str]:
     groups: dict[tuple[str, str], list[dict]] = {}
     for r in records:
         groups.setdefault((str(r['bench'].get('suite', '')), str(r['bench'].get('config', ''))), []).append(r)
+    extra = EVAL_COLUMNS if evals else ()
     lines = [
-        '| suite | config | trials | 成功 | ' + ' | '.join(COLUMNS) + ' | 重複作業 |',
-        '|---' * (len(COLUMNS) + 5) + '|',
+        '| suite | config | trials | 成功 | '
+        + ' | '.join(COLUMNS)
+        + ' | 重複作業 |'
+        + ''.join(f' {c} |' for c in extra),
+        '|---' * (len(COLUMNS) + 5 + len(extra)) + '|',
     ]
+    notes: list[str] = []
     for (suite, config), rs in sorted(groups.items()):
         ok = sum(r.get('status') == 'completed' and r.get('verify_status') == 'pass' for r in rs)
         dup = '-' if counts is None else f'{sum(counts[r["project"], r["task_id"]] >= 2 for r in rs)}/{len(rs)}'
         cells = [_median([r.get(c) for r in rs]) for c in COLUMNS]
-        lines.append(f'| {suite} | {config} | {len(rs)} | {ok}/{len(rs)} | ' + ' | '.join(cells) + f' | {dup} |')
+        row = f'| {suite} | {config} | {len(rs)} | {ok}/{len(rs)} | ' + ' | '.join(cells) + f' | {dup} |'
+        # attribution が exact 以外 (時間窓の fallback で別 session を拾いうる) は中央値に入れない
+        exact = [evals[r['project'], r['task_id']] for r in rs if _is_exact(evals, r)]
+        for c in extra:
+            row += f' {_median([e.get(c) for e in exact])} |'
+        lines.append(row)
+        excluded = sum(1 for r in rs if (r['project'], r['task_id']) in (evals or {}) and not _is_exact(evals, r))
+        if extra and excluded:
+            notes.append(
+                f'- {suite} / {config}: 実行過程の列は exact {len(exact)} 件の中央値 (approximate {excluded} 件を除外)'
+            )
+    lines.extend(['', *notes] if notes else [])
     return lines
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--metrics', type=Path, default=METRICS_PATH)
+    parser.add_argument('--evals', type=Path, default=METRICS_PATH.parent / 'task_evals.jsonl')
     parser.add_argument('--graph-db', type=Path, default=QUEUE_ROOT / 'queue' / '.graph.db')
     args = parser.parse_args(argv)
     records = load_bench_records(args.metrics) if args.metrics.is_file() else []
@@ -107,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     counts = result_counts(args.graph_db, records)
     if counts is None:
         print(f'{args.graph_db} が無いため重複作業率は - (squad graph sync で作れる)', file=sys.stderr)
-    print('\n'.join(render(records, counts)))
+    print('\n'.join(render(records, counts, load_task_evals(args.evals))))
     return 0
 
 

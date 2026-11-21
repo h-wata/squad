@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- squad が頼る Claude Code の挙動の前提を検出する `tests/test_claude_code_assumptions.py` (設定に `Write(` ルールが無い、
+  Dispatcher / worker の `permissions.ask` が空、起動行が `CLAUDE_CONFIG_DIR` を与えトークンを argv に出さない) と、
+  Claude Code 更新後に手で 1 回流す実機スモーク `scripts/smoke-claude-code-assumptions.sh` を足した (SQUAD-351)。
+
+### Fixed
+
+- `scripts/verify-task.sh` が既存の `CLAUDE_CODE_OAUTH_TOKEN` を `[ -z "${VAR:-}" ]` で判定していたため、`bash -x` で
+  トークンの値がトレースに出ていた。`${VAR:+x}` で有無だけを見る形にした。スモーク
+  `scripts/smoke-claude-code-assumptions.sh` も、`bash -x` でトークンの値を出さず、終了時に `mktemp -d` の一時 dir を
+  削除するようにした (SQUAD-352 / SQUAD-353)。
+
 ### Changed
 
 - watchd が report を配達したら (ledger に delivered を記録した後)、同じ task_id の `tasks/worker{N}.yaml` を
@@ -16,6 +29,11 @@
   size / mtime は rename の前に ledger に書き、書けなければ rename しない。rename の後に ledger へ書けなくても、
   退避先を inode で探し直して見張りを続ける (SQUAD-368)。`measure_task_cost.py` は `/` などを含む task_id も
   退避先の名前で探し、中身の task_id が違うファイルは返さない。
+- `scripts/eval_trajectory.py` を追加し、`bench_report.py` に実行過程の列を足した (SQUAD-354)。task の transcript から
+  tool 呼び出し・エラー・リトライ・verify の実施・記憶 MCP と `squad trace` の利用・workspace 外への書き込み・承認保留
+  パターンに一致した試行 (`deny_pattern_matches`。実行されたかは transcript で確認が要る)・外部書き込みとその重複を数え、`metrics/task_evals.jsonl` に 1 行追記する。`bench_report.py` は
+  このファイルがあるときだけ、(project, task_id) で結合した中央値を suite x config の行に出す。
+  attribution が exact 以外 (時間窓の fallback) の task_evals は中央値から除き、除外件数を表の下に出す (SQUAD-357 B1)。
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
   Claude Code は worktree でも main repo のルートで project 設定を引くため、書かないと「Allow external CLAUDE.md file
   imports?」で止まっていた。
@@ -45,6 +63,11 @@
   新しい構成にするにはセッションを `stop.sh` → `start.sh` で作り直す。
 
 ### Fixed
+
+- verify-task.sh が claude -p に OAuth トークンをファイルから補う (SQUAD-344)。worker の claude は
+  `CLAUDE_CODE_OAUTH_TOKEN` を子プロセスに渡さないため、worker 内から呼ぶと Not logged in で verdict が書かれなかった。
+  env が空で `SQUAD_CLAUDE_TOKEN_FILE` (既定 `~/.config/squad/claude-oauth-token`) が読めるときだけ補う。
+  claude-local には渡さない。
 
 - `start.sh` が dispatcher / w1-w3 / w4 の起動行を send-keys で丸ごと送るのをやめ、`squad/state/launch-<session>/<window>.XXXXXX`
   (権限 600) に書いて `. <ファイル>` だけを送る (SQUAD-325)。起動直後の pane は readline の準備前で
