@@ -17,6 +17,9 @@
 
 ### Changed
 
+- P0 の追いかけ修正 (Refs #130)。trace は session が一致しても時間窓の両端が揃わなければ approximate にし、session_id があるのに JSONL が無い report は他 session の近似にせず missing とする。
+  外部書き込みの指標は `is_error` の呼び出しを数えず、試行と読める `external_write_attempts` / `external_write_attempt_dups` に改名した。
+  `verify_attempt` は verdict の task_id が対象 task と一致するときだけ採る。
 - watchd が report を配達したら (ledger に delivered を記録した後)、同じ task_id の `tasks/worker{N}.yaml` を
   `tasks/archive/worker{N}_<task_id>.yaml` へ移す (SQUAD-355)。停電や tmux 再起動の後、W4 が残った task YAML を読んで
   完了済みの review を再実行し、report / review を上書きしていた。移すのは status が `completed` / `failed` の report と

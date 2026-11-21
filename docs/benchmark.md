@@ -19,7 +19,7 @@ task を自動で投げる runner は持たない (構成を切り替えるた�
    (`SQUAD_W<N>_AGENT=claude-local`) を必ず 1 つ入れる。1 つの config は 3 trial 以上流す。
 3. **task YAML を書く。** config・trial ごとに 1 つ書く。差分は `assigned_to` / `agent` / `model` /
    `context.workspace` / `task_id` / `bench` だけにする。`task_id` は trial ごとに変える
-   (例: `BENCH-issue34-sonnet-1`)。`bench` は次の形で、`check_task_yaml.py` が形式を検査する。
+   (例: `BENCH-issue34-sonnet-1`)。`task_id` は trial ごとの実行 ID を兼ねるので、同じ値を使い回さない。`bench` は次の形で、`check_task_yaml.py` が形式を検査する。
 
    ```yaml
    bench: {suite: "issue34", config: "claude-sonnet", trial: 1}
