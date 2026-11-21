@@ -34,6 +34,11 @@
 
 ### Fixed
 
+- verify-task.sh が claude -p に OAuth トークンをファイルから補う (SQUAD-344)。worker の claude は
+  `CLAUDE_CODE_OAUTH_TOKEN` を子プロセスに渡さないため、worker 内から呼ぶと Not logged in で verdict が書かれなかった。
+  env が空で `SQUAD_CLAUDE_TOKEN_FILE` (既定 `~/.config/squad/claude-oauth-token`) が読めるときだけ補う。
+  claude-local には渡さない。
+
 - `start.sh` が dispatcher / w1-w3 / w4 の起動行を send-keys で丸ごと送るのをやめ、`squad/state/launch-<session>/<window>.XXXXXX`
   (権限 600) に書いて `. <ファイル>` だけを送る (SQUAD-325)。起動直後の pane は readline の準備前で
   canonical mode のため、1 行 4096 バイト目以降が捨てられる。dispatcher / w1-w3 の起動行は 4.3〜4.7KB あり、
