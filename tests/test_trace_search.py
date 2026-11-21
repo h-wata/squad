@@ -19,6 +19,7 @@ import trace_search  # noqa: E402
 
 SID = '11111111-1111-4111-8111-111111111111'
 SID_APPROX = '22222222-2222-4222-8222-222222222222'
+SID_MISSING = '44444444-4444-4444-8444-444444444444'
 TOKEN = 'ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'  # pragma: allowlist secret
 
 
@@ -72,8 +73,12 @@ def queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     t2.write_text('task_id: T2\n')
     start = 1_790_899_200  # 2026-10-02T00:00:00Z
     os.utime(t2, (start, start))
+    t1 = pj / 'tasks' / 'worker1.yaml'
+    t1.write_text('task_id: T1\n')
+    start1 = 1_790_812_800  # 2026-10-01T00:00:00Z (exact は窓の両端が要る)
+    os.utime(t1, (start1, start1))
     (pj / 'reports' / 'worker1_report.yaml').write_text(
-        f'task_id: T1\nstatus: completed\nworker: worker1\nsession_id: "{SID}"\n'
+        f'task_id: T1\nstatus: completed\nworker: worker1\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
     )
     (pj / 'reports' / 'worker2_report.yaml').write_text(
         'task_id: T2\nstatus: blocked\nworker: worker2\ncompleted_at: "2026-10-02T01:00:00Z"\n'
@@ -177,3 +182,90 @@ def test_multiple_tool_results_in_one_line(queue: Path) -> None:
     only = trace_search.get(f'{SID}:7.1')
     assert len(only) == 1
     assert 'boom two' in only[0]
+
+
+@pytest.mark.parametrize(('with_task', 'with_end'), [(True, False), (False, True), (False, False)])
+def test_session_match_without_full_window_is_approximate(queue: Path, with_task: bool, with_end: bool) -> None:
+    """Session が一致しても、時間窓の始端か終端が欠けるなら exact にしない."""
+    pj = queue / 'projects' / 'pj'
+    if with_task:
+        (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    else:
+        for f in (pj / 'tasks').glob('*.yaml'):
+            if 'task_id: T1' in f.read_text():
+                f.write_text('task_id: OTHER\n')
+    end = 'completed_at: "2026-10-01T01:00:00Z"\n' if with_end else ''
+    (pj / 'reports' / 'worker1_report.yaml').write_text(f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\n{end}')
+    _jsonl(trace_search.mtc.CLAUDE_PROJECTS / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z')
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert srcs
+    assert all(not s.exact for s in srcs)
+
+
+def test_session_match_with_full_window_is_exact(queue: Path) -> None:
+    pj = queue / 'projects' / 'pj'
+    (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    _jsonl(trace_search.mtc.CLAUDE_PROJECTS / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z')
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert srcs
+    assert all(s.exact for s in srcs)
+
+
+def test_session_mismatch_does_not_pick_other_session_transcript(queue: Path) -> None:
+    """Report の session_id と別 session の JSONL しか無いとき、その JSONL を exact として選ばない."""
+    pj = queue / 'projects' / 'pj'
+    (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID_MISSING}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    # fixture には SID の JSONL が既にある。SID_MISSING の JSONL は無い
+    srcs, missing = trace_search.sources(queue, task='T1')
+    assert all(not s.exact for s in srcs)
+    assert all(SID not in s.path.name for s in srcs)
+    assert not srcs
+    assert missing == ['pj/T1']
+
+
+def test_session_mismatch_contrast_matching_session_is_selected(queue: Path) -> None:
+    pj = queue / 'projects' / 'pj'
+    (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert [s.path.name for s in srcs] == [f'{SID}.jsonl']
+    assert all(s.exact for s in srcs)
+
+
+def test_session_missing_jsonl_is_missing_not_other_session_approximation(queue: Path) -> None:
+    """session_id があるのに JSONL が無い report は、時間窓内の別 session を近似として拾わず missing にする."""
+    pj = queue / 'projects' / 'pj'
+    t1 = pj / 'tasks' / 'worker1.yaml'
+    t1.write_text('task_id: T1\n')
+    start = 1_790_899_200  # 2026-10-02T00:00:00Z。fixture の SID_APPROX (近似用 JSONL) はこの窓に入る
+    os.utime(t1, (start, start))
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID_MISSING}"\ncompleted_at: "2026-10-02T01:00:00Z"\n'
+    )
+    srcs, missing = trace_search.sources(queue, task='T1')
+    assert srcs == []
+    assert missing == ['pj/T1']
+
+
+def test_session_missing_jsonl_contrast_no_session_id_is_approximate(queue: Path) -> None:
+    """Session_id が無い report は従来どおり時間窓の近似 (T2 と同じ条件で別 session が approximate で返る)."""
+    pj = queue / 'projects' / 'pj'
+    t1 = pj / 'tasks' / 'worker1.yaml'
+    t1.write_text('task_id: T1\n')
+    start = 1_790_899_200
+    os.utime(t1, (start, start))
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        'task_id: T1\nstatus: completed\ncompleted_at: "2026-10-02T01:00:00Z"\n'
+    )
+    srcs, missing = trace_search.sources(queue, task='T1')
+    assert missing == []
+    assert [s.path.name for s in srcs] == [f'{SID_APPROX}.jsonl']
+    assert all(not s.exact for s in srcs)

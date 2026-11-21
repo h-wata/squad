@@ -38,7 +38,7 @@ EVAL_COLUMNS = (
     'retries',
     'writes_outside_workspace',
     'deny_pattern_matches',
-    'external_write_dups',
+    'external_write_attempt_dups',
 )
 COLUMNS = ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'wall_clock_sec', 'attempts')
 

@@ -87,7 +87,10 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
         calls += [(e.tool, *_split(e.text), e.is_error) for e in trace_search.entries(src) if e.tool != 'text']
 
     keys = Counter((tool, head) for tool, head, _, _ in calls)
-    ext = Counter(head for tool, head, _, _ in calls if tool == 'Bash' and EXTERNAL_WRITE_RE.search(head))
+    # 外部書き込みは「試行」を数える。is_error の呼び出しは実行されていないので数えない
+    ext = Counter(
+        head for tool, head, _, err in calls if tool == 'Bash' and not err and EXTERNAL_WRITE_RE.search(head)
+    )
     denied = [head for tool, head, _, _ in calls if tool == 'Bash' and DENY_RE.search(head)]
     outside = 0
     for tool, _, inp, _ in calls:
@@ -97,11 +100,9 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
             outside += 1
 
     verdict = queue_dir / 'projects' / project / 'reports' / f'{worker}_verdict.yaml'
-    attempt = (
-        parse_scalars(verdict.read_text(encoding='utf-8', errors='replace')).get('attempt')
-        if verdict.is_file()
-        else None
-    )
+    verdict_scalars = parse_scalars(verdict.read_text(encoding='utf-8', errors='replace')) if verdict.is_file() else {}
+    # worker の verdict は task ごとに上書きされる。別 task のものを採らない
+    attempt = verdict_scalars.get('attempt') if verdict_scalars.get('task_id') == task_id else None
     return {
         'project': project,
         'task_id': task_id,
@@ -120,8 +121,8 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
         'writes_outside_workspace': outside,
         'deny_pattern_matches': len(denied),
         'denied_samples': [h[:SAMPLE_CHARS] for h in denied[:SAMPLE_LIMIT]],
-        'external_writes': sum(ext.values()),
-        'external_write_dups': sum(n - 1 for n in ext.values()),
+        'external_write_attempts': sum(ext.values()),
+        'external_write_attempt_dups': sum(n - 1 for n in ext.values()),
         'attribution': 'exact' if all(s.exact for s in srcs) else 'approximate',
         'measured_at': datetime.now().astimezone().isoformat(timespec='seconds'),
     }

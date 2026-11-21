@@ -80,10 +80,15 @@ def sources(queue_dir: Path, project: str | None = None, task: str | None = None
             start = datetime.fromtimestamp(task_path.stat().st_mtime, tz=timezone.utc) if task_path else None
             end = mtc.parse_iso8601(meta.get('completed_at', ''))
             # 1 session で複数 task をこなすことがあるので、exact でも時間窓で切る
-            # (窓が作れなければ session 全体。他 task の分が混ざりうる)
-            exact = mtc.find_session_transcript(meta.get('session_id', ''))
+            # (窓が作れなければ session 全体。他 task の分が混ざりうるので approximate にする)
+            session_id = meta.get('session_id', '')
+            exact = mtc.find_session_transcript(session_id)
             if exact:
-                found.append(Source(pj_dir.name, tid, worker, exact, exact=True, start=start, end=end))
+                found.append(Source(pj_dir.name, tid, worker, exact, exact=bool(start and end), start=start, end=end))
+                continue
+            if session_id:
+                # session_id があるのに JSONL が無い。他 session の近似に落とさず missing にする (ADR 0008 決定 4)
+                missing.append(f'{pj_dir.name}/{tid}')
                 continue
             hits = []
             if task_path and start and end:
