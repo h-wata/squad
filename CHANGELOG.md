@@ -10,6 +10,10 @@
   status の無い review だけで、`blocked` や progress の report では残す。task YAML の task_id が違うとき、または report
   より新しいとき (同じ task_id で差し戻した後) も残す。同じ名前があれば `_<YYYYMMDDHHMMSS>` を付ける。`[NEXT]` の解決と
   `scripts/check_report_yaml.py` は、tasks/ 直下に同じ task が無ければ退避先を見る。
+  退避の予定は配達の確定と同じトランザクションで ledger (`task_archives`) に残し、権限や容量の障害で失敗しても
+  次のサイクル (watchd の再起動後も) で一度だけやり直す (SQUAD-361)。退避の前に開かれた fd から退避後に書き込まれた
+  ときは、退避から 300 秒後の最初のサイクルまで見張って `tasks/worker{N}.yaml` に戻す。`measure_task_cost.py` は
+  `/` などを含む task_id も退避先の名前で探す。
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
   Claude Code は worktree でも main repo のルートで project 設定を引くため、書かないと「Allow external CLAUDE.md file
   imports?」で止まっていた。
