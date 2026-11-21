@@ -24,9 +24,14 @@ verdict: approve_with_comments
 # 行わなかった場合は skipped とする
 verify_status: skipped
 # 指摘事項のリスト。無ければ空配列
+# blocking: / non_blocking: の配列で書いてもよい (書式は揃えない。集計は両方を読む)
 findings:
   - severity: minor
     # major / minor / nit
+    # 任意 (#136): 指摘の種類。scripts/review_category_tally.py が数える。無ければ uncategorized
+    # stale-state / identity-mismatch / shared-file-conflict / naming-semantics / secret-leak /
+    # missing-test / scope-creep / doc-mismatch / other (語彙は instructions/worker-codex.md)
+    # category: missing-test
     file: "path/to/file.py"
     line: 10
     description: "指摘内容の説明"

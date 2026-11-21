@@ -97,6 +97,10 @@ assumptions: []
 # ブロッカーや懸念点があれば記述
 issues: []
 # - "issue の説明"
+# 任意 (#136): 種類で数えたい issue は dict にして category を付ける (scripts/review_category_tally.py
+# が数える。category の無い issues は数えない)。語彙は instructions/worker.md
+# - category: stale-state
+#   issue: "初回の verifier は report が旧タスクのままで fail"
 # 任意 (#54): 途中で止めた / 止められた理由。completed なら書かない。
 # budget_exceeded | verify_exhausted | blocked_by_user | approval_denied | other
 # (other のときは notes に詳細を書く)

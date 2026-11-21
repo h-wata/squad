@@ -91,7 +91,28 @@ criteria が検証形式を指定していればそちらを優先する。自�
    あわせて過剰設計 (実装が1つしかない抽象化、stdlib やネイティブ機能の再発明、不要な
    新規依存) も確認し、削除・置換できるものは代替を添えて指摘する。
 4. 指摘ごとに severity、file、line、発生条件、影響、修正方針を簡潔に示す。
+   指摘には任意で `category` を 1 つ付けられる (下の語彙)。`findings` の要素でも `blocking` /
+   `non_blocking` の要素でもよい (書式は揃えない。集計スクリプトが両方を読む)。
 5. `queue/projects/<project>/reports/worker4_review.yaml` に結果を書く。
+
+`category` は `scripts/review_category_tally.py` と `squad graph sync` が数え、web dashboard の
+「review 指摘」タブに出す (#136)。同じ category が 2 件になると `queue/_inbox.md` にチェック化の
+候補が 1 行入る。当てはまらなければ `other` にする。付けなかった指摘は `uncategorized` として数える。
+
+| category | 意味 |
+|---|---|
+| `stale-state` | 古い入力 / 前タスクの状態を読んだ |
+| `identity-mismatch` | 別の task / 別の対象を、ID を照合せずに採った |
+| `shared-file-conflict` | 複数 PR が同じファイルを触って衝突した |
+| `naming-semantics` | 名前が実際の意味と違う |
+| `secret-leak` | 秘匿値がログ・trace・argv に出る |
+| `missing-test` | 回帰テスト・境界ケースが無い |
+| `scope-creep` | 指示範囲外の変更 |
+| `doc-mismatch` | 文書と実装の食い違い |
+| `other` | 上のどれでもない |
+
+通常タスクの report の `issues` の要素にも同じ `category` を書ける (`- category: ...` と `issue: ...` の
+dict にする)。category の無い `issues` は数えない。
 
 レビューでは、スタイル上の好みよりも実際に修正価値のある問題を優先する。根拠のない指摘は
 書かない。問題がなければ `findings: []` とし、その旨を summary に明記する。verdict は

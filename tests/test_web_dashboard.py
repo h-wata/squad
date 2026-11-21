@@ -167,6 +167,7 @@ PATHS = [
     '/api/goals',
     '/api/graph?goal=x',
     '/api/activity',
+    '/api/review_categories',
 ]
 
 
@@ -371,6 +372,62 @@ def test_web_reads_no_yaml_and_sends_no_keys() -> None:
     ]
     assert 'send-keys' not in src
     assert "'?mode=ro'" in src or '?mode=ro' in src
+
+
+def test_review_categories_from_db(tmp_path: Path) -> None:
+    """#136: review 指摘の category 表は graph sync が DB に書いたものを出す (YAML を消しても同じ)."""
+    q = tmp_path / 'queue'
+    reports = q / 'projects' / 'pj' / 'reports' / 'archive'
+    for i in range(1, 6):
+        _write(
+            reports / f'R{i}__review-{i}.yaml',
+            f'task_id: R{i}\nverdict: approve\npr_url: https://github.com/o/r/pull/{i}\n'
+            f'completed_at: "2026-11-0{i}T00:00:00+00:00"\n'
+            'findings:\n  - category: stale-state\n    description: x\n  - description: y\n',
+            NOW,
+        )
+    _write(
+        reports / 'R9__review-9.yaml',
+        f'task_id: R9\nverdict: approve\npr_url: https://github.com/o/r/pull/9\n'
+        f'findings:\n  - category: "{SECRET}"\n    description: x\n',
+        NOW,
+    )
+    db = q / '.graph.db'
+    graph.sync(q, db)
+    shutil.rmtree(q / 'projects')
+    data = web.review_categories_data(db)
+    assert data['error'] is None
+    cats = data['categories']
+    assert [c['category'] for c in cats][-1] == 'uncategorized'
+    stale = cats[0]
+    assert (stale['category'], stale['count']) == ('stale-state', 5)
+    assert (stale['first_seen'], stale['last_seen']) == ('2026-11-01T00:00:00+00:00', '2026-11-05T00:00:00+00:00')
+    assert stale['prs'] == [f'https://github.com/o/r/pull/{i}' for i in range(1, 6)]
+    assert cats[-1]['count'] == 5
+    assert SECRET not in json.dumps(data)  # DB 由来の文字列はマスクしてから返す
+    assert any(c['approx'] for c in cats)  # completed_at の無い R9 は mtime の近似
+
+
+def test_review_categories_tab_in_page(server: tuple[str, list]) -> None:
+    base, _ = server
+    code, body = _req(f'{base}/', headers={'Authorization': f'Bearer {TOKEN}'})
+    assert code == 200
+    page = body.decode()
+    assert '<button data-v="reviewcat">review 指摘</button>' in page
+    assert "api('/api/review_categories')" in page
+    data = _get_json(base, '/api/review_categories')
+    assert data == {'synced_at': data['synced_at'], 'error': None, 'categories': []}
+
+
+def test_review_categories_on_old_db(tmp_path: Path) -> None:
+    """review_categories 表の無い DB (schema 3) でもエラーにせず空の表を返す."""
+    db = tmp_path / '.graph.db'
+    conn = sqlite3.connect(db)
+    conn.execute('CREATE TABLE projects (project TEXT)')
+    conn.execute('CREATE TABLE meta (key TEXT, value TEXT)')
+    conn.commit()
+    conn.close()
+    assert web.review_categories_data(db)['categories'] == []
 
 
 def test_pane_masked_before_tail(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

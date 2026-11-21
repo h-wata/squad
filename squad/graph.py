@@ -26,6 +26,9 @@ DB には他に projects (project ごとの担当 session・最新の結果・�
 squad/config.json の worker 定義 workers) を持つ。squad web は DB と tmux だけを読むため。
 instructions は squad web から Dispatcher へ出した指示 (queue/instructions/<session>/*.json, #85)。
 ノードにはせず別の表にする (goal / intent とはつながらない。活動タブに時系列で並べるだけ)。
+review_categories は review 指摘の category ごとの集計 (scripts/review_category_tally.py, #136)。web の
+「review 指摘」タブの読み元。sync に inbox_path を渡したときは、2 件目に達した category を inbox に候補として足す
+(YAML ではなく inbox の Markdown にだけ書く。同じ印の行があれば足さない)。
 
 YAML のネスト (context / decision_bearing_claims / derived_from) を読むため PyYAML を使う。
 squad.py / watchd.py の stdlib only を崩さないよう、import はこのモジュールの中だけで行い、
@@ -41,12 +44,16 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import sys
 from typing import Any
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
+import review_category_tally  # noqa: E402
+
 # 派生索引なので migration は持たない。schema を変えたら番号を上げ、古い DB は作り直す
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA = (
     'CREATE TABLE nodes ('
     'node_id TEXT PRIMARY KEY, '
@@ -78,8 +85,16 @@ SCHEMA = (
     'delivered_at TEXT NOT NULL, '
     'failed_at TEXT NOT NULL, '
     'PRIMARY KEY (session, id))',
+    'CREATE TABLE review_categories ('
+    'category TEXT PRIMARY KEY, '
+    'count INTEGER NOT NULL, '
+    'first_seen TEXT NOT NULL, '
+    'last_seen TEXT NOT NULL, '
+    'prs_json TEXT NOT NULL, '
+    'tasks_json TEXT NOT NULL, '
+    'approx INTEGER NOT NULL)',
 )
-TABLES = ('edges', 'nodes', 'projects', 'meta', 'instructions')
+TABLES = ('edges', 'nodes', 'projects', 'meta', 'instructions', 'review_categories')
 # 同じ task に複数の結果があるときの優先順: worker の report > cross-review の verdict > verifier の verdict
 _RANK_REPORT, _RANK_REVIEW, _RANK_VERIFIER = 2, 1, 0
 # libyaml があれば C 実装を使う (pure Python の SafeLoader だと実 queue 約 700 件で 18 秒かかった)
@@ -559,10 +574,19 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def sync(queue_dir: Path, db_path: Path | None = None, config_path: Path = CONFIG_PATH) -> tuple[int, int]:
-    """YAML から索引を作り直す。(ノード数, エッジ数) を返す. YAML は一切書き換えない."""
+def sync(
+    queue_dir: Path,
+    db_path: Path | None = None,
+    config_path: Path = CONFIG_PATH,
+    inbox_path: Path | None = None,
+) -> tuple[int, int]:
+    """YAML から索引を作り直す。(ノード数, エッジ数) を返す. YAML は一切書き換えない.
+
+    inbox_path を渡すと、DB を書いた後で review 指摘の category の候補を inbox に足す (#136)。
+    """
     nodes, edges, projects = collect(queue_dir)
     instructions = collect_instructions(queue_dir)
+    categories = review_category_tally.tally(review_category_tally.collect(queue_dir))
     try:
         workers = json.loads(config_path.read_text()).get('workers', {})
     except (OSError, ValueError):
@@ -601,8 +625,25 @@ def sync(queue_dir: Path, db_path: Path | None = None, config_path: Path = CONFI
                 ],
             )
             conn.executemany('INSERT INTO instructions VALUES (?, ?, ?, ?, ?, ?, ?)', instructions)
+            conn.executemany(
+                'INSERT INTO review_categories VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [
+                    (
+                        r['category'],
+                        r['count'],
+                        r['first_seen'],
+                        r['last_seen'],
+                        json.dumps(r['prs'], ensure_ascii=False),
+                        json.dumps(r['tasks'], ensure_ascii=False),
+                        int(r['approx']),
+                    )
+                    for r in categories
+                ],
+            )
     finally:
         conn.close()
+    if inbox_path is not None:
+        review_category_tally.append_inbox(inbox_path, categories)
     return len(nodes), len(edges)
 
 

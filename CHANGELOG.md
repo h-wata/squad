@@ -4,6 +4,14 @@
 
 ### Added
 
+- review 指摘の category 集計 (#136, Refs #130)。cross-review の指摘 (`findings` / `blocking` / `non_blocking` の
+  どちらの書式も読む) と、worker report の `issues` のうち `category` を持つものを `scripts/review_category_tally.py`
+  が category ごとに数え、件数 / 初出 / 直近 / 該当 PR を Markdown (`--json` で JSON) で出す。`category` の無い
+  review の指摘は `uncategorized` として数える (過去分に遡って付けない)。`squad graph sync` が同じ集計を
+  `queue/.graph.db` の `review_categories` 表に書き (schema 4)、web dashboard の「review 指摘」タブに出す。
+  同じ category が 2 件になると `queue/_inbox.md` にチェック化の候補を 1 行足す (`category:<name>` の印で重複を防ぐ)。
+  `queue/templates/review.yaml` / `report.yaml` と `instructions/worker.md` / `worker-codex.md` に任意の
+  `category` 欄と初期語彙 9 語を足した。review の書式は揃えていない。
 - squad が頼る Claude Code の挙動の前提を検出する `tests/test_claude_code_assumptions.py` (設定に `Write(` ルールが無い、
   Dispatcher / worker の `permissions.ask` が空、起動行が `CLAUDE_CONFIG_DIR` を与えトークンを argv に出さない) と、
   Claude Code 更新後に手で 1 回流す実機スモーク `scripts/smoke-claude-code-assumptions.sh` を足した (SQUAD-351)。
