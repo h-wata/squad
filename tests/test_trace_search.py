@@ -72,8 +72,12 @@ def queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     t2.write_text('task_id: T2\n')
     start = 1_790_899_200  # 2026-10-02T00:00:00Z
     os.utime(t2, (start, start))
+    t1 = pj / 'tasks' / 'worker1.yaml'
+    t1.write_text('task_id: T1\n')
+    start1 = 1_790_812_800  # 2026-10-01T00:00:00Z (exact は窓の両端が要る)
+    os.utime(t1, (start1, start1))
     (pj / 'reports' / 'worker1_report.yaml').write_text(
-        f'task_id: T1\nstatus: completed\nworker: worker1\nsession_id: "{SID}"\n'
+        f'task_id: T1\nstatus: completed\nworker: worker1\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
     )
     (pj / 'reports' / 'worker2_report.yaml').write_text(
         'task_id: T2\nstatus: blocked\nworker: worker2\ncompleted_at: "2026-10-02T01:00:00Z"\n'
@@ -177,3 +181,33 @@ def test_multiple_tool_results_in_one_line(queue: Path) -> None:
     only = trace_search.get(f'{SID}:7.1')
     assert len(only) == 1
     assert 'boom two' in only[0]
+
+
+@pytest.mark.parametrize(('with_task', 'with_end'), [(True, False), (False, True), (False, False)])
+def test_session_match_without_full_window_is_approximate(queue: Path, with_task: bool, with_end: bool) -> None:
+    """Session が一致しても、時間窓の始端か終端が欠けるなら exact にしない."""
+    pj = queue / 'projects' / 'pj'
+    if with_task:
+        (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    else:
+        for f in (pj / 'tasks').glob('*.yaml'):
+            if 'task_id: T1' in f.read_text():
+                f.write_text('task_id: OTHER\n')
+    end = 'completed_at: "2026-10-01T01:00:00Z"\n' if with_end else ''
+    (pj / 'reports' / 'worker1_report.yaml').write_text(f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\n{end}')
+    _jsonl(trace_search.mtc.CLAUDE_PROJECTS / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z')
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert srcs
+    assert all(not s.exact for s in srcs)
+
+
+def test_session_match_with_full_window_is_exact(queue: Path) -> None:
+    pj = queue / 'projects' / 'pj'
+    (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    _jsonl(trace_search.mtc.CLAUDE_PROJECTS / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z')
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert srcs
+    assert all(s.exact for s in srcs)

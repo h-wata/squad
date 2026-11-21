@@ -123,10 +123,31 @@ def test_counts_all_metrics(mk: Callable[..., dict]) -> None:
     assert m['trace_search_calls'] == 1
     assert m['writes_outside_workspace'] == 1
     assert m['deny_pattern_matches'] == 1
-    assert m['external_writes'] == 3
-    assert m['external_write_dups'] == 1
+    assert m['external_write_attempts'] == 3
+    assert m['external_write_attempt_dups'] == 1
     assert m['attribution'] == 'exact'
     assert (m['project'], m['task_id']) == ('pj', 'T1')
+
+
+def test_errored_external_write_is_not_counted(mk: Callable[..., dict]) -> None:
+    r = Rows()
+    r.bash('gh pr create --title x', is_error=True)
+    r.bash('git push origin b', is_error=True)
+    r.bash('git push origin b')
+    m = mk(r)
+    assert m['external_write_attempts'] == 1
+    assert m['external_write_attempt_dups'] == 0
+
+
+def test_verify_attempt_requires_matching_task_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    verdict = queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml'
+    verdict.write_text('task_id: OTHER\nattempt: 2\nresult: pass\n')
+    assert eval_trajectory.evaluate(queue, 'pj', 'T1')['verify_attempt'] is None
+    verdict.write_text('task_id: T1\nattempt: 2\nresult: pass\n')
+    assert eval_trajectory.evaluate(queue, 'pj', 'T1')['verify_attempt'] == 2
 
 
 def test_verify_ran_via_script_and_absent(mk: Callable[..., dict]) -> None:
@@ -153,7 +174,7 @@ def test_secret_is_masked(mk: Callable[..., dict]) -> None:
     r.bash(f'git reset --hard {TOKEN}')
     m = mk(r)
     assert TOKEN not in json.dumps(m)
-    assert m['external_writes'] == 1
+    assert m['external_write_attempts'] == 1
     assert any('ghp_<redacted>' in s for s in m['denied_samples'])
 
 

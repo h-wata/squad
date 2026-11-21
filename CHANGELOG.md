@@ -10,6 +10,9 @@
 
 ### Changed
 
+- P0 の追いかけ修正 (Refs #130)。trace は session が一致しても時間窓の両端が揃わなければ approximate にする。
+  外部書き込みの指標は `is_error` の呼び出しを数えず、試行と読める `external_write_attempts` / `external_write_attempt_dups` に改名した。
+  `verify_attempt` は verdict の task_id が対象 task と一致するときだけ採る。
 - `scripts/eval_trajectory.py` を追加し、`bench_report.py` に実行過程の列を足した (SQUAD-354)。task の transcript から
   tool 呼び出し・エラー・リトライ・verify の実施・記憶 MCP と `squad trace` の利用・workspace 外への書き込み・承認保留
   パターンに一致した試行 (`deny_pattern_matches`。実行されたかは transcript で確認が要る)・外部書き込みとその重複を数え、`metrics/task_evals.jsonl` に 1 行追記する。`bench_report.py` は

@@ -44,7 +44,7 @@ transcript から決定論的に指標を数えるスクリプトを 1 本足し
 
 判定は `metrics/task_evals.jsonl` で行う。
 
-- 重複: `external_write_dups` が 1 以上。
+- 重複: `external_write_attempt_dups` が 1 以上。
 - 制約違反: `deny_pattern_matches` は deny パターンに一致した試行の数で、実行されたかどうかは示さない。1 以上なら
   transcript と突き合わせ、実際に実行された (deny・承認保留をすり抜けた) かを手で確かめる。
 
