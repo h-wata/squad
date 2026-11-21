@@ -26,6 +26,7 @@ exit code は NG が 1 件でもあれば 1。WARN では落とさない (fail-s
 
 from __future__ import annotations
 
+import glob
 import os
 from pathlib import Path
 import re
@@ -68,12 +69,32 @@ def is_blank(value: object) -> bool:
 
 
 def find_task_yaml(report_path: Path, data: dict) -> Path | None:
-    """Report に対応する task YAML を探す (reports/ の隣の tasks/)."""
+    """Report に対応する task YAML を探す (reports/ の隣の tasks/).
+
+    配達時に watchd が tasks/archive/<worker>_<task_id>.yaml へ退避する (SQUAD-355) ので、tasks/ 直下が
+    無いか別 task に変わっていればそちらを見る。
+    """
     worker = data.get('worker')
     if not isinstance(worker, str) or not worker:
         return None
-    candidate = report_path.parent.parent / 'tasks' / f'{worker}.yaml'
+    tasks = report_path.parent.parent / 'tasks'
+    candidate = tasks / f'{worker}.yaml'
+    task_id = str(data.get('task_id') or '')
+    if task_id and not _has_task_id(candidate, task_id):
+        stem = glob.escape(f'{worker}_{re.sub(r"[^\w.-]", "_", task_id)}')
+        archived = [
+            p
+            for p in [*(tasks / 'archive').glob(f'{stem}.yaml'), *(tasks / 'archive').glob(f'{stem}_*.yaml')]
+            if _has_task_id(p, task_id)
+        ]
+        if archived:
+            return max(archived, key=lambda p: p.stat().st_mtime)
     return candidate if candidate.is_file() else None
+
+
+def _has_task_id(path: Path, task_id: str) -> bool:
+    task, _err = load_yaml(path)
+    return task is not None and str(task.get('task_id')) == task_id
 
 
 def load_yaml(path: Path) -> tuple[dict | None, str]:
