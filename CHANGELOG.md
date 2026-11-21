@@ -8,6 +8,13 @@
   Dispatcher / worker の `permissions.ask` が空、起動行が `CLAUDE_CONFIG_DIR` を与えトークンを argv に出さない) と、
   Claude Code 更新後に手で 1 回流す実機スモーク `scripts/smoke-claude-code-assumptions.sh` を足した (SQUAD-351)。
 
+### Fixed
+
+- `scripts/verify-task.sh` が既存の `CLAUDE_CODE_OAUTH_TOKEN` を `[ -z "${VAR:-}" ]` で判定していたため、`bash -x` で
+  トークンの値がトレースに出ていた。`${VAR:+x}` で有無だけを見る形にした。スモーク
+  `scripts/smoke-claude-code-assumptions.sh` も、`bash -x` でトークンの値を出さず、終了時に `mktemp -d` の一時 dir を
+  削除するようにした (SQUAD-352 / SQUAD-353)。
+
 ### Changed
 
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
