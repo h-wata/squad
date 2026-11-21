@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- squad が頼る Claude Code の挙動の前提を検出する `tests/test_claude_code_assumptions.py` (設定に `Write(` ルールが無い、
+  Dispatcher / worker の `permissions.ask` が空、起動行が `CLAUDE_CONFIG_DIR` を与えトークンを argv に出さない) と、
+  Claude Code 更新後に手で 1 回流す実機スモーク `scripts/smoke-claude-code-assumptions.sh` を足した (SQUAD-351)。
+
 ### Changed
 
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
