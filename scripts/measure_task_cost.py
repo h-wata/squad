@@ -41,6 +41,7 @@ import argparse
 from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
+import glob
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'squad'))
 from ledger import parse_scalars  # noqa: E402
+
+# squad/watchd.py の ARCHIVE_NAME_UNSAFE_RE と同じ (退避先の名前に使えない文字)
+_ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
 
 
 def _resolve_queue_root() -> Path:
@@ -114,9 +118,17 @@ def find_task_yaml(project: str, task_id: str) -> Path | None:
         if meta.get('task_id') == task_id:
             return path
     archive_dir = tasks_dir / 'archive'
-    candidates = sorted(archive_dir.glob(f'worker*_{task_id}.yaml'))
-    candidates += sorted(archive_dir.glob(f'worker*_{task_id}_*.yaml'))
-    return candidates[0] if candidates else None
+    # watchd は task_id の / 等を _ に置き換えた名前で退避する (SQUAD-361 N1)。glob の特殊文字も逃がす
+    name = glob.escape(_ARCHIVE_NAME_UNSAFE_RE.sub('_', task_id))
+    candidates = sorted(archive_dir.glob(f'worker*_{name}.yaml'))
+    candidates += sorted(archive_dir.glob(f'worker*_{name}_*.yaml'))
+    for path in candidates:  # 置き換えで別 task と同じ名前になりうるので、中身の task_id が合うものだけ採る
+        try:
+            if parse_scalars(path.read_text(encoding='utf-8', errors='replace')).get('task_id') == task_id:
+                return path
+        except OSError:
+            continue
+    return None  # 名前だけ当たった別 task を返すと計測 metadata を取り違える (SQUAD-368 N1)
 
 
 def find_report_yaml(project: str, task_id: str) -> Path | None:

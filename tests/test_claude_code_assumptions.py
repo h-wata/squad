@@ -18,8 +18,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
 
 import pytest
 from test_start_sh import (
@@ -145,3 +147,34 @@ def test_launch_gives_every_claude_window_its_config_dir_and_hides_token(tmp_pat
         assert got['token'] == 'oauth-secret-351'
         assert not any('oauth-secret-351' in a for a in got['argv']), window
         assert 'oauth-secret-351' not in sent[window], window
+
+
+def test_smoke_script_removes_its_temp_dir_and_hides_token_under_xtrace(tmp_path: Path) -> None:
+    """スモークは終了時に mktemp -d の dir を消し、bash -x でもトークンの値を出さない (SQUAD-353 NB1)."""
+    dummy = 'dummy-token-DO-NOT-LEAK-12345'
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    fake = bin_dir / 'claude'
+    fake.write_text('#!/bin/sh\nexit 0\n')  # 実 claude は呼ばない。何も書かないので各項目は FAIL でよい
+    fake.chmod(0o755)
+    token = tmp_path / 'token'
+    token.write_text(dummy + '\n')
+    tmp_root = tmp_path / 'tmp'
+    tmp_root.mkdir()
+    env = {
+        **os.environ,
+        'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+        'SQUAD_CLAUDE_TOKEN_FILE': str(token),
+        'TMPDIR': str(tmp_root),
+    }
+
+    proc = subprocess.run(
+        ['bash', '-x', str(REPO / 'scripts' / 'smoke-claude-code-assumptions.sh')],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert 'PASS' in proc.stdout or 'FAIL' in proc.stdout, proc.stderr  # 前提確認を抜けて本体まで走った
+    assert list(tmp_root.iterdir()) == [], '一時 dir が残っている'
+    assert dummy not in proc.stdout + proc.stderr

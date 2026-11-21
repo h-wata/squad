@@ -50,6 +50,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import ctx  # noqa: E402
+from ledger import ARCHIVE_VERIFY  # noqa: E402
 from ledger import Claim  # noqa: E402
 from ledger import delivery_key  # noqa: E402
 from ledger import find_reports  # noqa: E402
@@ -87,6 +88,10 @@ TODO_RE = re.compile(r'TODO|FIXME|XXX')
 WORKER_NUM_RE = re.compile(r'worker(\d+)')
 # reports/archive/ の写しのファイル名に使えない文字 (task_id に / 等が混ざっても archive の外に書かない)
 ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
+# この status の report を配達したら task YAML を tasks/archive/ へ退避する (SQUAD-355)。blocked や progress は残す
+ARCHIVE_TASK_STATUSES = frozenset({'completed', 'failed'})
+# 退避した task YAML への遅い書込み (退避前に開かれた fd から) を見張る秒数 (SQUAD-361 B2)
+TASK_ARCHIVE_VERIFY_SECONDS = 300
 WORKER_WINDOW = {1: 'w1', 2: 'w2', 3: 'w3', 4: 'w4'}
 CAPTURE_TAIL_LINES = 40
 HOOK_FRESH_SECONDS = 300
@@ -457,18 +462,48 @@ def _state_dir() -> Path:
     return Path(os.environ.get('SQUAD_STATE_DIR') or (ROOT / 'state'))
 
 
+def archived_task_text(task_path: Path, task_id: str) -> str | None:
+    """tasks/archive/ に退避した task_id の task YAML の中身 (無ければ None, SQUAD-355).
+
+    名前は worker{N}_<task_id>.yaml か、衝突時の worker{N}_<task_id>_<接尾辞>.yaml。名前だけでは別 task
+    (T1 と T1_x) を区別できないので中身の task_id で確かめ、同じ task が複数あれば mtime の新しい方を採る。
+    """
+    if not task_id:
+        return None
+    prefix = f'{task_path.stem}_{ARCHIVE_NAME_UNSAFE_RE.sub("_", task_id)}'
+    archive = task_path.parent / 'archive'
+    found: list[tuple[float, str]] = []
+    for p in [archive / f'{prefix}.yaml', *archive.glob(f'{globmod.escape(prefix)}_*.yaml')]:
+        try:
+            text = p.read_text(errors='replace')
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if parse_scalars(text).get('task_id') == task_id:
+            found.append((mtime, text))
+    return max(found)[1] if found else None
+
+
 def resolve_next(task_path: Path, meta: dict[str, str]) -> str:
     """Report の task YAML から次手 `[NEXT ...]` を決める (#34). 付けるものが無ければ ''.
 
     task YAML に next_on_pass / next_on_fail が両方無ければ '' を返し、通知本文を変えない。
-    task YAML が読めない・task_id が report と違う (次タスクで上書き済み) ときは推測せず
-    `[NEXT unresolved reason=...]` にする。例外は投げない (遷移の解決失敗で通知を止めない)。
+    tasks/ 直下に同じ task_id が無ければ tasks/archive/ の退避先を見る (SQUAD-355)。
+    どちらにも無い・読めないときは推測せず `[NEXT unresolved reason=...]` にする。
+    例外は投げない (遷移の解決失敗で通知を止めない)。
     """
     try:
         text = task_path.read_text(errors='replace')
     except OSError:
+        text = None
+    task_id = parse_scalars(text).get('task_id', '') if text is not None else ''
+    if task_id != meta.get('task_id', '') or not task_id:
+        # 配達時に退避済みか (SQUAD-355)、次の task で上書き済み。退避先に同じ task があればそれを使う
+        archived = archived_task_text(task_path, meta.get('task_id', ''))
+        if archived is not None:
+            text, task_id = archived, meta.get('task_id', '')
+    if text is None:
         return '[NEXT unresolved reason=task_yaml_missing]'
-    task_id = parse_scalars(text).get('task_id', '')
     if not task_id:
         return '[NEXT unresolved reason=task_yaml_unreadable]'
     if task_id != meta.get('task_id', ''):
@@ -518,6 +553,7 @@ class Watcher:
         self._queue_readable = True
         # report を配達したサイクルの最後に探索グラフを作り直す (#55)。起動直後に 1 回は作る
         self._graph_dirty = True
+        self._archive_warned: set[str] = set()  # 退避の再試行で WARN を出し済みの task (同じ失敗を毎サイクル書かない)
         # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
         self._tasks_sig: tuple | None = None
         # sync 失敗時は dirty を残し backoff で再試行する (一時的な失敗で永久に古いままにしない)
@@ -786,6 +822,7 @@ class Watcher:
             if not claim.ok:
                 continue
             self._deliver(project, report_id, path, sha, meta, invalid, claim, data, mtime)
+        self.reconcile_task_archives()
 
     def _deliver(
         self,
@@ -848,7 +885,9 @@ class Watcher:
         if enqueued and not invalid:
             self._archive_copy(path, report_id, sha, meta, data, mtime)
             self._record_report_notified()
-        if enqueued and self.ledger.commit(project, report_id, token):
+        # 退避の予定は commit と同じトランザクションで ledger に残し、report_bridge() の最後に行う (SQUAD-361 B1)
+        archive = None if invalid else self._task_archive_target(path, meta, mtime)
+        if enqueued and self.ledger.commit(project, report_id, token, archive):
             self._graph_dirty = True
             return
         if enqueued:
@@ -891,6 +930,183 @@ class Watcher:
                 os.unlink(tmp)
         except OSError as e:
             self.log(f'[WARN] report の写しを archive に残せません (配達は継続): {dest}: {e}')
+
+    @staticmethod
+    def _task_archive_target(path: str, meta: dict[str, str], report_mtime: float) -> tuple[str, str, float] | None:
+        """配達した report の task YAML を退避するなら (worker 番号, task_id, report の mtime) を返す (SQUAD-355).
+
+        移すのは終わった report (status が completed / failed、または status の無い review) だけ。
+        progress や blocked は続き・人間の判断待ちなので残す。
+        """
+        name = Path(path).name
+        status = meta.get('status', '')
+        done = status in ARCHIVE_TASK_STATUSES or ('_review' in name and not status)
+        m = WORKER_NUM_RE.search(name)
+        task_id = meta.get('task_id', '')
+        if not (done and m and task_id):
+            return None
+        return m.group(1), task_id, report_mtime
+
+    def reconcile_task_archives(self) -> None:
+        """Ledger に残る task YAML 退避の予定を進める (SQUAD-361 / SQUAD-368).
+
+        pending: 退避を試す。tasks/ の権限や容量の障害で失敗したら行を残し、次のサイクル (watchd の再起動後も)
+        でまた試す。配達は確定済みなので通知は増えない。
+        verify: 退避の前に task YAML を開いていた書き手 (追記の `cat >>` など、切り詰めずに開いた fd) が退避後に
+        書くと、書込みは退避先の inode に入り tasks/worker{N}.yaml は消えたままになる。退避先の size / mtime が
+        退避した時から変わっていたら tasks/ へ戻す。見る inode と退避時の size / mtime は rename の前に ledger に
+        書く (書けなければ rename しない) ので、rename 後に ledger へ書けなくても見張りは失われない。
+        見張るのは退避から TASK_ARCHIVE_VERIFY_SECONDS 秒 (wall clock) の後の最初のサイクルまで。
+        """
+        projects = [d.name for d in self.owned]
+        for row in self.ledger.task_archives(projects):
+            project, report_id = str(row['project']), str(row['report_id'])
+            key = f'{project}:{row["worker"]}:{row["task_id"]}'
+            if row['state'] == ARCHIVE_VERIFY:
+                result = self._verify_archived_task(row)
+                if result == 'done':
+                    self.ledger.task_archive_done(project, report_id)
+                elif result == 'retry':
+                    self.ledger.task_archive_retry(project, report_id)
+                continue
+            result = self._archive_task(
+                project, report_id, str(row['worker']), str(row['task_id']), float(row['report_mtime'])
+            )
+            if result == 'done':
+                self.ledger.task_archive_done(project, report_id)
+            if result == 'retry':
+                self._archive_warned.add(key)
+            else:
+                self._archive_warned.discard(key)
+
+    def _find_archived_inode(self, row: dict[str, object]) -> Path | None:
+        """退避した inode を持つファイルを退避先から探す (ledger に dest を書けなかったときも見つける)."""
+        archive = self.cfg.projects_dir / str(row['project']) / 'tasks' / 'archive'
+        stem = globmod.escape(f'worker{row["worker"]}_{ARCHIVE_NAME_UNSAFE_RE.sub("_", str(row["task_id"]))}')
+        dest = str(row['dest'])
+        for p in [
+            *([Path(dest)] if dest else []),
+            *sorted(archive.glob(f'{stem}*.yaml')),
+            *sorted(archive.glob(f'.moving-*-{stem}.yaml')),
+        ]:
+            try:
+                if p.stat().st_ino == row['dest_ino']:
+                    return p
+            except OSError:
+                continue
+        return None
+
+    def _verify_archived_task(self, row: dict[str, object]) -> str:
+        """退避先への遅い書込みを見つけたら tasks/ へ戻す.
+
+        Returns:
+            'done' (見張りを終える)、'keep' (見張りを続ける)、'retry' (rename まで進んでいなかった。pending に戻す)。
+        """
+        src = self.cfg.projects_dir / str(row['project']) / 'tasks' / f'worker{row["worker"]}.yaml'
+        try:
+            if src.stat().st_ino == row['dest_ino']:
+                return 'retry'  # ledger に書いた後、rename に失敗した (または途中で戻した)
+        except OSError:
+            pass
+        expired = int(time.time()) >= int(row['until'])
+        dest = self._find_archived_inode(row)
+        if dest is None:
+            return 'done'  # 手で動かされた・消された
+        try:
+            st = dest.stat()
+        except OSError:
+            return 'done' if expired else 'keep'
+        if (st.st_size, st.st_mtime_ns) != (row['dest_size'], row['dest_mtime_ns']):
+            try:
+                os.link(dest, src)  # 既存を上書きしない
+                dest.unlink()
+            except FileExistsError:
+                self.log(f'[WARN] 退避後に task YAML へ書き込まれましたが、新しい task があるので戻しません: {dest}')
+                return 'done'
+            except OSError as e:
+                self.log(f'[WARN] 退避後に書き込まれた task YAML を戻せません (次サイクルで再試行): {dest}: {e}')
+                return 'keep'
+            self.log(f'[WARN] 退避後に task YAML へ書き込まれたので戻しました: {dest} -> {src}')
+            return 'done'
+        return 'done' if expired else 'keep'
+
+    def _archive_task(self, project: str, report_id: str, worker: str, task_id: str, report_mtime: float) -> str:
+        """配達した report と同じ task_id の tasks/worker{N}.yaml を tasks/archive/ へ移す (SQUAD-355).
+
+        再起動した worker (とくに W4) が残った task YAML を読み、完了済みの task を再実行して report /
+        review を上書きするのを防ぐ。task_id が違う (次の task が書かれた後) か、task YAML が report より
+        新しい (同じ task_id で差し戻された後) なら動かさない。
+        名前は Dispatcher の手作業の慣習に揃え、既にあれば worker{N}_<task_id>_<YYYYMMDDHHMMSS>.yaml にする。
+        mtime は保つ (graph sync / trace が発注時刻に使う)。
+
+        Returns:
+            'verifying' (移した。ledger は verify)、'done' (動かすものが無い)、'retry' (失敗。次サイクルで再試行)。
+        """
+        key = f'{project}:{worker}:{task_id}'
+        warned = key in self._archive_warned
+        src = self.cfg.projects_dir / project / 'tasks' / f'worker{worker}.yaml'
+        try:
+            with open(src, 'rb') as f:  # noqa: PTH123 (読んだ内容と同じ inode の mtime を取る)
+                data = f.read()
+                st = os.fstat(f.fileno())
+        except FileNotFoundError:
+            return 'done'
+        except OSError as e:
+            if not warned:
+                self.log(f'[WARN] task YAML を読めず退避しません (次サイクルで再試行): {src}: {e}')
+            return 'retry'
+        if parse_scalars(data.decode(errors='replace')).get('task_id') != task_id:
+            return 'done'
+        if st.st_mtime > report_mtime:
+            return 'done'  # report の後に同じ task_id で差し戻された (停止検知と同じく実行中とみなす)
+        # 見張りに要る情報は rename の前に残す。書けなければ動かさない (SQUAD-368 B2-STATE-LOSS)
+        until = int(time.time()) + TASK_ARCHIVE_VERIFY_SECONDS
+        if not self.ledger.task_archive_moving(project, report_id, st.st_ino, st.st_size, st.st_mtime_ns, until):
+            if not warned:
+                self.log(f'[WARN] ledger に退避の記録を書けないので退避しません (次サイクルで再試行): {src}')
+            return 'retry'
+        archive = src.parent / 'archive'
+        stem = f'{src.stem}_{ARCHIVE_NAME_UNSAFE_RE.sub("_", task_id)}'
+        moving = archive / f'.moving-{os.getpid()}-{stem}.yaml'
+        try:
+            archive.mkdir(exist_ok=True)
+            # 確かめた後に Dispatcher が次の task を書いていたら、それを持って行かないよう rename の後に中身を比べる。
+            # O_TRUNC で開いた書き手 (`>`, open(.., "w")) は rename より前に切り詰め、temp file + rename の書き手
+            # (Claude Code の Write ツール) は別の inode を置くので、どちらもここで必ず差が出る
+            os.rename(src, moving)
+            if moving.read_bytes() != data:
+                os.link(moving, src)
+                moving.unlink()
+                self.log(f'[WARN] 退避の途中で task YAML が書き換わったので戻しました: {src}')
+                self.ledger.task_archive_retry(project, report_id)
+                return 'retry'
+            stamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            names = [f'{stem}.yaml', f'{stem}_{stamp}.yaml', *(f'{stem}_{stamp}-{k}.yaml' for k in range(2, 100))]
+            for dest in (archive / n for n in names):
+                if dest.exists() and dest.read_bytes() == data:
+                    # 同じ中身が退避済み (手で cp したもの等)。重複を作らず、書き手が開いているかもしれない
+                    # 移した inode の方を残す (退避後の書込みを見張れるように)
+                    os.replace(moving, dest)
+                    break
+                try:
+                    os.link(moving, dest)  # 既存を上書きしない
+                except FileExistsError:
+                    continue
+                moving.unlink()
+                break
+            else:
+                self.log(f'[WARN] 退避先の名前が尽きたので {moving} に残します')
+                return 'verifying'
+        except OSError as e:
+            if not warned:
+                self.log(f'[WARN] task YAML を退避できません (配達は確定済み、次サイクルで再試行): {src}: {e}')
+            # rename の前に失敗したなら pending に戻す。書けなくても verify が source の inode を見て戻す
+            self.ledger.task_archive_retry(project, report_id)
+            return 'retry'
+        self.log(f'task YAML を退避: {src} -> {dest}')
+        if not self.ledger.task_archive_moved(project, report_id, str(dest)):
+            self.log(f'[WARN] 退避先を ledger に書けません (見張りは inode で退避先を探して続ける): {dest}')
+        return 'verifying'
 
     def deliver_instructions(self) -> None:
         """Squad web が queue/instructions/<session>/ に書いた指示を Dispatcher へ 1 件渡す (#85).

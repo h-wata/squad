@@ -113,8 +113,8 @@ case "$(basename "$CLI")" in
         # worker の claude は CLAUDE_CODE_OAUTH_TOKEN を子プロセスに渡さず、認証情報のない
         # CLAUDE_CONFIG_DIR だけが残るため、claude -p が Not logged in で落ちる。start.sh と同じ
         # トークンファイルから補う。既に env にあるときは上書きしない。claude-local には渡さない。
-        # 値は変数経由で env にだけ載せる (argv に出さない)。set -x でも値が出ないよう trace を止める。
-        if [ "${SQUAD_WORKER_AGENT:-}" != "claude-local" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        # 値は変数経由で env にだけ載せる (argv に出さない)。set -x でも値が出ないよう、有無の判定は ${VAR:+x} で行い、読み出しの間は trace を止める。
+        if [ "${SQUAD_WORKER_AGENT:-}" != "claude-local" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:+x}" ]; then
             TOKEN_FILE="${SQUAD_CLAUDE_TOKEN_FILE:-$HOME/.config/squad/claude-oauth-token}"
             case "$-" in *x*) XTRACE_WAS_ON=1 ;; *) XTRACE_WAS_ON=0 ;; esac
             { set +x; } 2>/dev/null

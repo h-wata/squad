@@ -67,6 +67,28 @@ SCHEMA = (
     'next_attempt_at INTEGER NOT NULL, '
     'PRIMARY KEY (project, report_id))'
 )
+# 配達した report の task YAML 退避が済んでいない印 (SQUAD-361 B1/B2)。行がある間は watchd が毎サイクル続きを行う。
+#   pending  退避がまだ (tasks/ への権限・容量の障害で失敗したら、このまま次サイクルで再試行する)
+#   verify   退避した。until までに退避先へ書き込みがあれば tasks/ へ戻す (rename 前に開かれた fd からの書込み)
+# 済んだら行を消す。deliveries の commit と同じトランザクションで pending を入れるので、配達だけ確定して
+# 退避の予定が消える状態は作らない。
+TASK_ARCHIVE_SCHEMA = (
+    'CREATE TABLE IF NOT EXISTS task_archives ('
+    'project TEXT NOT NULL, '
+    'report_id TEXT NOT NULL, '
+    'worker TEXT NOT NULL, '
+    'task_id TEXT NOT NULL, '
+    'report_mtime REAL NOT NULL, '
+    "state TEXT NOT NULL DEFAULT 'pending', "
+    "dest TEXT NOT NULL DEFAULT '', "
+    'dest_ino INTEGER NOT NULL DEFAULT 0, '
+    'dest_size INTEGER NOT NULL DEFAULT 0, '
+    'dest_mtime_ns INTEGER NOT NULL DEFAULT 0, '
+    'until INTEGER NOT NULL DEFAULT 0, '
+    'PRIMARY KEY (project, report_id))'
+)
+ARCHIVE_PENDING = 'pending'
+ARCHIVE_VERIFY = 'verify'
 LEGACY_TABLE = 'reports'
 
 # 送信/commit 失敗時の再試行間隔。末尾の値が cap で、以降はその間隔で無限に再送する。
@@ -272,6 +294,7 @@ class ReportLedger:
         conn = sqlite3.connect(path or self.path, timeout=self.timeout, isolation_level=None)
         conn.execute(f'PRAGMA busy_timeout = {int(self.timeout * 1000)}')
         conn.execute(SCHEMA)
+        conn.execute(TASK_ARCHIVE_SCHEMA)
         return conn
 
     @contextmanager
@@ -339,11 +362,15 @@ class ReportLedger:
             return Claim('held', None, attempts)
         return Claim('claim', None, attempts + 1)
 
-    def commit(self, project: str, report_id: str, token: str | None) -> bool:
+    def commit(
+        self, project: str, report_id: str, token: str | None, archive: tuple[str, str, float] | None = None
+    ) -> bool:
         """送信成功後に delivered へ確定する.
 
         自分の claim でなくなっていれば何もしない (成功扱い)。ledger を操作できなければ
         False を返す (呼び出し側が fail() で backoff を進め、いずれ再通知される)。
+        archive に (worker 番号, task_id, report の mtime) を渡すと、同じトランザクションで task YAML
+        退避の予定 (task_archives の pending 行) を入れる (SQUAD-361 B1)。
         """
         if token is None:
             return False
@@ -360,7 +387,89 @@ class ReportLedger:
                     'WHERE project = ? AND report_id = ?',
                     (DELIVERED, '', project, report_id),
                 )
+                if archive is not None:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO task_archives(project, report_id, worker, task_id, report_mtime) '
+                        'VALUES(?, ?, ?, ?, ?)',
+                        (project, report_id, *archive),
+                    )
                 return True
+        except sqlite3.Error:
+            return False
+
+    def task_archives(self, projects: Iterable[str]) -> list[dict[str, object]]:
+        """担当 project の task YAML 退避で、まだ済んでいないもの (SQUAD-361). DB を読めなければ空."""
+        names = list(projects)
+        if not names:
+            return []
+        cols = (
+            'project',
+            'report_id',
+            'worker',
+            'task_id',
+            'report_mtime',
+            'state',
+            'dest',
+            'dest_ino',
+            'dest_size',
+            'dest_mtime_ns',
+            'until',
+        )
+        try:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    f'SELECT {", ".join(cols)} FROM task_archives '  # noqa: S608 (列名は定数)
+                    f'WHERE project IN ({", ".join("?" * len(names))}) ORDER BY project, report_id',
+                    names,
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+        return [dict(zip(cols, r, strict=True)) for r in rows]
+
+    def _update_task_archive(self, project: str, report_id: str, sets: str, values: tuple[object, ...]) -> bool:
+        try:
+            with self._tx() as conn:
+                conn.execute(
+                    f'UPDATE task_archives SET {sets} WHERE project = ? AND report_id = ?',  # noqa: S608 (列名は定数)
+                    (*values, project, report_id),
+                )
+            return True
+        except sqlite3.Error:
+            return False
+
+    def task_archive_moving(
+        self, project: str, report_id: str, ino: int, size: int, mtime_ns: int, until: int
+    ) -> bool:
+        """Rename の前に、見張る inode と退避時の size / mtime を残して verify にする (SQUAD-368).
+
+        rename より前に書くので、rename 後に watchd が落ちたり ledger に書けなくなったりしても、
+        次のサイクル (再起動後も) が inode で退避先を探し直して見張れる。
+        dest は rename 後に task_archive_moved で入れる。
+        """
+        return self._update_task_archive(
+            project,
+            report_id,
+            "state = ?, dest = '', dest_ino = ?, dest_size = ?, dest_mtime_ns = ?, until = ?",
+            (ARCHIVE_VERIFY, ino, size, mtime_ns, until),
+        )
+
+    def task_archive_moved(self, project: str, report_id: str, dest: str) -> bool:
+        """Rename 後の退避先を残す (書けなくても見張りは inode で退避先を探すので失われない)."""
+        return self._update_task_archive(project, report_id, 'dest = ?', (dest,))
+
+    def task_archive_retry(self, project: str, report_id: str) -> bool:
+        """Rename まで進まなかったので pending に戻す (次のサイクルで退避をやり直す)."""
+        return self._update_task_archive(project, report_id, "state = ?, dest = ''", (ARCHIVE_PENDING,))
+
+    def task_archive_done(self, project: str, report_id: str) -> bool:
+        """Task YAML の退避を済んだことにする (行を消す。以後は何もしない)."""
+        try:
+            with self._tx() as conn:
+                conn.execute('DELETE FROM task_archives WHERE project = ? AND report_id = ?', (project, report_id))
+            return True
         except sqlite3.Error:
             return False
 

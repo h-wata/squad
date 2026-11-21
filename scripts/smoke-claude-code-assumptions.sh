@@ -39,8 +39,18 @@ if [ ! -f "$BASE_SETTINGS" ]; then
     exit 2
 fi
 
-# worker と同じく専用の config dir を使う (手元の ~/.claude には触らない)。後始末は OS に任せる。
-WORK="$(mktemp -d)"
+# worker と同じく専用の config dir を使う (手元の ~/.claude には触らない)。終了時に削除する。
+# 削除は mktemp が作った実在の dir に限り、空変数や / などを渡して広く消さないよう case で絞る。
+WORK="$(mktemp -d)" || { echo "mktemp -d に失敗しました" >&2; exit 2; }
+# shellcheck disable=SC2329  # trap EXIT から呼ばれる
+cleanup() {
+    if [ -n "${WORK:-}" ] && [ -d "$WORK" ]; then
+        case "$WORK" in
+            /tmp/tmp.* | "${TMPDIR:-/tmp}"/tmp.*) rm -rf -- "$WORK" ;;
+        esac
+    fi
+}
+trap cleanup EXIT
 CONFIG_DIR="$WORK/config"
 mkdir -p "$CONFIG_DIR" "$WORK/cwd"
 cp "$BASE_SETTINGS" "$CONFIG_DIR/settings.json"
@@ -55,6 +65,7 @@ run_claude() {
     [ -n "$extra_settings" ] && args+=(--settings "$extra_settings")
     (
         cd "$WORK/cwd" || exit 1
+        { set +x; } 2>/dev/null  # bash -x で流しても、下の行の環境変数代入にトークンの値が出ないようにする
         CLAUDE_CONFIG_DIR="$CONFIG_DIR" CLAUDE_CODE_OAUTH_TOKEN="$(cat "$TOKEN_FILE")" \
             timeout 180 claude "${args[@]}" -- "$prompt" >/dev/null 2>&1
     )
