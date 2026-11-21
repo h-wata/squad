@@ -19,6 +19,7 @@ import trace_search  # noqa: E402
 
 SID = '11111111-1111-4111-8111-111111111111'
 SID_APPROX = '22222222-2222-4222-8222-222222222222'
+SID_MISSING = '44444444-4444-4444-8444-444444444444'
 TOKEN = 'ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'  # pragma: allowlist secret
 
 
@@ -210,4 +211,30 @@ def test_session_match_with_full_window_is_exact(queue: Path) -> None:
     _jsonl(trace_search.mtc.CLAUDE_PROJECTS / 'ws1' / f'{SID}.jsonl', '2026-10-01T00:10:00Z')
     srcs, _ = trace_search.sources(queue, task='T1')
     assert srcs
+    assert all(s.exact for s in srcs)
+
+
+def test_session_mismatch_does_not_pick_other_session_transcript(queue: Path) -> None:
+    """Report の session_id と別 session の JSONL しか無いとき、その JSONL を exact として選ばない."""
+    pj = queue / 'projects' / 'pj'
+    (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID_MISSING}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    # fixture には SID の JSONL が既にある。SID_MISSING の JSONL は無い
+    srcs, missing = trace_search.sources(queue, task='T1')
+    assert all(not s.exact for s in srcs)
+    assert all(SID not in s.path.name for s in srcs)
+    assert not srcs
+    assert missing == ['pj/T1']
+
+
+def test_session_mismatch_contrast_matching_session_is_selected(queue: Path) -> None:
+    pj = queue / 'projects' / 'pj'
+    (pj / 'tasks' / 'worker1.yaml').write_text('task_id: T1\n')
+    (pj / 'reports' / 'worker1_report.yaml').write_text(
+        f'task_id: T1\nstatus: completed\nsession_id: "{SID}"\ncompleted_at: "2026-10-01T01:00:00Z"\n'
+    )
+    srcs, _ = trace_search.sources(queue, task='T1')
+    assert [s.path.name for s in srcs] == [f'{SID}.jsonl']
     assert all(s.exact for s in srcs)
