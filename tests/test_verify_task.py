@@ -113,6 +113,13 @@ def test_existing_token_env_wins(tmp_path: Path) -> None:
     assert _token_seen(tmp_path) == 'other'
 
 
+def test_existing_token_env_is_not_leaked_by_xtrace(tmp_path: Path) -> None:
+    """既に env にあるトークンの値は、有無の判定でも bash -x のトレースに出ない (SQUAD-352 NB1)."""
+    dummy = 'dummy-token-DO-NOT-LEAK-12345'
+    _, proc = _run_full(tmp_path, {'CLAUDE_CODE_OAUTH_TOKEN': dummy}, bash_args=('-x',))
+    assert dummy not in proc.stdout + proc.stderr
+
+
 def test_blank_or_missing_token_file_is_ignored(tmp_path: Path) -> None:
     _run(tmp_path, _token_file(tmp_path, ' \n'))
     assert _token_seen(tmp_path) == 'unset'
