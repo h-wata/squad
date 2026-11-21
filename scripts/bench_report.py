@@ -37,7 +37,7 @@ EVAL_COLUMNS = (
     'tool_errors',
     'retries',
     'writes_outside_workspace',
-    'denied_commands',
+    'deny_pattern_matches',
     'external_write_dups',
 )
 COLUMNS = ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'wall_clock_sec', 'attempts')

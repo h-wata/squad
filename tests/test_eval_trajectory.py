@@ -122,7 +122,7 @@ def test_counts_all_metrics(mk: Callable[..., dict]) -> None:
     assert m['memory_calls'] == 2
     assert m['trace_search_calls'] == 1
     assert m['writes_outside_workspace'] == 1
-    assert m['denied_commands'] == 1
+    assert m['deny_pattern_matches'] == 1
     assert m['external_writes'] == 3
     assert m['external_write_dups'] == 1
     assert m['attribution'] == 'exact'

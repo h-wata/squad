@@ -7,6 +7,9 @@ transcript の特定・読み込み・secret マスクは squad/trace_search.py 
 `completed_at` 以下 (両端を含む)。同じ task を測り直すと追記が増えるが、読む側 (bench_report.py)
 は最後の 1 件を使う。
 
+指標 `deny_pattern_matches` は、承認保留の禁止パターンに一致した Bash 入力の試行数で、実際に実行された
+(deny・承認保留をすり抜けた) かどうかは示さない。実行されたかは transcript で確認が要る。
+
 使い方:
   eval_trajectory.py --project <pj> --task-id <id> [--queue-dir <dir>] [--out <jsonl>]
 """
@@ -115,7 +118,7 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
         'memory_calls': sum(tool.startswith('mcp__kioku_mesh__') for tool, *_ in calls),
         'trace_search_calls': sum(tool == 'Bash' and 'squad trace' in head for tool, head, *_ in calls),
         'writes_outside_workspace': outside,
-        'denied_commands': len(denied),
+        'deny_pattern_matches': len(denied),
         'denied_samples': [h[:SAMPLE_CHARS] for h in denied[:SAMPLE_LIMIT]],
         'external_writes': sum(ext.values()),
         'external_write_dups': sum(n - 1 for n in ext.values()),

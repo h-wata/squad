@@ -110,3 +110,13 @@ def test_approximate_attribution_is_excluded_from_eval_medians() -> None:
 
     assert lines[2].split(' | ')[11] == '15'  # tool_calls: exact 2 件の中央値 (approximate の 1000 は入らない)
     assert any('exact 2 件' in ln and 'approximate 1 件を除外' in ln for ln in lines)
+
+
+def test_deny_pattern_matches_column_is_rendered() -> None:
+    records = [_rec('D1', 'c', 1)]
+    evals = {('pj', 'D1'): {'attribution': 'exact', 'deny_pattern_matches': 3}}
+    header, _, row = bench_report.render(records, None, evals)[:3]
+
+    cols = [c.strip() for c in header.strip('|').split('|')]
+    assert 'deny_pattern_matches' in cols
+    assert row.strip('|').split('|')[cols.index('deny_pattern_matches')].strip() == '3'
