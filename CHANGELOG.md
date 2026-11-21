@@ -12,8 +12,10 @@
   `scripts/check_report_yaml.py` は、tasks/ 直下に同じ task が無ければ退避先を見る。
   退避の予定は配達の確定と同じトランザクションで ledger (`task_archives`) に残し、権限や容量の障害で失敗しても
   次のサイクル (watchd の再起動後も) で一度だけやり直す (SQUAD-361)。退避の前に開かれた fd から退避後に書き込まれた
-  ときは、退避から 300 秒後の最初のサイクルまで見張って `tasks/worker{N}.yaml` に戻す。`measure_task_cost.py` は
-  `/` などを含む task_id も退避先の名前で探す。
+  ときは、退避から 300 秒後の最初のサイクルまで見張って `tasks/worker{N}.yaml` に戻す。見張る inode と退避時の
+  size / mtime は rename の前に ledger に書き、書けなければ rename しない。rename の後に ledger へ書けなくても、
+  退避先を inode で探し直して見張りを続ける (SQUAD-368)。`measure_task_cost.py` は `/` などを含む task_id も
+  退避先の名前で探し、中身の task_id が違うファイルは返さない。
 - start.sh が git worktree 起動時に main repo のルートにも `hasClaudeMdExternalIncludesWarningShown` を書く (SQUAD-331)。
   Claude Code は worktree でも main repo のルートで project 設定を引くため、書かないと「Allow external CLAUDE.md file
   imports?」で止まっていた。

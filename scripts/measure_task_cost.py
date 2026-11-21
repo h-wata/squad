@@ -122,13 +122,13 @@ def find_task_yaml(project: str, task_id: str) -> Path | None:
     name = glob.escape(_ARCHIVE_NAME_UNSAFE_RE.sub('_', task_id))
     candidates = sorted(archive_dir.glob(f'worker*_{name}.yaml'))
     candidates += sorted(archive_dir.glob(f'worker*_{name}_*.yaml'))
-    for path in candidates:  # 置き換えで別 task と同じ名前になりうるので、中身の task_id が合うものを先に採る
+    for path in candidates:  # 置き換えで別 task と同じ名前になりうるので、中身の task_id が合うものだけ採る
         try:
             if parse_scalars(path.read_text(encoding='utf-8', errors='replace')).get('task_id') == task_id:
                 return path
         except OSError:
             continue
-    return candidates[0] if candidates else None
+    return None  # 名前だけ当たった別 task を返すと計測 metadata を取り違える (SQUAD-368 N1)
 
 
 def find_report_yaml(project: str, task_id: str) -> Path | None:

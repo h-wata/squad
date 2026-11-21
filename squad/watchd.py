@@ -948,69 +948,89 @@ class Watcher:
         return m.group(1), task_id, report_mtime
 
     def reconcile_task_archives(self) -> None:
-        """Ledger に残る task YAML 退避の予定を進める (SQUAD-361).
+        """Ledger に残る task YAML 退避の予定を進める (SQUAD-361 / SQUAD-368).
 
         pending: 退避を試す。tasks/ の権限や容量の障害で失敗したら行を残し、次のサイクル (watchd の再起動後も)
         でまた試す。配達は確定済みなので通知は増えない。
         verify: 退避の前に task YAML を開いていた書き手 (追記の `cat >>` など、切り詰めずに開いた fd) が退避後に
-        書くと、書込みは退避先の inode に入り tasks/worker{N}.yaml は消えたままになる。退避先の inode / size /
-        mtime が変わっていたら tasks/ へ戻す。見張るのは退避から TASK_ARCHIVE_VERIFY_SECONDS 秒 (wall clock)
-        の後の最初のサイクルまで。
+        書くと、書込みは退避先の inode に入り tasks/worker{N}.yaml は消えたままになる。退避先の size / mtime が
+        退避した時から変わっていたら tasks/ へ戻す。見る inode と退避時の size / mtime は rename の前に ledger に
+        書く (書けなければ rename しない) ので、rename 後に ledger へ書けなくても見張りは失われない。
+        見張るのは退避から TASK_ARCHIVE_VERIFY_SECONDS 秒 (wall clock) の後の最初のサイクルまで。
         """
         projects = [d.name for d in self.owned]
         for row in self.ledger.task_archives(projects):
             project, report_id = str(row['project']), str(row['report_id'])
             key = f'{project}:{row["worker"]}:{row["task_id"]}'
             if row['state'] == ARCHIVE_VERIFY:
-                if self._verify_archived_task(row):
-                    self.ledger.task_archive_done(project, report_id)
-                continue
-            result = self._archive_task(project, str(row['worker']), str(row['task_id']), float(row['report_mtime']))
-            if isinstance(result, str):  # 'retry' (失敗) / 'done' (動かすものが無い)
+                result = self._verify_archived_task(row)
                 if result == 'done':
                     self.ledger.task_archive_done(project, report_id)
-                    self._archive_warned.discard(key)
-                else:
-                    self._archive_warned.add(key)
+                elif result == 'retry':
+                    self.ledger.task_archive_retry(project, report_id)
                 continue
-            self._archive_warned.discard(key)
-            try:
-                st = result.stat()
-            except OSError:
-                self.ledger.task_archive_done(project, report_id)
-                continue
-            until = int(time.time()) + TASK_ARCHIVE_VERIFY_SECONDS
-            self.ledger.task_archive_moved(
-                project, report_id, str(result), st.st_ino, st.st_size, st.st_mtime_ns, until
+            result = self._archive_task(
+                project, report_id, str(row['worker']), str(row['task_id']), float(row['report_mtime'])
             )
+            if result == 'done':
+                self.ledger.task_archive_done(project, report_id)
+            if result == 'retry':
+                self._archive_warned.add(key)
+            else:
+                self._archive_warned.discard(key)
 
-    def _verify_archived_task(self, row: dict[str, object]) -> bool:
-        """退避先への遅い書込みを見つけたら tasks/ へ戻す. 見張りを終えてよければ True."""
-        dest = Path(str(row['dest']))
+    def _find_archived_inode(self, row: dict[str, object]) -> Path | None:
+        """退避した inode を持つファイルを退避先から探す (ledger に dest を書けなかったときも見つける)."""
+        archive = self.cfg.projects_dir / str(row['project']) / 'tasks' / 'archive'
+        stem = globmod.escape(f'worker{row["worker"]}_{ARCHIVE_NAME_UNSAFE_RE.sub("_", str(row["task_id"]))}')
+        dest = str(row['dest'])
+        for p in [
+            *([Path(dest)] if dest else []),
+            *sorted(archive.glob(f'{stem}*.yaml')),
+            *sorted(archive.glob(f'.moving-*-{stem}.yaml')),
+        ]:
+            try:
+                if p.stat().st_ino == row['dest_ino']:
+                    return p
+            except OSError:
+                continue
+        return None
+
+    def _verify_archived_task(self, row: dict[str, object]) -> str:
+        """退避先への遅い書込みを見つけたら tasks/ へ戻す.
+
+        Returns:
+            'done' (見張りを終える)、'keep' (見張りを続ける)、'retry' (rename まで進んでいなかった。pending に戻す)。
+        """
         src = self.cfg.projects_dir / str(row['project']) / 'tasks' / f'worker{row["worker"]}.yaml'
         try:
-            st = dest.stat()
-        except FileNotFoundError:
-            return True  # 手で動かされた
+            if src.stat().st_ino == row['dest_ino']:
+                return 'retry'  # ledger に書いた後、rename に失敗した (または途中で戻した)
         except OSError:
-            return int(time.time()) >= int(row['until'])
-        if st.st_ino != row['dest_ino']:
-            return True  # 別のファイルに置き換わった (退避した inode ではない)
+            pass
+        expired = int(time.time()) >= int(row['until'])
+        dest = self._find_archived_inode(row)
+        if dest is None:
+            return 'done'  # 手で動かされた・消された
+        try:
+            st = dest.stat()
+        except OSError:
+            return 'done' if expired else 'keep'
         if (st.st_size, st.st_mtime_ns) != (row['dest_size'], row['dest_mtime_ns']):
             try:
                 os.link(dest, src)  # 既存を上書きしない
                 dest.unlink()
             except FileExistsError:
                 self.log(f'[WARN] 退避後に task YAML へ書き込まれましたが、新しい task があるので戻しません: {dest}')
-                return True
+                return 'done'
             except OSError as e:
                 self.log(f'[WARN] 退避後に書き込まれた task YAML を戻せません (次サイクルで再試行): {dest}: {e}')
-                return False
+                return 'keep'
             self.log(f'[WARN] 退避後に task YAML へ書き込まれたので戻しました: {dest} -> {src}')
-            return True
-        return int(time.time()) >= int(row['until'])
+            return 'done'
+        return 'done' if expired else 'keep'
 
-    def _archive_task(self, project: str, worker: str, task_id: str, report_mtime: float) -> Path | str:
+    def _archive_task(self, project: str, report_id: str, worker: str, task_id: str, report_mtime: float) -> str:
         """配達した report と同じ task_id の tasks/worker{N}.yaml を tasks/archive/ へ移す (SQUAD-355).
 
         再起動した worker (とくに W4) が残った task YAML を読み、完了済みの task を再実行して report /
@@ -1020,7 +1040,7 @@ class Watcher:
         mtime は保つ (graph sync / trace が発注時刻に使う)。
 
         Returns:
-            移した先のパス (見張りの対象)、'done' (動かすものが無い・見張れない)、'retry' (失敗。次サイクルで再試行)。
+            'verifying' (移した。ledger は verify)、'done' (動かすものが無い)、'retry' (失敗。次サイクルで再試行)。
         """
         key = f'{project}:{worker}:{task_id}'
         warned = key in self._archive_warned
@@ -1028,7 +1048,7 @@ class Watcher:
         try:
             with open(src, 'rb') as f:  # noqa: PTH123 (読んだ内容と同じ inode の mtime を取る)
                 data = f.read()
-                task_mtime = os.fstat(f.fileno()).st_mtime
+                st = os.fstat(f.fileno())
         except FileNotFoundError:
             return 'done'
         except OSError as e:
@@ -1037,20 +1057,28 @@ class Watcher:
             return 'retry'
         if parse_scalars(data.decode(errors='replace')).get('task_id') != task_id:
             return 'done'
-        if task_mtime > report_mtime:
+        if st.st_mtime > report_mtime:
             return 'done'  # report の後に同じ task_id で差し戻された (停止検知と同じく実行中とみなす)
+        # 見張りに要る情報は rename の前に残す。書けなければ動かさない (SQUAD-368 B2-STATE-LOSS)
+        until = int(time.time()) + TASK_ARCHIVE_VERIFY_SECONDS
+        if not self.ledger.task_archive_moving(project, report_id, st.st_ino, st.st_size, st.st_mtime_ns, until):
+            if not warned:
+                self.log(f'[WARN] ledger に退避の記録を書けないので退避しません (次サイクルで再試行): {src}')
+            return 'retry'
         archive = src.parent / 'archive'
         stem = f'{src.stem}_{ARCHIVE_NAME_UNSAFE_RE.sub("_", task_id)}'
         moving = archive / f'.moving-{os.getpid()}-{stem}.yaml'
         try:
             archive.mkdir(exist_ok=True)
             # 確かめた後に Dispatcher が次の task を書いていたら、それを持って行かないよう rename の後に中身を比べる。
-            # O_TRUNC で開いた書き手 (Write ツール等) は rename より前に切り詰めるので、ここで必ず差が出る
+            # O_TRUNC で開いた書き手 (`>`, open(.., "w")) は rename より前に切り詰め、temp file + rename の書き手
+            # (Claude Code の Write ツール) は別の inode を置くので、どちらもここで必ず差が出る
             os.rename(src, moving)
             if moving.read_bytes() != data:
                 os.link(moving, src)
                 moving.unlink()
                 self.log(f'[WARN] 退避の途中で task YAML が書き換わったので戻しました: {src}')
+                self.ledger.task_archive_retry(project, report_id)
                 return 'retry'
             stamp = datetime.now().strftime('%Y%m%d%H%M%S')
             names = [f'{stem}.yaml', f'{stem}_{stamp}.yaml', *(f'{stem}_{stamp}-{k}.yaml' for k in range(2, 100))]
@@ -1068,13 +1096,17 @@ class Watcher:
                 break
             else:
                 self.log(f'[WARN] 退避先の名前が尽きたので {moving} に残します')
-                return 'done'
-            self.log(f'task YAML を退避: {src} -> {dest}')
-            return dest
+                return 'verifying'
         except OSError as e:
             if not warned:
                 self.log(f'[WARN] task YAML を退避できません (配達は確定済み、次サイクルで再試行): {src}: {e}')
+            # rename の前に失敗したなら pending に戻す。書けなくても verify が source の inode を見て戻す
+            self.ledger.task_archive_retry(project, report_id)
             return 'retry'
+        self.log(f'task YAML を退避: {src} -> {dest}')
+        if not self.ledger.task_archive_moved(project, report_id, str(dest)):
+            self.log(f'[WARN] 退避先を ledger に書けません (見張りは inode で退避先を探して続ける): {dest}')
+        return 'verifying'
 
     def deliver_instructions(self) -> None:
         """Squad web が queue/instructions/<session>/ に書いた指示を Dispatcher へ 1 件渡す (#85).

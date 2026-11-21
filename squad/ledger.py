@@ -429,20 +429,40 @@ class ReportLedger:
             return []
         return [dict(zip(cols, r, strict=True)) for r in rows]
 
-    def task_archive_moved(
-        self, project: str, report_id: str, dest: str, ino: int, size: int, mtime_ns: int, until: int
-    ) -> bool:
-        """退避が済んだので、until まで退避先 (dest) への書込みを見張る状態にする."""
+    def _update_task_archive(self, project: str, report_id: str, sets: str, values: tuple[object, ...]) -> bool:
         try:
             with self._tx() as conn:
                 conn.execute(
-                    'UPDATE task_archives SET state = ?, dest = ?, dest_ino = ?, dest_size = ?, dest_mtime_ns = ?, '
-                    'until = ? WHERE project = ? AND report_id = ?',
-                    (ARCHIVE_VERIFY, dest, ino, size, mtime_ns, until, project, report_id),
+                    f'UPDATE task_archives SET {sets} WHERE project = ? AND report_id = ?',  # noqa: S608 (列名は定数)
+                    (*values, project, report_id),
                 )
             return True
         except sqlite3.Error:
             return False
+
+    def task_archive_moving(
+        self, project: str, report_id: str, ino: int, size: int, mtime_ns: int, until: int
+    ) -> bool:
+        """Rename の前に、見張る inode と退避時の size / mtime を残して verify にする (SQUAD-368).
+
+        rename より前に書くので、rename 後に watchd が落ちたり ledger に書けなくなったりしても、
+        次のサイクル (再起動後も) が inode で退避先を探し直して見張れる。
+        dest は rename 後に task_archive_moved で入れる。
+        """
+        return self._update_task_archive(
+            project,
+            report_id,
+            "state = ?, dest = '', dest_ino = ?, dest_size = ?, dest_mtime_ns = ?, until = ?",
+            (ARCHIVE_VERIFY, ino, size, mtime_ns, until),
+        )
+
+    def task_archive_moved(self, project: str, report_id: str, dest: str) -> bool:
+        """Rename 後の退避先を残す (書けなくても見張りは inode で退避先を探すので失われない)."""
+        return self._update_task_archive(project, report_id, 'dest = ?', (dest,))
+
+    def task_archive_retry(self, project: str, report_id: str) -> bool:
+        """Rename まで進まなかったので pending に戻す (次のサイクルで退避をやり直す)."""
+        return self._update_task_archive(project, report_id, "state = ?, dest = ''", (ARCHIVE_PENDING,))
 
     def task_archive_done(self, project: str, report_id: str) -> bool:
         """Task YAML の退避を済んだことにする (行を消す。以後は何もしない)."""
