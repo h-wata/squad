@@ -14,6 +14,9 @@
 
 `metrics/task_evals.jsonl` (scripts/eval_trajectory.py の出力) があれば、(project, task_id) で結合して
 実行過程の指標の中央値を列に足す。同じ task の測り直しは最後の 1 行を使う。無ければ列は出さない。
+`attribution` が exact 以外 (時間窓の fallback) の行は中央値から除き、除外件数を表の下に出す。
+`verify_ran` は author の transcript 内の verifier 呼び出しだけを見る (verifier の transcript が時間窓から
+観測できなければ false になる)。
 """
 
 from __future__ import annotations
@@ -105,6 +108,10 @@ def _median(values: list) -> str:
     return f'{median(nums):.0f}' if nums else '-'
 
 
+def _is_exact(evals: dict[tuple[str, str], dict] | None, rec: dict) -> bool:
+    return (evals or {}).get((rec['project'], rec['task_id']), {}).get('attribution') == 'exact'
+
+
 def render(
     records: list[dict], counts: dict[tuple[str, str], int] | None, evals: dict[tuple[str, str], dict] | None = None
 ) -> list[str]:
@@ -119,14 +126,23 @@ def render(
         + ''.join(f' {c} |' for c in extra),
         '|---' * (len(COLUMNS) + 5 + len(extra)) + '|',
     ]
+    notes: list[str] = []
     for (suite, config), rs in sorted(groups.items()):
         ok = sum(r.get('status') == 'completed' and r.get('verify_status') == 'pass' for r in rs)
         dup = '-' if counts is None else f'{sum(counts[r["project"], r["task_id"]] >= 2 for r in rs)}/{len(rs)}'
         cells = [_median([r.get(c) for r in rs]) for c in COLUMNS]
         row = f'| {suite} | {config} | {len(rs)} | {ok}/{len(rs)} | ' + ' | '.join(cells) + f' | {dup} |'
+        # attribution が exact 以外 (時間窓の fallback で別 session を拾いうる) は中央値に入れない
+        exact = [evals[r['project'], r['task_id']] for r in rs if _is_exact(evals, r)]
         for c in extra:
-            row += f' {_median([(evals or {}).get((r["project"], r["task_id"]), {}).get(c) for r in rs])} |'
+            row += f' {_median([e.get(c) for e in exact])} |'
         lines.append(row)
+        excluded = sum(1 for r in rs if (r['project'], r['task_id']) in (evals or {}) and not _is_exact(evals, r))
+        if extra and excluded:
+            notes.append(
+                f'- {suite} / {config}: 実行過程の列は exact {len(exact)} 件の中央値 (approximate {excluded} 件を除外)'
+            )
+    lines.extend(['', *notes] if notes else [])
     return lines
 
 

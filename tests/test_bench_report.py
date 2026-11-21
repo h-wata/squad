@@ -97,3 +97,16 @@ def test_same_trial_label_on_another_task_is_counted_once(tmp_path: Path, capsys
 
     assert [r['task_id'] for r in records] == ['A9']
     assert '重複' in capsys.readouterr().err
+
+
+def test_approximate_attribution_is_excluded_from_eval_medians() -> None:
+    records = [_rec('E1', 'c', 1), _rec('E2', 'c', 2), _rec('E3', 'c', 3)]
+    evals = {
+        ('pj', 'E1'): {'attribution': 'exact', 'tool_calls': 10},
+        ('pj', 'E2'): {'attribution': 'exact', 'tool_calls': 20},
+        ('pj', 'E3'): {'attribution': 'approximate', 'tool_calls': 1000},
+    }
+    lines = bench_report.render(records, None, evals)
+
+    assert lines[2].split(' | ')[11] == '15'  # tool_calls: exact 2 件の中央値 (approximate の 1000 は入らない)
+    assert any('exact 2 件' in ln and 'approximate 1 件を除外' in ln for ln in lines)

@@ -201,9 +201,9 @@ def test_render_adds_eval_columns_only_with_evals() -> None:
     assert base == bench_report.render(recs, None, {})  # evals が無ければ従来どおり
     assert 'tool_calls' not in base[0]
     evals = {
-        ('pj', 'A1'): {'tool_calls': 10, 'tool_errors': 0, 'retries': 1},
-        ('pj', 'A2'): {'tool_calls': 30, 'tool_errors': 2, 'retries': 3},
-        ('pj', 'A3'): {'tool_calls': 20, 'tool_errors': 1, 'retries': 2},
+        ('pj', 'A1'): {'attribution': 'exact', 'tool_calls': 10, 'tool_errors': 0, 'retries': 1},
+        ('pj', 'A2'): {'attribution': 'exact', 'tool_calls': 30, 'tool_errors': 2, 'retries': 3},
+        ('pj', 'A3'): {'attribution': 'exact', 'tool_calls': 20, 'tool_errors': 1, 'retries': 2},
     }
     lines = bench_report.render(recs, None, evals)
     header = [c.strip() for c in lines[0].strip('|').split('|')]
