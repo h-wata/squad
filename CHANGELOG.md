@@ -22,6 +22,8 @@
   トークンの値がトレースに出ていた。`${VAR:+x}` で有無だけを見る形にした。スモーク
   `scripts/smoke-claude-code-assumptions.sh` も、`bash -x` でトークンの値を出さず、終了時に `mktemp -d` の一時 dir を
   削除するようにした (SQUAD-352 / SQUAD-353)。
+- stamp_created_at hook が `tasks/worker{N}.yaml` の再利用で前タスクの `created_at` を引き継ぎ、誤った [BUDGET] 警告が
+  出ていた。既存ファイルと新 content の `task_id` が同じときだけ既存値を残し、それ以外は現在時刻にする (SQUAD-398)。
 
 ### Changed
 
