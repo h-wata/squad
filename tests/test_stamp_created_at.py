@@ -103,6 +103,39 @@ def test_archived_existing_gets_new_created_at(tmp_path: Path) -> None:
     assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
 
 
+def _keeps(tmp_path: Path, old_head: str, new_head: str = 'task_id: T-1\n') -> None:
+    f = _existing(tmp_path, old_head + OLD)
+    out = run(write(str(f), new_head + 'created_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == new_head + OLD
+
+
+def test_trailing_comment_is_same_task_id(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'task_id: T-1 # prior\n')
+
+
+def test_comment_on_new_content_is_same_task_id(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'task_id: T-1\n', 'task_id: T-1  # now\n')
+
+
+def test_anchor_is_same_task_id(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'task_id: &current T-1\n')
+
+
+def test_alias_is_same_task_id(tmp_path: Path) -> None:
+    # アンカーを別キーで定義し task_id はエイリアスで参照する
+    _keeps(tmp_path, 'base: &current T-1\ntask_id: *current\n')
+
+
+def test_non_first_line_top_level_task_id_matches(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'title: x\ntask_id: T-1\n', 'title: y\ntask_id: "T-1"\n')
+
+
+def test_nested_task_id_does_not_match(tmp_path: Path) -> None:
+    f = _existing(tmp_path, 'meta:\n  task_id: T-1\n' + OLD)
+    out = run(write(str(f), 'task_id: T-1\ncreated_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
+
+
 def test_edit_and_other_paths_untouched(tmp_path: Path) -> None:
     assert run(write('queue/projects/p/tasks/w.yaml', tool='Edit'), tmp_path) is None
     for p in (
