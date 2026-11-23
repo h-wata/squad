@@ -1235,7 +1235,8 @@ class Watcher:
         try:
             import graph  # noqa: PLC0415
 
-            n_nodes, n_edges = graph.sync(self.cfg.queue_dir)
+            # review 指摘の category の候補 (#136) は session に依らず queue/_inbox.md に足す (印で重複を防ぐ)
+            n_nodes, n_edges = graph.sync(self.cfg.queue_dir, inbox_path=self.cfg.queue_dir / '_inbox.md')
         except Exception as e:  # noqa: BLE001 (graph の失敗で watcher を止めない。ImportError = PyYAML 無しも含む)
             # dirty を残して backoff 付きで再試行する。ログは初回の失敗だけ (毎サイクルの洪水を避ける)
             wait = GRAPH_RETRY_BACKOFF[min(self._graph_failures, len(GRAPH_RETRY_BACKOFF) - 1)]

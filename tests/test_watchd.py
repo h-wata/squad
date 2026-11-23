@@ -1462,6 +1462,19 @@ class TestGraphSync:
         finally:
             conn.close()
 
+    def test_delivery_appends_review_category_candidate(self, watcher: tuple[Watcher, Path]) -> None:
+        """#136: 同じ category の指摘が 2 件になったら、sync したサイクルで queue/_inbox.md に候補が 1 行入る."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        (d / 'reports' / 'archive').mkdir()
+        (d / 'reports' / 'archive' / 'T0__review-1.yaml').write_text(
+            'task_id: T0\nverdict: approve\nfindings:\n  - category: stale-state\n    description: x\n'
+        )
+        write_report(d, task_id='T1', issues='[{category: stale-state, issue: y}]')
+        w.cycle()
+        inbox = queue / '_inbox.md'
+        assert inbox.read_text().count('`category:stale-state`') == 1
+
     def test_graph_failure_does_not_block_delivery(
         self, watcher: tuple[Watcher, Path], monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1728,7 +1741,7 @@ class TestTaskYamlTriggersGraphSync:
         import graph  # noqa: PLC0415
 
         calls: list = []
-        monkeypatch.setattr(graph, 'sync', lambda q: calls.append(q) or (0, 0))
+        monkeypatch.setattr(graph, 'sync', lambda q, **_kw: calls.append(q) or (0, 0))
         d = make_project(queue, 'pj', session='testsess')
         assert self._synced(w, calls)  # 起動直後の 1 回
         assert not self._synced(w, calls)  # 何も変わらない
@@ -1765,7 +1778,7 @@ class TestGraphSyncRetry:
         w.log = logs.append
         fail = [True]
 
-        def fake_sync(q: Path) -> tuple[int, int]:
+        def fake_sync(q: Path, **_kw: object) -> tuple[int, int]:
             calls.append(q)
             if fail[0]:
                 raise RuntimeError('boom')

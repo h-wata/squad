@@ -383,6 +383,36 @@ def activity_data(db_path: Path, hours: int, project: str = '', session: str = '
     return _query(db_path, fn)
 
 
+def review_categories_data(db_path: Path) -> dict[str, Any]:
+    """Review 指摘の category ごとの 件数 / 初出 / 直近 / 該当 PR (#136). graph sync が集計した表を読むだけ.
+
+    並びは sync が入れた順 (件数の多い順、uncategorized は最後) ではなく、ここでも同じ規則で並べ直す。
+    """
+
+    def fn(conn: sqlite3.Connection) -> dict[str, Any]:
+        try:
+            rows = conn.execute(
+                'SELECT category, count, first_seen, last_seen, prs_json, approx FROM review_categories'
+            ).fetchall()
+        except sqlite3.OperationalError:  # review_categories 表の無い古い DB (次の sync で作り直される)
+            rows = []
+        out = [
+            {
+                'category': c,
+                'count': n,
+                'first_seen': first,
+                'last_seen': last,
+                'prs': prs if isinstance(prs := _payload(prs_json), list) else [],
+                'approx': bool(approx),
+            }
+            for c, n, first, last, prs_json, approx in rows
+        ]
+        out.sort(key=lambda r: (r['category'] == 'uncategorized', -r['count'], r['category']))
+        return {'categories': out}
+
+    return _query(db_path, fn)
+
+
 def targets_data(db_path: Path) -> dict[str, Any]:
     """指示を出せる宛先: 起動中の squad セッションと、そのセッションが担当する project (#85)."""
     owners = _query(db_path, lambda conn: {'owners': conn.execute('SELECT project, session FROM projects').fetchall()})
@@ -581,6 +611,8 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == '/api/activity':
             hours = arg('hours', '24')
             data = activity_data(db, int(hours) if hours.isdigit() else 24, arg('project'), arg('session'))
+        elif url.path == '/api/review_categories':
+            data = review_categories_data(db)
         elif url.path == '/api/targets' and self.server.allow_write:
             data = targets_data(db)
         else:
@@ -741,7 +773,8 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 #instr select{margin:0 .8em 0 .3em}#instr textarea{display:block;width:100%;margin:.4em 0;font:inherit}
 </style></head><body>
 <nav><button data-v="sessions" class="on">稼働状況</button><button data-v="projects">Projects</button>
-<button data-v="graph">Graph</button><button data-v="activity">活動</button><span id="sync"></span></nav>
+<button data-v="graph">Graph</button><button data-v="activity">活動</button>
+<button data-v="reviewcat">review 指摘</button><span id="sync"></span></nav>
 <main><div id="err" class="err" hidden></div>
 <section id="sessions"></section>
 <section id="projects" hidden><div id="pjbar">project<select id="pjsel"></select>期間<select id="pjdays">
@@ -753,7 +786,8 @@ tr.click{cursor:pointer}tr.click:hover{background:#f6f8fa}
 <section id="activity" hidden><!--WRITE_FORM-->
 <div id="actbar">project<select id="actpj"></select>セッション<select id="actsess">
 </select><span id="actrange" class="mono"></span></div><div id="actlist"></div>
-<button id="actmore">もっと見る</button></section></main>
+<button id="actmore">もっと見る</button></section>
+<section id="reviewcat" hidden><div id="rclist"></div></section></main>
 <div id="modal"><header><span id="mtitle" class="mono"></span><button onclick="closeModal()">閉じる</button></header>
 <pre id="mtext"></pre></div>
 <script>
@@ -993,6 +1027,26 @@ async function activity() {
         tr.onclick = () => openGoal(e.goal, e.node_id); }
       return tr; })));
 }
+// review 指摘タブ (#136): category ごとの件数。category の無い過去分は uncategorized として最後の行に出る
+const PR_LIMIT = 3;
+const prLabel = u => { const i = u.lastIndexOf('/pull/'); return i >= 0 ? '#' + u.slice(i + 6) : u; };
+async function reviewcat() {
+  const d = await api('/api/review_categories'), cats = d.categories || []; meta(d);
+  const day = (iso, approx) => (iso || '-').slice(0, 10) + (approx ? '*' : '');
+  const root = document.getElementById('rclist');
+  root.replaceChildren(table(['category', '件数', '初出', '直近', 'PR'], cats.map(c => {
+    const prs = el('span', 'mono');
+    c.prs.slice(0, PR_LIMIT).forEach((u, i) => { if (i) prs.append(', ');
+      const a = el('a', '', prLabel(u)); if (u.startsWith('https://')) { a.href = u; a.target = '_blank';
+        a.rel = 'noopener noreferrer'; } prs.append(a); });
+    if (c.prs.length > PR_LIMIT) prs.append(' 他 ' + (c.prs.length - PR_LIMIT) + ' 件');
+    if (!c.prs.length) prs.textContent = '-';
+    return row([el('b', '', c.category), el('span', 'num', String(c.count)), day(c.first_seen, c.approx),
+      day(c.last_seen, c.approx), prs]); })));
+  if (!cats.length) root.append(el('p', 'mono', 'まだ集計がありません (squad graph sync 後に出ます)'));
+  if (cats.some(c => c.approx))
+    root.append(el('p', 'mono', '* completed_at の無い report を含み、日付はファイルの mtime による近似'));
+}
 for (const id of ['pjsel', 'pjdays']) document.getElementById(id).onchange = () => projects();
 for (const id of ['actpj', 'actsess']) document.getElementById(id).onchange = () => activity();
 document.getElementById('actmore').onclick = () => { actHours = HOURS[HOURS.indexOf(actHours) + 1]; activity(); };
@@ -1000,6 +1054,7 @@ document.getElementById('actmore').onclick = () => { actHours = HOURS[HOURS.inde
 async function refresh() {
   try { if (view === 'sessions') await sessions(); if (view === 'projects') await projects();
     if (view === 'graph') { await goals(); if (!cy) await drawGraph(); } if (view === 'activity') await activity();
+    if (view === 'reviewcat') await reviewcat();
   } catch (e) { const x = document.getElementById('err'); x.hidden = false; x.textContent = 'error: ' + e; }
 }
 show(view); setInterval(() => { if (view !== 'graph') refresh(); }, 5000);

@@ -521,7 +521,8 @@ def cmd_graph(args: argparse.Namespace, _cfg: dict) -> int:
         print(f'squad graph には PyYAML が必要です: {e}', file=sys.stderr)
         return 2
     if args.graph_cmd == 'sync':
-        n_nodes, n_edges = graph.sync(queue_dir, db)
+        # review 指摘の category が 2 件目に達したら queue/_inbox.md に候補を足す (#136)
+        n_nodes, n_edges = graph.sync(queue_dir, db, inbox_path=queue_dir / '_inbox.md')
         print(f'synced {n_nodes} nodes, {n_edges} edges -> {db}')
         return 0
     if args.graph_cmd == 'status':

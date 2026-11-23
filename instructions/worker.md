@@ -239,6 +239,33 @@ report に記録しておくと `scripts/measure_task_cost.py` が
 
 テンプレート: `queue/templates/report.yaml`
 
+### issues と review 指摘の category (任意)
+
+`issues` の要素と cross-review の指摘には、任意で `category` を 1 つ書ける (#136)。
+`scripts/review_category_tally.py` と `squad graph sync` が category ごとに数え、web dashboard の
+「review 指摘」タブに出す。同じ category が 2 件になると `queue/_inbox.md` にチェック化の候補が 1 行入る。
+category を付けたい `issues` の要素は文字列ではなく次の形にする。category の無い `issues` は数えない。
+
+```yaml
+issues:
+  - category: stale-state
+    issue: "初回の verifier は report が旧タスクのままで fail"
+```
+
+値は下の語彙から 1 つ選ぶ。当てはまらなければ `other` にする (語彙外の値も数えるが、増えたら語彙を見直す)。
+
+| category | 意味 |
+|---|---|
+| `stale-state` | 古い入力 / 前タスクの状態を読んだ |
+| `identity-mismatch` | 別の task / 別の対象を、ID を照合せずに採った |
+| `shared-file-conflict` | 複数 PR が同じファイルを触って衝突した |
+| `naming-semantics` | 名前が実際の意味と違う |
+| `secret-leak` | 秘匿値がログ・trace・argv に出る |
+| `missing-test` | 回帰テスト・境界ケースが無い |
+| `scope-creep` | 指示範囲外の変更 |
+| `doc-mismatch` | 文書と実装の食い違い |
+| `other` | 上のどれでもない |
+
 ### report_id の発番ルール（必須・再利用禁止）
 
 `report_id` は watcher が Dispatcher への配達を重複なく行うための主キー。
@@ -281,7 +308,9 @@ report の Dispatcher への到達は `watch.sh` に依存する（単一障害�
 `routing_reason: "cross-review of W{X} PR #N"` のタスクを受けたら:
 1. 該当 PR を `gh pr view` 等で取得
 2. コードレビュー（実装の妥当性、テスト網羅性、設計選択）
-3. report YAML を `worker{N}_review.yaml` に出力（通常 report と分離）
+3. report YAML を `worker{N}_review.yaml` に出力（通常 report と分離）。指摘の要素には任意で
+   `category` を書ける (語彙は上の「issues と review 指摘の category」。書式は `findings` でも
+   `blocking` / `non_blocking` でもよい)
 4. `author_agent` には PR 作成側 (Codex なら codex) を記載、`agent: claude` (自分)
 
 approve しても自動 merge しない（ユーザー手動）。
