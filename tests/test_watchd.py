@@ -1765,11 +1765,30 @@ class TestVerdictHistory:
         for body in (
             'task_id: SQUAD-1\nresult: pass\n',
             'attempt: 1\nresult: pass\n',
-            'task_id: SQUAD-1\nattempt: x\n',
+            'task_id: SQUAD-1\nattempt: x\nresult: pass\n',
         ):
             self._verdict(d, body, 1000)
             w.archive_verdicts()
         assert self._hist(d) == []
+
+    def test_verdict_without_valid_result_is_not_copied(self, watcher: tuple[Watcher, Path]) -> None:
+        """途中書き込みで result がまだ無い verdict や、schema に無い result は写さない (SQUAD-400 B1)."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        for body in (
+            'task_id: SQUAD-1\nattempt: 1\n',
+            'task_id: SQUAD-1\nattempt: 1\nresult:\n',
+            'task_id: SQUAD-1\nattempt: 1\nresult: ok\n',
+        ):
+            self._verdict(d, body, 1000)
+            w.archive_verdicts()
+        assert self._hist(d) == []
+        # result まで書き終われば写す
+        for result in ('pass', 'fail', 'inconclusive'):
+            self._verdict(d, f'task_id: SQUAD-1\nattempt: 1\nresult: "{result}"\n', 1000)
+            w.archive_verdicts()
+        assert len(self._hist(d)) == 3
 
     def test_unsafe_task_id_stays_in_history_dir(self, watcher: tuple[Watcher, Path]) -> None:
         w, queue = watcher

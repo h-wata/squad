@@ -92,6 +92,8 @@ ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
 # verifier の verdict を attempt ごとに写す先 (queue/projects/<pj>/verdicts/, SQUAD-397)。reports/ の外に置くのは、
 # graph sync が reports/ 以下の verdict を結果として数えるため (attempt 1 の fail を結果に混ぜない)
 VERDICT_HISTORY_DIR = 'verdicts'
+# verifier の verdict の result がとりうる値 (.claude/agents/verifier.md)。これ以外 (未記入を含む) は書きかけとみなす
+VERDICT_RESULTS = frozenset({'pass', 'fail', 'inconclusive'})
 
 
 def verdict_history_name(task_id: str, attempt: int, data: bytes) -> str:
@@ -958,7 +960,8 @@ class Watcher:
         """reports/worker{N}_verdict.yaml を verdicts/ に attempt ごとに写す (SQUAD-397).
 
         verdict は attempt ごと・task ごとに上書きされるので、eval_trajectory が最終の attempt を後から
-        数えられるよう、見えた内容をそのまま残す。task_id か数字の attempt が無い verdict は写さない
+        数えられるよう、見えた内容をそのまま残す。task_id か数字の attempt が無い verdict と、
+        result が VERDICT_RESULTS に無い (未記入を含む) verdict は写さない
         (書きかけなら次のサイクルで見直す)。同じ名前があれば書かない。2 つの attempt の verdict が
         1 サイクル (既定 15 秒) の間に続けて書かれると前のものは残らないが、最後の attempt は残る。
         失敗しても他の処理は止めず、同じ写し先の WARN は 1 回だけ出す。
@@ -973,7 +976,7 @@ class Watcher:
                     continue
                 meta = parse_scalars(data.decode('utf-8', errors='replace'))
                 task_id, attempt = meta.get('task_id', '').strip(), meta.get('attempt', '').strip()
-                if not task_id or not attempt.isdigit():
+                if not task_id or not attempt.isdigit() or meta.get('result', '').strip() not in VERDICT_RESULTS:
                     continue
                 dest = d / VERDICT_HISTORY_DIR / verdict_history_name(task_id, int(attempt), data)
                 try:

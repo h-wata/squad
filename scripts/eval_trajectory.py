@@ -38,6 +38,7 @@ import trace_search  # noqa: E402
 from watchd import APPROVAL_DENY_DEFAULT  # noqa: E402
 from watchd import ARCHIVE_NAME_UNSAFE_RE  # noqa: E402
 from watchd import VERDICT_HISTORY_DIR  # noqa: E402
+from watchd import VERDICT_RESULTS  # noqa: E402
 from watchd import verdict_history_name  # noqa: E402,F401 (テストが写しの名前を作るのに使う)
 
 DENY_RE = re.compile(APPROVAL_DENY_DEFAULT, re.IGNORECASE)
@@ -80,8 +81,9 @@ def _split(text: str) -> tuple[str, dict]:
 def final_verdict(queue_dir: Path, project: str, task_id: str, worker: str) -> tuple[int | None, str | None]:
     """Task の最後の verdict の (attempt, result). 見つからなければ (None, None) (SQUAD-397).
 
-    候補は watchd が attempt ごとに写した verdicts/ と、今の reports/<worker>_verdict.yaml。中身の task_id が
-    一致するものだけを採り (別 task の verdict を採らない)、mtime が最も新しいものを最後とみなす。差し戻しで
+    候補は watchd が attempt ごとに写した verdicts/ と、今の reports/<worker>_verdict.yaml。
+    中身の task_id が一致し、result が VERDICT_RESULTS のどれかのものだけを採り
+    (別 task や書きかけの verdict を採らない)、mtime が最も新しいものを最後とみなす。差し戻しで
     attempt が 1 から数え直されても、古い回の大きな attempt を採らないため。
     """
     pj = queue_dir / 'projects' / project
@@ -97,10 +99,11 @@ def final_verdict(queue_dir: Path, project: str, task_id: str, worker: str) -> t
         except OSError:
             continue
         s = parse_scalars(text)
-        attempt = s.get('attempt', '').strip()
-        if s.get('task_id', '').strip() != task_id or not attempt.isdigit():
+        attempt, result = s.get('attempt', '').strip(), s.get('result', '').strip()
+        # result の無い (書きかけの) verdict は最後の verdict として採らない
+        if s.get('task_id', '').strip() != task_id or not attempt.isdigit() or result not in VERDICT_RESULTS:
             continue
-        found.append((mtime, int(attempt), s.get('result', '').strip() or None))
+        found.append((mtime, int(attempt), result))
     if not found:
         return None, None
     _, attempt, result = max(found)

@@ -195,6 +195,31 @@ def test_verify_attempt_history_task_id_mismatch_is_null(tmp_path: Path, monkeyp
     assert (m['verify_attempt'], m['verify_result']) == (None, None)
 
 
+def test_verify_attempt_ignores_verdict_without_valid_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Result の無い (途中書き込みの) verdict は、新しくても最後の verdict として採らない (SQUAD-400 B1)."""
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, 'fail', START + 10)
+    _history(queue, 'T1', 2, '', START + 20)
+    _history(queue, 'T1', 3, 'ok', START + 30)
+    current = queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml'
+    current.write_text('task_id: T1\nattempt: 4\n')
+    os.utime(current, (START + 40, START + 40))
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (1, 'fail')
+
+
+def test_verify_attempt_all_invalid_results_is_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, '', START + 10)
+    (queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml').write_text('task_id: T1\nattempt: 2\n')
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (None, None)
+
+
 def test_verify_attempt_without_history_is_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = Rows()
     r.bash('a')
