@@ -75,6 +75,9 @@ recommendations: |
   ファイルパス・関数名・失敗テスト名まで踏み込む。
 ```
 
+`task_id` と `attempt` (数字だけ) は必ず書く。watchd はこの 2 つを鍵に verdict を attempt ごとに
+`queue/projects/<project>/verdicts/` へ写し、評価 (eval_trajectory) が最後の attempt を数える。
+
 判定ルール:
 - **全コマンド pass かつ unmet_acceptance_criteria が空** → `result: pass`
 - いずれかのコマンド fail、または未確認 criteria あり → `result: fail`
