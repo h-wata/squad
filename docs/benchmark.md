@@ -65,3 +65,6 @@ task を自動で投げる runner は持たない (構成を切り替えるた�
 - `attribution: approximate` のレコードは、同じ cwd の並行セッションの token を含みうる
   (`notes` に出る)。比べる trial はなるべく並行させない
 - 5h/7d の quota はアカウント全体で共有されるので、構成の比較には使わない
+- `metrics/task_evals.jsonl` (`scripts/eval_trajectory.py`) の `verify_attempt` / `verify_result` は、watchd が
+  attempt ごとに写した `queue/projects/<pj>/verdicts/` から読む。写し始める前 (SQUAD-397 より前) の task は null。
+  再試行で pass した trial は `verify_attempt >= 2` かつ `verify_result: pass`

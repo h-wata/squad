@@ -150,6 +150,104 @@ def test_verify_attempt_requires_matching_task_id(tmp_path: Path, monkeypatch: p
     assert eval_trajectory.evaluate(queue, 'pj', 'T1')['verify_attempt'] == 2
 
 
+def _history(
+    queue: Path, task_id: str, attempt: int, result: str, mtime: int, body_task_id: str | None = None
+) -> None:
+    """Place a per-attempt verdict copy as watchd writes it to verdicts/ (SQUAD-397)."""
+    data = f'task_id: {body_task_id or task_id}\nattempt: {attempt}\nresult: {result}\n'.encode()
+    d = queue / 'projects' / 'pj' / eval_trajectory.VERDICT_HISTORY_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / eval_trajectory.verdict_history_name(task_id, attempt, data)
+    p.write_bytes(data)
+    os.utime(p, (mtime, mtime))
+
+
+def test_verify_attempt_retry_pass_from_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, 'fail', START + 10)
+    _history(queue, 'T1', 2, 'pass', START + 20)
+    # 現在の verdict は次の task で上書き済み
+    (queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml').write_text(
+        'task_id: T2\nattempt: 1\nresult: pass\n'
+    )
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (2, 'pass')
+
+
+def test_verify_attempt_single_pass_from_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, 'pass', START + 10)
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (1, 'pass')
+
+
+def test_verify_attempt_history_task_id_mismatch_is_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    # ファイル名は T1 でも中身が別 task (名前の衝突など) なら採らない
+    _history(queue, 'T1', 2, 'pass', START + 10, body_task_id='T1x')
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (None, None)
+
+
+def test_verify_attempt_ignores_verdict_without_valid_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Result の無い (途中書き込みの) verdict は、新しくても最後の verdict として採らない (SQUAD-400 B1)."""
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, 'fail', START + 10)
+    _history(queue, 'T1', 2, '', START + 20)
+    _history(queue, 'T1', 3, 'ok', START + 30)
+    current = queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml'
+    current.write_text('task_id: T1\nattempt: 4\n')
+    os.utime(current, (START + 40, START + 40))
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (1, 'fail')
+
+
+def test_verify_attempt_all_invalid_results_is_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, '', START + 10)
+    (queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml').write_text('task_id: T1\nattempt: 2\n')
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (None, None)
+
+
+def test_verify_attempt_without_history_is_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (None, None)
+    # 履歴が無く、現在の verdict も別 task (既存データの典型) でも null
+    (queue / 'projects' / 'pj' / 'reports' / 'worker2_verdict.yaml').write_text(
+        'task_id: T2\nattempt: 3\nresult: pass\n'
+    )
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (None, None)
+
+
+def test_verify_attempt_latest_verdict_wins_over_higher_old_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """差し戻しで attempt が 1 から数え直された場合、最後に書かれた verdict を採る."""
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _history(queue, 'T1', 1, 'fail', START + 10)
+    _history(queue, 'T1', 2, 'fail', START + 20)
+    _history(queue, 'T1', 1, 'pass', START + 30)
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert (m['verify_attempt'], m['verify_result']) == (1, 'pass')
+
+
 def test_verify_ran_via_script_and_absent(mk: Callable[..., dict]) -> None:
     r = Rows()
     r.bash('scripts/verify-task.sh a b 1 2')

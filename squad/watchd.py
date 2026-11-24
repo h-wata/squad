@@ -37,6 +37,7 @@ from datetime import timezone
 import contextlib
 import fcntl
 import glob as globmod
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -88,6 +89,43 @@ TODO_RE = re.compile(r'TODO|FIXME|XXX')
 WORKER_NUM_RE = re.compile(r'worker(\d+)')
 # reports/archive/ の写しのファイル名に使えない文字 (task_id に / 等が混ざっても archive の外に書かない)
 ARCHIVE_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
+# verifier の verdict を attempt ごとに写す先 (queue/projects/<pj>/verdicts/, SQUAD-397)。reports/ の外に置くのは、
+# graph sync が reports/ 以下の verdict を結果として数えるため (attempt 1 の fail を結果に混ぜない)
+VERDICT_HISTORY_DIR = 'verdicts'
+# verifier の verdict の result がとりうる値 (.claude/agents/verifier.md)。これ以外 (未記入を含む) は書きかけとみなす
+VERDICT_RESULTS = frozenset({'pass', 'fail', 'inconclusive'})
+
+
+def verdict_history_name(task_id: str, attempt: int, data: bytes) -> str:
+    """verdicts/ の写しの名前 `<task_id>__attempt<N>__<sha256 先頭 16 桁>.yaml`.
+
+    同じ attempt を書き直した verdict も内容が違えば別に残す。task_id は名前に使えない文字を _ にするので、
+    読む側は中身の task_id で照合すること。
+    """
+    safe = ARCHIVE_NAME_UNSAFE_RE.sub('_', task_id)
+    return f'{safe}__attempt{attempt}__{hashlib.sha256(data).hexdigest()[:16]}.yaml'
+
+
+def _link_copy(dest: Path, data: bytes, mtime: float) -> None:
+    """Write data to dest with mtime. dest が既にあれば何もしない. 失敗は OSError で返す.
+
+    書きかけの写しを残さない: 一時ファイルに書いてから link で置く (link は既存を上書きしない)。
+    """
+    if dest.exists():
+        return
+    dest.parent.mkdir(exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix='.tmp-')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+        os.utime(tmp, (mtime, mtime))
+        os.link(tmp, dest)
+    except FileExistsError:
+        pass  # 別の watcher が先に写した
+    finally:
+        os.unlink(tmp)
+
+
 # この status の report を配達したら task YAML を tasks/archive/ へ退避する (SQUAD-355)。blocked や progress は残す
 ARCHIVE_TASK_STATUSES = frozenset({'completed', 'failed'})
 # 退避した task YAML への遅い書込み (退避前に開かれた fd から) を見張る秒数 (SQUAD-361 B2)
@@ -554,6 +592,7 @@ class Watcher:
         # report を配達したサイクルの最後に探索グラフを作り直す (#55)。起動直後に 1 回は作る
         self._graph_dirty = True
         self._archive_warned: set[str] = set()  # 退避の再試行で WARN を出し済みの task (同じ失敗を毎サイクル書かない)
+        self._verdict_warned: set[str] = set()  # verdict の写しで WARN を出し済みの写し先
         # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
         self._tasks_sig: tuple | None = None
         # sync 失敗時は dirty を残し backoff で再試行する (一時的な失敗で永久に古いままにしない)
@@ -911,25 +950,43 @@ class Watcher:
         """
         task_id = ARCHIVE_NAME_UNSAFE_RE.sub('_', meta.get('task_id') or 'unknown')
         rid = f'review-{sha[:16]}' if report_id.startswith('review:') else ARCHIVE_NAME_UNSAFE_RE.sub('_', report_id)
-        archive = Path(path).parent / 'archive'
-        dest = archive / f'{task_id}__{rid}.yaml'
-        if dest.exists():
-            return
+        dest = Path(path).parent / 'archive' / f'{task_id}__{rid}.yaml'
         try:
-            archive.mkdir(exist_ok=True)
-            # 書きかけの写しを残さない: 一時ファイルに書いてから link で置く (link は既存を上書きしない)
-            fd, tmp = tempfile.mkstemp(dir=archive, prefix='.tmp-')
-            try:
-                with os.fdopen(fd, 'wb') as f:
-                    f.write(data)
-                os.utime(tmp, (mtime, mtime))
-                os.link(tmp, dest)
-            except FileExistsError:
-                pass  # 別の watcher が先に写した
-            finally:
-                os.unlink(tmp)
+            _link_copy(dest, data, mtime)
         except OSError as e:
             self.log(f'[WARN] report の写しを archive に残せません (配達は継続): {dest}: {e}')
+
+    def archive_verdicts(self) -> None:
+        """reports/worker{N}_verdict.yaml を verdicts/ に attempt ごとに写す (SQUAD-397).
+
+        verdict は attempt ごと・task ごとに上書きされるので、eval_trajectory が最終の attempt を後から
+        数えられるよう、見えた内容をそのまま残す。task_id か数字の attempt が無い verdict と、
+        result が VERDICT_RESULTS に無い (未記入を含む) verdict は写さない
+        (書きかけなら次のサイクルで見直す)。同じ名前があれば書かない。2 つの attempt の verdict が
+        1 サイクル (既定 15 秒) の間に続けて書かれると前のものは残らないが、最後の attempt は残る。
+        失敗しても他の処理は止めず、同じ写し先の WARN は 1 回だけ出す。
+        """
+        for d in self.owned:
+            for path in sorted((d / 'reports').glob('worker*_verdict.yaml')):
+                try:
+                    with open(path, 'rb') as f:  # noqa: PTH123 (読んだ内容と同じ inode の mtime を取る)
+                        data = f.read()
+                        mtime = os.fstat(f.fileno()).st_mtime
+                except OSError:
+                    continue
+                meta = parse_scalars(data.decode('utf-8', errors='replace'))
+                task_id, attempt = meta.get('task_id', '').strip(), meta.get('attempt', '').strip()
+                if not task_id or not attempt.isdigit() or meta.get('result', '').strip() not in VERDICT_RESULTS:
+                    continue
+                dest = d / VERDICT_HISTORY_DIR / verdict_history_name(task_id, int(attempt), data)
+                try:
+                    _link_copy(dest, data, mtime)
+                except OSError as e:
+                    if str(dest) not in self._verdict_warned:
+                        self._verdict_warned.add(str(dest))
+                        self.log(f'[WARN] verdict の履歴を残せません (次のサイクルで再試行): {dest}: {e}')
+                    continue
+                self._verdict_warned.discard(str(dest))
 
     @staticmethod
     def _task_archive_target(path: str, meta: dict[str, str], report_mtime: float) -> tuple[str, str, float] | None:
@@ -2146,6 +2203,7 @@ class Watcher:
             self.check_context_breaks(dispatcher=True)
         except Exception as e:  # noqa: BLE001 (区切りの失敗で watcher を止めない。区切らない側に倒す)
             self.log(f'[WARN] Dispatcher の区切りの判定に失敗 (今回は区切らない): {e}')
+        self.archive_verdicts()
         self.report_bridge()
         self.deliver_instructions()
         self.sync_graph()

@@ -18,6 +18,13 @@
 
 ### Fixed
 
+- `scripts/eval_trajectory.py` の `verify_attempt` が、attempt 2 で pass した task でも null になっていた (SQUAD-397, Refs #130)。
+  `workerN_verdict.yaml` は attempt ごと・task ごとに上書きされ、評価する時点では次の task の verdict になっていた。
+  watchd が毎サイクル verdict を `queue/projects/<pj>/verdicts/<task_id>__attempt<N>__<sha16>.yaml` に写し、
+  eval_trajectory はそこと今の verdict から task_id が一致する最新のものを読んで `verify_attempt` と `verify_result`
+  を出す。どちらにも無ければ null のまま (写し始める前の task は null)。result が `pass` / `fail` / `inconclusive` の
+  どれでもない (書きかけで result がまだ無いものを含む) verdict は、写さず評価にも使わない。反映には merge 後の
+  watchd の再起動が要る。
 - `scripts/verify-task.sh` が既存の `CLAUDE_CODE_OAUTH_TOKEN` を `[ -z "${VAR:-}" ]` で判定していたため、`bash -x` で
   トークンの値がトレースに出ていた。`${VAR:+x}` で有無だけを見る形にした。スモーク
   `scripts/smoke-claude-code-assumptions.sh` も、`bash -x` でトークンの値を出さず、終了時に `mktemp -d` の一時 dir を
