@@ -13,6 +13,7 @@ transcript を task 発行〜report 完了の時間窓で切る) で探す (appr
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime
 from datetime import timezone
 import json
@@ -125,8 +126,20 @@ def _lines(path: Path) -> Iterator[tuple[int, dict]]:
 
 
 def entries(src: Source) -> Iterator[Entry]:
+    """Transcript の tool_result と assistant の text を、行の出現順に返す.
+
+    同じ tool_use_id の tool_result は user 行と api-request-blob 行の 2 行に出るので、1 件にまとめる
+    (まとめないと tool_calls / retries / external_write_attempt_dups が二重計上になる)。
+    まとめ方はファイル順に依存しない:
+    - is_error: 重複行のどれか 1 行でも true なら true (エラー情報を落とさない)
+    - 本文・trace_id・timestamp: transcript の正本である user 行を優先。user 行が無ければ先に出た行
+    - 出力位置: 最初に出た行の位置
+    tool_use_id が無い tool_result は同一性が分からないので、まとめず全部返す。
+    """
     tools: dict[str, tuple[str, str]] = {}  # tool_use_id -> (tool 名, 入力)
-    results: set[object] = set()  # 数え済みの tool_result の tool_use_id
+    out: list[Entry] = []
+    slot: dict[object, int] = {}  # tool_use_id -> out 内の位置
+    from_user: set[object] = set()  # 本文を user 行から採った tool_use_id
     for n, d in _lines(src.path):
         message = d.get('message')
         content = message.get('content') if isinstance(message, dict) else None
@@ -152,17 +165,26 @@ def entries(src: Source) -> Iterator[Entry]:
             # 1 行 (1 message) に複数の tool_result が入ることがあるので block 番号まで付ける
             trace_id = f'{src.path.stem}:{n}.{i}'
             if kind == 'tool_result':
-                # 同じ結果が user 行と api-request-blob 行の 2 行に出るので tool_use_id 単位で 1 回だけ数える。
-                # tool_use_id が無い行は同一性が分からないので落とさない
-                if (use_id := block.get('tool_use_id')) is not None:
-                    if use_id in results:
-                        continue
-                    results.add(use_id)
                 name, args = tools.get(str(block.get('tool_use_id')), ('?', ''))
                 text = f'{args}\n=> {_text(block.get("content"))}'
-                yield Entry(trace_id, src, ts, name, bool(block.get('is_error')), mask(text))
+                entry = Entry(trace_id, src, ts, name, bool(block.get('is_error')), mask(text))
+                use_id = block.get('tool_use_id')
+                if use_id is None:
+                    out.append(entry)
+                elif use_id not in slot:
+                    slot[use_id] = len(out)
+                    if d.get('type') == 'user':
+                        from_user.add(use_id)
+                    out.append(entry)
+                else:
+                    kept = out[slot[use_id]]
+                    if d.get('type') == 'user' and use_id not in from_user:
+                        from_user.add(use_id)
+                        kept = entry
+                    out[slot[use_id]] = replace(kept, is_error=out[slot[use_id]].is_error or entry.is_error)
             elif kind == 'text' and d.get('type') == 'assistant':
-                yield Entry(trace_id, src, ts, 'text', False, mask(str(block.get('text', ''))))
+                out.append(Entry(trace_id, src, ts, 'text', False, mask(str(block.get('text', '')))))
+    yield from out
 
 
 def search(
@@ -211,6 +233,4 @@ def get(trace_id: str, context: int = 0) -> list[str]:
         if lo <= n <= hi and not (n == center and blk and b != blk):
             err = ' ERROR' if e.is_error else ''
             out.append(f'--- {e.trace_id} {e.timestamp[:19]} {e.tool}{err}\n{e.text[:DETAIL_LIMIT]}')
-        elif n > hi:
-            break
     return out or [f'{trace_id}: tool_result / text の行がありません']
