@@ -18,6 +18,13 @@
 
 ### Fixed
 
+- review 指摘の category 集計が、同じ task の中の複数の指摘だけで `queue/_inbox.md` にチェック化の候補を積んでいた
+  (TASK-003 の `maintainability` 4 件 / `ros2_best_practice` 3 件)。候補にするのは、失敗した指摘が別々の task_id で
+  2 つ以上になった category だけにした (SQUAD-406, Refs #130 #136)。指摘は blocking / non_blocking / 確認項目
+  (`result: pass` / `status: resolved` / `severity: info` 等) に分け、確認項目は失敗に数えない。`uncategorized` も
+  同じ基準で数え直す。`queue/.graph.db` の `review_categories` 表は件数 1 列から task 数 / blocking /
+  non_blocking / 確認項目の 4 列に変え (schema 5。古い DB は次の sync で作り直される)、web dashboard の
+  「review 指摘」タブも同じ列にした。`- [x]` で閉じた候補の行は既出とみなし、足し直さない。
 - `scripts/verify-task.sh` が既存の `CLAUDE_CODE_OAUTH_TOKEN` を `[ -z "${VAR:-}" ]` で判定していたため、`bash -x` で
   トークンの値がトレースに出ていた。`${VAR:+x}` で有無だけを見る形にした。スモーク
   `scripts/smoke-claude-code-assumptions.sh` も、`bash -x` でトークンの値を出さず、終了時に `mktemp -d` の一時 dir を
