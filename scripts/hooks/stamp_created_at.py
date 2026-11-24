@@ -3,7 +3,10 @@
 """PreToolUse Hook: task YAML の Write 時に created_at を実時刻へ差し替える (#87).
 
 対象は Write で `queue/projects/<project>/tasks/<name>.yaml` を書くときだけ。
-同じパスに既存ファイルがあり created_at を持つなら、それを残す(書き直しで時刻が動かない)。
+同じパスに既存ファイルがあり created_at を持ち、かつ既存と新 content の task_id が等しいときだけ、
+その created_at を残す(同じタスクの書き直しで時刻が動かない)。worker{N}.yaml は新タスクで再利用されるため、
+task_id が違う・取れない・既存ファイルが無い場合は現在時刻に刷新する。
+task_id は YAML の解決済み値で比べる(コメント・アンカー・エイリアス・クォート・空白の差は同一視)。
 何かあっても Write を壊さないよう、失敗時は何も出力せず exit 0 する。
 SQUAD_STAMP_NOW を設定すると、その値を現在時刻として使う(テスト用)。
 """
@@ -18,6 +21,33 @@ import re
 import sys
 
 CREATED_AT = re.compile(r'^created_at:.*$', re.MULTILINE)
+TASK_ID = re.compile(r'^task_id:\s*(.+)$', re.MULTILINE)
+
+
+def _task_id_regex(text: str) -> str | None:
+    """PyYAML が無い環境向けのフォールバック。コメント・アンカー・エイリアスは解決できない."""
+    m = TASK_ID.search(text)
+    return m.group(1).strip().strip('"\'').strip() if m else None
+
+
+def task_id_of(text: str) -> str | None:
+    """トップレベル task_id の解決済みスカラを返す。取れなければ None.
+
+    YAML としてパースするので、行末コメント・アンカー・エイリアスも同じ task_id と扱える。
+    PyYAML を import できないときだけ正規表現にフォールバックする。
+    パース不能・トップレベルが dict でない・task_id が無い場合は None。
+    """
+    try:
+        import yaml
+    except ImportError:
+        return _task_id_regex(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict) or data.get('task_id') is None:
+        return None
+    return str(data['task_id']).strip()
 
 
 def is_task_yaml(path: Path) -> bool:
@@ -36,8 +66,11 @@ def stamp(content: str, path: Path) -> str | None:
         return None
     line = None
     if path.is_file():
-        old = CREATED_AT.search(path.read_text(encoding='utf-8', errors='replace'))
-        line = old.group(0) if old else None
+        old_text = path.read_text(encoding='utf-8', errors='replace')
+        old = CREATED_AT.search(old_text)
+        new_id = task_id_of(content)
+        if old and new_id and new_id == task_id_of(old_text):
+            line = old.group(0)
     if line is None:
         now = os.environ.get('SQUAD_STAMP_NOW') or datetime.now().astimezone().isoformat(timespec='seconds')
         line = f'created_at: "{now}"'
