@@ -18,6 +18,9 @@
 
 ### Fixed
 
+- `squad/trace_search.py` の `entries()` が同じ tool_result を二重に数える問題 (Refs #130)。transcript では同じ結果が
+  user 行と api-request-blob 行の 2 行に出るので、tool_use_id 単位で 1 回だけ返す。tool_use_id が無い行は同一性が
+  分からないので従来どおり落とさない。SQUAD-318 の `tool_calls` 43 → 24、`external_write_attempt_dups` 2 → 0 になる。
 - `scripts/eval_trajectory.py` の `verify_attempt` が、attempt 2 で pass した task でも null になっていた (SQUAD-397, Refs #130)。
   `workerN_verdict.yaml` は attempt ごと・task ごとに上書きされ、評価する時点では次の task の verdict になっていた。
   watchd が毎サイクル verdict を `queue/projects/<pj>/verdicts/<task_id>__attempt<N>__<sha16>.yaml` に写し、

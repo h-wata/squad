@@ -126,6 +126,7 @@ def _lines(path: Path) -> Iterator[tuple[int, dict]]:
 
 def entries(src: Source) -> Iterator[Entry]:
     tools: dict[str, tuple[str, str]] = {}  # tool_use_id -> (tool 名, 入力)
+    results: set[object] = set()  # 数え済みの tool_result の tool_use_id
     for n, d in _lines(src.path):
         message = d.get('message')
         content = message.get('content') if isinstance(message, dict) else None
@@ -151,6 +152,12 @@ def entries(src: Source) -> Iterator[Entry]:
             # 1 行 (1 message) に複数の tool_result が入ることがあるので block 番号まで付ける
             trace_id = f'{src.path.stem}:{n}.{i}'
             if kind == 'tool_result':
+                # 同じ結果が user 行と api-request-blob 行の 2 行に出るので tool_use_id 単位で 1 回だけ数える。
+                # tool_use_id が無い行は同一性が分からないので落とさない
+                if (use_id := block.get('tool_use_id')) is not None:
+                    if use_id in results:
+                        continue
+                    results.add(use_id)
                 name, args = tools.get(str(block.get('tool_use_id')), ('?', ''))
                 text = f'{args}\n=> {_text(block.get("content"))}'
                 yield Entry(trace_id, src, ts, name, bool(block.get('is_error')), mask(text))
