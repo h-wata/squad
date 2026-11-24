@@ -25,10 +25,20 @@
   同じ基準で数え直す。`queue/.graph.db` の `review_categories` 表は件数 1 列から task 数 / blocking /
   non_blocking / 確認項目の 4 列に変え (schema 5。古い DB は次の sync で作り直される)、web dashboard の
   「review 指摘」タブも同じ列にした。`- [x]` で閉じた候補の行は既出とみなし、足し直さない。
+- `scripts/eval_trajectory.py` の `verify_attempt` が、attempt 2 で pass した task でも null になっていた (SQUAD-397, Refs #130)。
+  `workerN_verdict.yaml` は attempt ごと・task ごとに上書きされ、評価する時点では次の task の verdict になっていた。
+  watchd が毎サイクル verdict を `queue/projects/<pj>/verdicts/<task_id>__attempt<N>__<sha16>.yaml` に写し、
+  eval_trajectory はそこと今の verdict から task_id が一致する最新のものを読んで `verify_attempt` と `verify_result`
+  を出す。どちらにも無ければ null のまま (写し始める前の task は null)。result が `pass` / `fail` / `inconclusive` の
+  どれでもない (書きかけで result がまだ無いものを含む) verdict は、写さず評価にも使わない。反映には merge 後の
+  watchd の再起動が要る。
 - `scripts/verify-task.sh` が既存の `CLAUDE_CODE_OAUTH_TOKEN` を `[ -z "${VAR:-}" ]` で判定していたため、`bash -x` で
   トークンの値がトレースに出ていた。`${VAR:+x}` で有無だけを見る形にした。スモーク
   `scripts/smoke-claude-code-assumptions.sh` も、`bash -x` でトークンの値を出さず、終了時に `mktemp -d` の一時 dir を
   削除するようにした (SQUAD-352 / SQUAD-353)。
+- stamp_created_at hook が `tasks/worker{N}.yaml` の再利用で前タスクの `created_at` を引き継ぎ、誤った [BUDGET] 警告が
+  出ていた。既存ファイルと新 content の `task_id` が同じ(YAML の解決済み値で比較。行末コメント・アンカー・エイリアス・
+  クォート・空白の差は同一視)ときだけ既存値を残し、それ以外は現在時刻にする (SQUAD-398 / SQUAD-402)。
 
 ### Changed
 

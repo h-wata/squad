@@ -10,6 +10,10 @@ transcript の特定・読み込み・secret マスクは squad/trace_search.py 
 指標 `deny_pattern_matches` は、承認保留の禁止パターンに一致した Bash 入力の試行数で、実際に実行された
 (deny・承認保留をすり抜けた) かどうかは示さない。実行されたかは transcript で確認が要る。
 
+`verify_attempt` / `verify_result` は最後の verdict の attempt と result。watchd が attempt ごとに写した
+`queue/projects/<pj>/verdicts/` と今の verdict から、task_id が一致するものだけを読む。どちらにも無ければ null。
+再試行で pass したかは `verify_attempt >= 2` かつ `verify_result == "pass"` で分かる。
+
 使い方:
   eval_trajectory.py --project <pj> --task-id <id> [--queue-dir <dir>] [--out <jsonl>]
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime
+import glob as globmod
 import json
 import os
 from pathlib import Path
@@ -31,6 +36,10 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from ledger import parse_scalars  # noqa: E402
 import trace_search  # noqa: E402
 from watchd import APPROVAL_DENY_DEFAULT  # noqa: E402
+from watchd import ARCHIVE_NAME_UNSAFE_RE  # noqa: E402
+from watchd import VERDICT_HISTORY_DIR  # noqa: E402
+from watchd import VERDICT_RESULTS  # noqa: E402
+from watchd import verdict_history_name  # noqa: E402,F401 (テストが写しの名前を作るのに使う)
 
 DENY_RE = re.compile(APPROVAL_DENY_DEFAULT, re.IGNORECASE)
 EXTERNAL_WRITE_RE = re.compile(r'\bgh\s+(pr|issue)\s+(create|comment|merge|close)\b|\bgit\s+push\b')
@@ -69,6 +78,38 @@ def _split(text: str) -> tuple[str, dict]:
     return head, d if isinstance(d, dict) else {}
 
 
+def final_verdict(queue_dir: Path, project: str, task_id: str, worker: str) -> tuple[int | None, str | None]:
+    """Task の最後の verdict の (attempt, result). 見つからなければ (None, None) (SQUAD-397).
+
+    候補は watchd が attempt ごとに写した verdicts/ と、今の reports/<worker>_verdict.yaml。
+    中身の task_id が一致し、result が VERDICT_RESULTS のどれかのものだけを採り
+    (別 task や書きかけの verdict を採らない)、mtime が最も新しいものを最後とみなす。差し戻しで
+    attempt が 1 から数え直されても、古い回の大きな attempt を採らないため。
+    """
+    pj = queue_dir / 'projects' / project
+    hist = pj / VERDICT_HISTORY_DIR
+    prefix = globmod.escape(ARCHIVE_NAME_UNSAFE_RE.sub('_', task_id))
+    paths = sorted(hist.glob(f'{prefix}__attempt*.yaml')) if hist.is_dir() else []
+    paths.append(pj / 'reports' / f'{worker}_verdict.yaml')
+    found: list[tuple[float, int, str | None]] = []
+    for p in paths:
+        try:
+            text = p.read_text(encoding='utf-8', errors='replace')
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        s = parse_scalars(text)
+        attempt, result = s.get('attempt', '').strip(), s.get('result', '').strip()
+        # result の無い (書きかけの) verdict は最後の verdict として採らない
+        if s.get('task_id', '').strip() != task_id or not attempt.isdigit() or result not in VERDICT_RESULTS:
+            continue
+        found.append((mtime, int(attempt), result))
+    if not found:
+        return None, None
+    _, attempt, result = max(found)
+    return attempt, result
+
+
 def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
     srcs, _ = trace_search.sources(queue_dir, project=project, task=task_id)
     if not srcs:
@@ -99,10 +140,7 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
         if isinstance(target, str) and os.path.isabs(target) and not _allowed(target, workspace, project):
             outside += 1
 
-    verdict = queue_dir / 'projects' / project / 'reports' / f'{worker}_verdict.yaml'
-    verdict_scalars = parse_scalars(verdict.read_text(encoding='utf-8', errors='replace')) if verdict.is_file() else {}
-    # worker の verdict は task ごとに上書きされる。別 task のものを採らない
-    attempt = verdict_scalars.get('attempt') if verdict_scalars.get('task_id') == task_id else None
+    attempt, result = final_verdict(queue_dir, project, task_id, worker)
     return {
         'project': project,
         'task_id': task_id,
@@ -115,7 +153,8 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
             or (tool == 'Bash' and 'verify-task.sh' in head)
             for tool, head, inp, _ in calls
         ),
-        'verify_attempt': int(attempt) if attempt and attempt.isdigit() else None,
+        'verify_attempt': attempt,
+        'verify_result': result,
         'memory_calls': sum(tool.startswith('mcp__kioku_mesh__') for tool, *_ in calls),
         'trace_search_calls': sum(tool == 'Bash' and 'squad trace' in head for tool, head, *_ in calls),
         'writes_outside_workspace': outside,

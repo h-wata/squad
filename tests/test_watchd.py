@@ -1727,6 +1727,108 @@ class TestReportArchiveCopy:
         assert [p.name for p in self._archive(d)] == ['T__.._.._x.yaml']
 
 
+class TestVerdictHistory:
+    """verifier の verdict を attempt ごとに verdicts/ へ写す (SQUAD-397)."""
+
+    @staticmethod
+    def _hist(d: Path) -> list[Path]:
+        return sorted((d / 'verdicts').glob('*.yaml')) if (d / 'verdicts').is_dir() else []
+
+    @staticmethod
+    def _verdict(d: Path, body: str, mtime: int) -> Path:
+        p = d / 'reports' / 'worker1_verdict.yaml'
+        p.write_text(body)
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_each_attempt_is_kept_after_overwrite(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        v1 = 'task_id: SQUAD-1\nattempt: 1\nresult: fail\n'
+        self._verdict(d, v1, 1000)
+        w.archive_verdicts()
+        v2 = 'task_id: SQUAD-1\nattempt: "2"\nresult: pass\n'
+        self._verdict(d, v2, 2000)
+        w.archive_verdicts()
+        w.archive_verdicts()  # 同じ内容は増やさない
+        hist = self._hist(d)
+        assert [p.read_text() for p in hist] == [v1, v2]
+        assert [p.name.split('__')[:2] for p in hist] == [['SQUAD-1', 'attempt1'], ['SQUAD-1', 'attempt2']]
+        assert [p.stat().st_mtime for p in hist] == [1000, 2000]  # 元の verdict の mtime を残す
+        assert not [p for p in (d / 'verdicts').iterdir() if p.name.startswith('.tmp-')]
+
+    def test_incomplete_verdict_is_not_copied(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        for body in (
+            'task_id: SQUAD-1\nresult: pass\n',
+            'attempt: 1\nresult: pass\n',
+            'task_id: SQUAD-1\nattempt: x\nresult: pass\n',
+        ):
+            self._verdict(d, body, 1000)
+            w.archive_verdicts()
+        assert self._hist(d) == []
+
+    def test_verdict_without_valid_result_is_not_copied(self, watcher: tuple[Watcher, Path]) -> None:
+        """途中書き込みで result がまだ無い verdict や、schema に無い result は写さない (SQUAD-400 B1)."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        for body in (
+            'task_id: SQUAD-1\nattempt: 1\n',
+            'task_id: SQUAD-1\nattempt: 1\nresult:\n',
+            'task_id: SQUAD-1\nattempt: 1\nresult: ok\n',
+        ):
+            self._verdict(d, body, 1000)
+            w.archive_verdicts()
+        assert self._hist(d) == []
+        # result まで書き終われば写す
+        for result in ('pass', 'fail', 'inconclusive'):
+            self._verdict(d, f'task_id: SQUAD-1\nattempt: 1\nresult: "{result}"\n', 1000)
+            w.archive_verdicts()
+        assert len(self._hist(d)) == 3
+
+    def test_unsafe_task_id_stays_in_history_dir(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        w.refresh_owned_projects()
+        self._verdict(d, 'task_id: ../../x\nattempt: 1\nresult: pass\n', 1000)
+        w.archive_verdicts()
+        [p] = self._hist(d)
+        assert p.name.startswith('.._.._x__attempt1__')
+
+    def test_cycle_archives_verdicts(self, watcher: tuple[Watcher, Path]) -> None:
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        self._verdict(d, 'task_id: SQUAD-1\nattempt: 1\nresult: pass\n', 1000)
+        w.cycle()
+        assert len(self._hist(d)) == 1
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root は権限を無視して書ける')
+    def test_copy_failure_does_not_stop_delivery(
+        self, watcher: tuple[Watcher, Path], capsys: pytest.CaptureFixture
+    ) -> None:
+        """実ファイルシステムで project dir を書込み不可にし、写しだけが失敗して配達は続くことを確かめる."""
+        w, queue = watcher
+        d = make_project(queue, 'pj', session='testsess')
+        write_report(d, task_id='SQUAD-1')
+        self._verdict(d, 'task_id: SQUAD-1\nattempt: 1\nresult: pass\n', 1000)
+        os.chmod(d, 0o500)  # verdicts/ を作れない
+        try:
+            w.cycle()
+            w.cycle()
+        finally:
+            os.chmod(d, 0o755)
+        assert len(queued(w)) == 1
+        err = capsys.readouterr()
+        logged = err.out + err.err
+        assert logged.count('verdict の履歴を残せません') == 1  # 同じ失敗を毎サイクル書かない
+        w.cycle()  # 権限が戻れば次のサイクルで写す
+        assert len(self._hist(d)) == 1
+
+
 class TestTaskYamlTriggersGraphSync:
     """task YAML の発注・書換・移動で次サイクルに graph sync が走る (#84)."""
 

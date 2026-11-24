@@ -50,6 +50,92 @@ def test_rewrite_keeps_existing_created_at(tmp_path: Path) -> None:
     assert out['updatedInput']['content'] == 'task_id: T-1\ntitle: x\ncreated_at: "2026-11-01T09:00:00+09:00"\n'
 
 
+OLD = 'created_at: "2026-11-01T09:00:00+09:00"\n'
+
+
+def _existing(tmp_path: Path, text: str | bytes | None) -> Path:
+    f = tmp_path / 'queue/projects/p/tasks/worker1.yaml'
+    f.parent.mkdir(parents=True)
+    if isinstance(text, bytes):
+        f.write_bytes(text)
+    elif text is not None:
+        f.write_text(text)
+    return f
+
+
+def test_different_task_id_gets_new_created_at(tmp_path: Path) -> None:
+    # worker{N}.yaml は新タスクで再利用される。前タスクの created_at を引き継がない
+    f = _existing(tmp_path, 'task_id: T-0\n' + OLD)
+    out = run(write(str(f), 'task_id: T-1\ncreated_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
+
+
+def test_quoted_task_id_compares_equal(tmp_path: Path) -> None:
+    f = _existing(tmp_path, 'task_id: "T-1"  \n' + OLD)
+    out = run(write(str(f), 'task_id: T-1\ncreated_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == 'task_id: T-1\n' + OLD
+
+
+def test_no_existing_file_gets_new_created_at(tmp_path: Path) -> None:
+    out = run(write(str(tmp_path / 'queue/projects/p/tasks/worker1.yaml')), tmp_path)
+    assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
+
+
+def test_unreadable_or_broken_existing_gets_new_created_at(tmp_path: Path) -> None:
+    # 既存ファイルの task_id が取れない (壊れた内容 / 読めない) ときは安全側で now に刷新する
+    f = _existing(tmp_path, b'\xff\xfe not yaml\n' + OLD.encode())
+    out = run(write(str(f)), tmp_path)
+    assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
+
+
+def test_new_content_without_task_id_gets_new_created_at(tmp_path: Path) -> None:
+    f = _existing(tmp_path, 'task_id: T-1\n' + OLD)
+    out = run(write(str(f), 'title: x\ncreated_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == f'title: x\ncreated_at: "{NOW}"\n'
+
+
+def test_archived_existing_gets_new_created_at(tmp_path: Path) -> None:
+    # 既存ファイルが tasks/archive/ へ移動済み (元パスに無い) なら既存ファイル無しと同じ
+    arch = tmp_path / 'queue/projects/p/tasks/archive/worker1.yaml'
+    arch.parent.mkdir(parents=True)
+    arch.write_text('task_id: T-1\n' + OLD)
+    out = run(write(str(tmp_path / 'queue/projects/p/tasks/worker1.yaml')), tmp_path)
+    assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
+
+
+def _keeps(tmp_path: Path, old_head: str, new_head: str = 'task_id: T-1\n') -> None:
+    f = _existing(tmp_path, old_head + OLD)
+    out = run(write(str(f), new_head + 'created_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == new_head + OLD
+
+
+def test_trailing_comment_is_same_task_id(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'task_id: T-1 # prior\n')
+
+
+def test_comment_on_new_content_is_same_task_id(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'task_id: T-1\n', 'task_id: T-1  # now\n')
+
+
+def test_anchor_is_same_task_id(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'task_id: &current T-1\n')
+
+
+def test_alias_is_same_task_id(tmp_path: Path) -> None:
+    # アンカーを別キーで定義し task_id はエイリアスで参照する
+    _keeps(tmp_path, 'base: &current T-1\ntask_id: *current\n')
+
+
+def test_non_first_line_top_level_task_id_matches(tmp_path: Path) -> None:
+    _keeps(tmp_path, 'title: x\ntask_id: T-1\n', 'title: y\ntask_id: "T-1"\n')
+
+
+def test_nested_task_id_does_not_match(tmp_path: Path) -> None:
+    f = _existing(tmp_path, 'meta:\n  task_id: T-1\n' + OLD)
+    out = run(write(str(f), 'task_id: T-1\ncreated_at: "2099-01-01T00:00:00"\n'), tmp_path)
+    assert out['updatedInput']['content'] == f'task_id: T-1\ncreated_at: "{NOW}"\n'
+
+
 def test_edit_and_other_paths_untouched(tmp_path: Path) -> None:
     assert run(write('queue/projects/p/tasks/w.yaml', tool='Edit'), tmp_path) is None
     for p in (
