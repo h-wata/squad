@@ -269,3 +269,32 @@ def test_session_missing_jsonl_contrast_no_session_id_is_approximate(queue: Path
     assert missing == []
     assert [s.path.name for s in srcs] == [f'{SID_APPROX}.jsonl']
     assert all(not s.exact for s in srcs)
+
+
+def _dup_rows(ts: str, with_id: bool = True) -> list[dict]:
+    """同じ tool_result が api-request-blob 行 (timestamp なし) と user 行の 2 行に出る (SQUAD-318 の形)."""
+    use = {'type': 'tool_use', 'id': 'tuD', 'name': 'Bash', 'input': {'command': 'git push'}}
+    res: dict = {'type': 'tool_result', 'content': 'pushed'}
+    if with_id:
+        res['tool_use_id'] = 'tuD'
+    return [
+        {'type': 'assistant', 'timestamp': ts, 'message': {'content': [use]}},
+        {'type': 'api-request-blob', 'message': {'content': [res]}},
+        {'type': 'user', 'timestamp': ts, 'message': {'content': [res]}},
+    ]
+
+
+def _src(tmp_path: Path, rows: list[dict]) -> trace_search.Source:
+    path = tmp_path / 'dup.jsonl'
+    path.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+    return trace_search.Source('pj', 'T', 'worker1', path, exact=True)
+
+
+def test_entries_dedupes_tool_result_by_tool_use_id(tmp_path: Path) -> None:
+    got = [e for e in trace_search.entries(_src(tmp_path, _dup_rows('2026-10-01T00:10:00Z'))) if e.tool == 'Bash']
+    assert len(got) == 1
+
+
+def test_entries_keeps_tool_result_without_tool_use_id(tmp_path: Path) -> None:
+    got = list(trace_search.entries(_src(tmp_path, _dup_rows('2026-10-01T00:10:00Z', with_id=False))))
+    assert len(got) == 2  # id が無いものは同一性が分からないので落とさない
