@@ -400,10 +400,15 @@ def test_review_categories_from_db(tmp_path: Path) -> None:
     cats = data['categories']
     assert [c['category'] for c in cats][-1] == 'uncategorized'
     stale = cats[0]
-    assert (stale['category'], stale['count']) == ('stale-state', 5)
+    assert (stale['category'], stale['task_count'], stale['blocking'], stale['non_blocking']) == (
+        'stale-state',
+        5,
+        0,
+        5,
+    )
     assert (stale['first_seen'], stale['last_seen']) == ('2026-11-01T00:00:00+00:00', '2026-11-05T00:00:00+00:00')
     assert stale['prs'] == [f'https://github.com/o/r/pull/{i}' for i in range(1, 6)]
-    assert cats[-1]['count'] == 5
+    assert (cats[-1]['task_count'], cats[-1]['non_blocking']) == (5, 5)
     assert SECRET not in json.dumps(data)  # DB 由来の文字列はマスクしてから返す
     assert any(c['approx'] for c in cats)  # completed_at の無い R9 は mtime の近似
 
@@ -415,6 +420,7 @@ def test_review_categories_tab_in_page(server: tuple[str, list]) -> None:
     page = body.decode()
     assert '<button data-v="reviewcat">review 指摘</button>' in page
     assert "api('/api/review_categories')" in page
+    assert "['category', 'task 数', 'blocking', 'non_blocking', '確認項目', '初出', '直近', 'PR']" in page
     data = _get_json(base, '/api/review_categories')
     assert data == {'synced_at': data['synced_at'], 'error': None, 'categories': []}
 
@@ -428,6 +434,46 @@ def test_review_categories_on_old_db(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
     assert web.review_categories_data(db)['categories'] == []
+
+
+def test_review_categories_on_schema4_db(tmp_path: Path) -> None:
+    """列が件数 1 つだった schema 4 (#137) の DB でも、sync し直すまでエラーにせず空の表を返す (SQUAD-406)."""
+    db = tmp_path / '.graph.db'
+    conn = sqlite3.connect(db)
+    conn.execute('CREATE TABLE projects (project TEXT)')
+    conn.execute('CREATE TABLE meta (key TEXT, value TEXT)')
+    conn.execute(
+        'CREATE TABLE review_categories (category TEXT, count INTEGER, first_seen TEXT, last_seen TEXT, '
+        'prs_json TEXT, tasks_json TEXT, approx INTEGER)'
+    )
+    conn.execute("INSERT INTO review_categories VALUES ('maintainability', 4, '', '', '[]', '[]', 0)")
+    conn.execute('PRAGMA user_version = 4')
+    conn.commit()
+    conn.close()
+    data = web.review_categories_data(db)
+    assert (data['error'], data['categories']) == (None, [])
+
+
+def test_review_categories_sorted_by_distinct_tasks(tmp_path: Path) -> None:
+    """1 task で 4 件より 2 task で 2 件を上に出す. 確認項目だけの category は task 数 0."""
+    q = tmp_path / 'queue'
+    reports = q / 'projects' / 'pj' / 'reports' / 'archive'
+    many = ''.join('  - severity: minor\n    category: maintainability\n    d: x\n' for _ in range(4))
+    _write(reports / 'T1__review.yaml', f'task_id: T1\nverdict: approve\nfindings:\n{many}', NOW)
+    for t in ('T2', 'T3'):
+        _write(
+            reports / f'{t}__review.yaml',
+            f'task_id: {t}\nverdict: approve\nfindings:\n  - severity: major\n    category: stale-state\n    d: x\n'
+            '  - result: pass\n    category: missing-test\n    viewpoint: y\n',
+            NOW,
+        )
+    db = q / '.graph.db'
+    graph.sync(q, db)
+    cats = {c['category']: c for c in web.review_categories_data(db)['categories']}
+    assert list(cats) == ['stale-state', 'maintainability', 'missing-test']
+    assert [cats['stale-state'][k] for k in ('task_count', 'blocking', 'non_blocking', 'checks')] == [2, 2, 0, 0]
+    assert [cats['maintainability'][k] for k in ('task_count', 'blocking', 'non_blocking', 'checks')] == [1, 0, 4, 0]
+    assert [cats['missing-test'][k] for k in ('task_count', 'blocking', 'non_blocking', 'checks')] == [0, 0, 0, 2]
 
 
 def test_pane_masked_before_tail(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:

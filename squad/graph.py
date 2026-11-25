@@ -27,8 +27,9 @@ squad/config.json の worker 定義 workers) を持つ。squad web は DB と tm
 instructions は squad web から Dispatcher へ出した指示 (queue/instructions/<session>/*.json, #85)。
 ノードにはせず別の表にする (goal / intent とはつながらない。活動タブに時系列で並べるだけ)。
 review_categories は review 指摘の category ごとの集計 (scripts/review_category_tally.py, #136)。web の
-「review 指摘」タブの読み元。sync に inbox_path を渡したときは、2 件目に達した category を inbox に候補として足す
-(YAML ではなく inbox の Markdown にだけ書く。同じ印の行があれば足さない)。
+「review 指摘」タブの読み元。列は task 数 (失敗を出した distinct task_id) / blocking / non_blocking / 確認項目
+(schema 5, SQUAD-406。schema 4 は件数 1 列)。sync に inbox_path を渡したときは、別々の task で 2 回失敗した
+category を inbox に候補として足す (YAML ではなく inbox の Markdown にだけ書く。同じ印の行があれば足さない)。
 
 YAML のネスト (context / decision_bearing_claims / derived_from) を読むため PyYAML を使う。
 squad.py / watchd.py の stdlib only を崩さないよう、import はこのモジュールの中だけで行い、
@@ -53,7 +54,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 import review_category_tally  # noqa: E402
 
 # 派生索引なので migration は持たない。schema を変えたら番号を上げ、古い DB は作り直す
-SCHEMA_VERSION = 4
+# 古い DB の移行は connect() が表を作り直し、次の sync が YAML から全行を入れ直すことで済む (5: review_categories の列)
+SCHEMA_VERSION = 5
 SCHEMA = (
     'CREATE TABLE nodes ('
     'node_id TEXT PRIMARY KEY, '
@@ -87,7 +89,10 @@ SCHEMA = (
     'PRIMARY KEY (session, id))',
     'CREATE TABLE review_categories ('
     'category TEXT PRIMARY KEY, '
-    'count INTEGER NOT NULL, '
+    'task_count INTEGER NOT NULL, '
+    'blocking INTEGER NOT NULL, '
+    'non_blocking INTEGER NOT NULL, '
+    'checks INTEGER NOT NULL, '
     'first_seen TEXT NOT NULL, '
     'last_seen TEXT NOT NULL, '
     'prs_json TEXT NOT NULL, '
@@ -626,11 +631,14 @@ def sync(
             )
             conn.executemany('INSERT INTO instructions VALUES (?, ?, ?, ?, ?, ?, ?)', instructions)
             conn.executemany(
-                'INSERT INTO review_categories VALUES (?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO review_categories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [
                     (
                         r['category'],
-                        r['count'],
+                        r['task_count'],
+                        r['blocking'],
+                        r['non_blocking'],
+                        r['checks'],
                         r['first_seen'],
                         r['last_seen'],
                         json.dumps(r['prs'], ensure_ascii=False),

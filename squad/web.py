@@ -384,30 +384,42 @@ def activity_data(db_path: Path, hours: int, project: str = '', session: str = '
 
 
 def review_categories_data(db_path: Path) -> dict[str, Any]:
-    """Review 指摘の category ごとの 件数 / 初出 / 直近 / 該当 PR (#136). graph sync が集計した表を読むだけ.
+    """Review 指摘の category ごとの task 数 / blocking / non_blocking / 確認項目 / 初出 / 直近 / 該当 PR (#136).
 
-    並びは sync が入れた順 (件数の多い順、uncategorized は最後) ではなく、ここでも同じ規則で並べ直す。
+    graph sync が集計した表を読むだけ。task 数は失敗を出した distinct task_id の数 (SQUAD-406)。並びは sync が
+    入れた順ではなく、ここでも review_category_tally.sort_key と同じ規則で並べ直す。
     """
 
     def fn(conn: sqlite3.Connection) -> dict[str, Any]:
         try:
             rows = conn.execute(
-                'SELECT category, count, first_seen, last_seen, prs_json, approx FROM review_categories'
+                'SELECT category, task_count, blocking, non_blocking, checks, first_seen, last_seen, prs_json, approx '
+                'FROM review_categories'
             ).fetchall()
-        except sqlite3.OperationalError:  # review_categories 表の無い古い DB (次の sync で作り直される)
+        except sqlite3.OperationalError:  # 表や列の無い古い DB (schema 3 / 4。次の sync で作り直される)
             rows = []
         out = [
             {
                 'category': c,
-                'count': n,
+                'task_count': tasks,
+                'blocking': blocking,
+                'non_blocking': non_blocking,
+                'checks': checks,
                 'first_seen': first,
                 'last_seen': last,
                 'prs': prs if isinstance(prs := _payload(prs_json), list) else [],
                 'approx': bool(approx),
             }
-            for c, n, first, last, prs_json, approx in rows
+            for c, tasks, blocking, non_blocking, checks, first, last, prs_json, approx in rows
         ]
-        out.sort(key=lambda r: (r['category'] == 'uncategorized', -r['count'], r['category']))
+        out.sort(
+            key=lambda r: (
+                r['category'] == 'uncategorized',
+                -r['task_count'],
+                -r['blocking'] - r['non_blocking'],
+                r['category'],
+            )
+        )
         return {'categories': out}
 
     return _query(db_path, fn)
@@ -1027,22 +1039,25 @@ async function activity() {
         tr.onclick = () => openGoal(e.goal, e.node_id); }
       return tr; })));
 }
-// review 指摘タブ (#136): category ごとの件数。category の無い過去分は uncategorized として最後の行に出る
+// review 指摘タブ (#136): category ごとの件数。category の無い過去分は uncategorized として最後の行に出る。
+// task 数は失敗 (blocking + non_blocking) を出した distinct task_id の数。確認項目は失敗に数えない (SQUAD-406)
 const PR_LIMIT = 3;
 const prLabel = u => { const i = u.lastIndexOf('/pull/'); return i >= 0 ? '#' + u.slice(i + 6) : u; };
 async function reviewcat() {
   const d = await api('/api/review_categories'), cats = d.categories || []; meta(d);
   const day = (iso, approx) => (iso || '-').slice(0, 10) + (approx ? '*' : '');
   const root = document.getElementById('rclist');
-  root.replaceChildren(table(['category', '件数', '初出', '直近', 'PR'], cats.map(c => {
+  root.replaceChildren(table(['category', 'task 数', 'blocking', 'non_blocking', '確認項目', '初出', '直近', 'PR'],
+    cats.map(c => {
     const prs = el('span', 'mono');
     c.prs.slice(0, PR_LIMIT).forEach((u, i) => { if (i) prs.append(', ');
       const a = el('a', '', prLabel(u)); if (u.startsWith('https://')) { a.href = u; a.target = '_blank';
         a.rel = 'noopener noreferrer'; } prs.append(a); });
     if (c.prs.length > PR_LIMIT) prs.append(' 他 ' + (c.prs.length - PR_LIMIT) + ' 件');
     if (!c.prs.length) prs.textContent = '-';
-    return row([el('b', '', c.category), el('span', 'num', String(c.count)), day(c.first_seen, c.approx),
-      day(c.last_seen, c.approx), prs]); })));
+    const num = v => el('span', 'num', String(v));
+    return row([el('b', '', c.category), num(c.task_count), num(c.blocking), num(c.non_blocking), num(c.checks),
+      day(c.first_seen, c.approx), day(c.last_seen, c.approx), prs]); })));
   if (!cats.length) root.append(el('p', 'mono', 'まだ集計がありません (squad graph sync 後に出ます)'));
   if (cats.some(c => c.approx))
     root.append(el('p', 'mono', '* completed_at の無い report を含み、日付はファイルの mtime による近似'));
