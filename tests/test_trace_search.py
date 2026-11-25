@@ -269,3 +269,76 @@ def test_session_missing_jsonl_contrast_no_session_id_is_approximate(queue: Path
     assert missing == []
     assert [s.path.name for s in srcs] == [f'{SID_APPROX}.jsonl']
     assert all(not s.exact for s in srcs)
+
+
+def _dup_rows(ts: str, with_id: bool = True) -> list[dict]:
+    """同じ tool_result が api-request-blob 行 (timestamp なし) と user 行の 2 行に出る (SQUAD-318 の形)."""
+    use = {'type': 'tool_use', 'id': 'tuD', 'name': 'Bash', 'input': {'command': 'git push'}}
+    res: dict = {'type': 'tool_result', 'content': 'pushed'}
+    if with_id:
+        res['tool_use_id'] = 'tuD'
+    return [
+        {'type': 'assistant', 'timestamp': ts, 'message': {'content': [use]}},
+        {'type': 'api-request-blob', 'message': {'content': [res]}},
+        {'type': 'user', 'timestamp': ts, 'message': {'content': [res]}},
+    ]
+
+
+def _src(tmp_path: Path, rows: list[dict]) -> trace_search.Source:
+    path = tmp_path / 'dup.jsonl'
+    path.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+    return trace_search.Source('pj', 'T', 'worker1', path, exact=True)
+
+
+def test_entries_dedupes_tool_result_by_tool_use_id(tmp_path: Path) -> None:
+    got = [e for e in trace_search.entries(_src(tmp_path, _dup_rows('2026-10-01T00:10:00Z'))) if e.tool == 'Bash']
+    assert len(got) == 1
+
+
+def test_entries_keeps_tool_result_without_tool_use_id(tmp_path: Path) -> None:
+    got = list(trace_search.entries(_src(tmp_path, _dup_rows('2026-10-01T00:10:00Z', with_id=False))))
+    assert len(got) == 2  # id が無いものは同一性が分からないので落とさない
+
+
+def _pair(order: list[str], blob: tuple[bool, str], user: tuple[bool, str]) -> list[dict]:
+    """同じ tool_use_id の tool_result を blob 行と user 行の 2 行で作る. order は ['blob', 'user'] か逆."""
+    ts = '2026-10-01T00:10:00Z'
+    use = {'type': 'tool_use', 'id': 'tuP', 'name': 'Bash', 'input': {'command': 'x'}}
+    kinds = {'blob': ('api-request-blob', blob), 'user': ('user', user)}
+    rows: list[dict] = [{'type': 'assistant', 'timestamp': ts, 'message': {'content': [use]}}]
+    for k in order:
+        typ, (err, text) = kinds[k]
+        res = {'type': 'tool_result', 'tool_use_id': 'tuP', 'is_error': err, 'content': text}
+        rows.append({'type': typ, 'timestamp': ts, 'message': {'content': [res]}})
+    return rows
+
+
+def _bash(tmp_path: Path, rows: list[dict]) -> list[trace_search.Entry]:
+    return [e for e in trace_search.entries(_src(tmp_path, rows)) if e.tool == 'Bash']
+
+
+@pytest.mark.parametrize('order', [['blob', 'user'], ['user', 'blob']])
+def test_duplicate_is_error_is_or_regardless_of_order(tmp_path: Path, order: list[str]) -> None:
+    """(a)(b) どちらかの行が is_error なら is_error。content は user 行。ファイル順に依存しない."""
+    (e,) = _bash(tmp_path, _pair(order, blob=(True, 'same'), user=(False, 'same')))
+    assert e.is_error is True
+    assert 'same' in e.text
+
+
+@pytest.mark.parametrize('order', [['blob', 'user'], ['user', 'blob']])
+def test_duplicate_content_prefers_user_row(tmp_path: Path, order: list[str]) -> None:
+    """(c) content が食い違うときは transcript の正本である user 行の値."""
+    (e,) = _bash(tmp_path, _pair(order, blob=(False, 'from-blob'), user=(False, 'from-user')))
+    assert 'from-user' in e.text
+    assert 'from-blob' not in e.text
+    assert e.is_error is False
+
+
+def test_duplicate_without_user_row_keeps_first(tmp_path: Path) -> None:
+    """(d) user 行が無い重複は先に出た行の content。is_error は OR."""
+    rows = _pair(['blob', 'blob'], blob=(False, 'first'), user=(False, ''))
+    rows[-1]['message']['content'][0].update(content='second', is_error=True)
+    (e,) = _bash(tmp_path, rows)
+    assert 'first' in e.text
+    assert 'second' not in e.text
+    assert e.is_error is True

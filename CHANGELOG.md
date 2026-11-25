@@ -18,6 +18,9 @@
 
 ### Fixed
 
+- `squad/trace_search.py` の `entries()` が同じ tool_result を二重に数える問題 (Refs #130)。transcript では同じ結果が
+  user 行と api-request-blob 行の 2 行に出るので、tool_use_id 単位で 1 回だけ返す。tool_use_id が無い行は同一性が
+  分からないので従来どおり落とさない。SQUAD-318 の `tool_calls` 43 → 24、`external_write_attempt_dups` 2 → 0 になる。
 - review 指摘の category 集計が、同じ task の中の複数の指摘だけで `queue/_inbox.md` にチェック化の候補を積んでいた
   (TASK-003 の `maintainability` 4 件 / `ros2_best_practice` 3 件)。候補にするのは、失敗した指摘が別々の task_id で
   2 つ以上になった category だけにした (SQUAD-406, Refs #130 #136)。指摘は blocking / non_blocking / 確認項目

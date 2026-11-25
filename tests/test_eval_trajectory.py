@@ -332,3 +332,19 @@ def test_render_adds_eval_columns_only_with_evals() -> None:
     assert cell['tool_errors'] == '1'
     assert cell['retries'] == '2'
     assert len(lines[1].strip('|').split('|')) == len(header)
+
+
+def test_duplicated_tool_result_rows_count_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """tool_result が api-request-blob 行 (timestamp なし) と user 行の 2 行に出ても 1 呼び出しは 1 回 (SQUAD-318).
+
+    SQUAD-318 は task YAML が無く時間窓が作れなかったので、blob 行が窓で落ちずに数えられた。
+    """
+    rows = Rows()
+    rows.bash('git push -u origin b')
+    rows.rows.insert(-1, {'type': 'api-request-blob', 'message': rows.rows[-1]['message']})
+    queue = _setup(tmp_path, monkeypatch, rows)
+    (queue / 'projects' / 'pj' / 'tasks' / 'worker2.yaml').unlink()
+    got = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert got['tool_calls'] == 1
+    assert got['external_write_attempts'] == 1
+    assert got['external_write_attempt_dups'] == 0
