@@ -68,3 +68,41 @@ task を自動で投げる runner は持たない (構成を切り替えるた�
 - `metrics/task_evals.jsonl` (`scripts/eval_trajectory.py`) の `verify_attempt` / `verify_result` は、watchd が
   attempt ごとに写した `queue/projects/<pj>/verdicts/` から読む。写し始める前 (SQUAD-397 より前) の task は null。
   再試行で pass した trial は `verify_attempt >= 2` かつ `verify_result: pass`
+
+## task 完了時の自動評価 (metrics/task_evals.jsonl)
+
+watchd は worker の report の配達を確定すると、その task を `scripts/eval_trajectory.py` で評価し、
+`metrics/task_evals.jsonl` に 1 行追記する (`squad/task_eval.py`、Refs #130 #136)。手で走らせる
+`eval_trajectory.py --project <pj> --task-id <id>` もこれまでどおり使え、同じファイルに追記する。
+
+- 評価するのは `workerN_report.yaml` のうち `status` が `completed` か `blocked` のものだけ。
+  それ以外 (progress などの途中の report、`failed`) と cross-review の `*_review.yaml` は評価しない
+- 重複排除のキーは `report_id`。追記の直前に、ファイルを flock した状態で同じ `report_id` の行があるかを見る。
+  watchd の再起動・再配達・複数の watchd が重なっても同じ `report_id` の行は 1 行だけになる。手で走らせた行は
+  `report_id` を持たないので、この判定には入らない
+- 評価は子プロセスで走り、watchd は終わるのを待たない (同時に 2 件まで)。子は `WATCH_TASK_EVAL_TIMEOUT`
+  (既定 300 秒) で自分を打ち切り、`error` に `timeout` を入れた行を書く。子が行を書けずに終わったとき
+  (異常終了、起動失敗) と、上限 + 10 秒を過ぎても終わらないとき (kill する) は watchd が `error` 付きの行を書き、
+  `watch.log` に `[WARN] task 評価に失敗` を出す。どの場合も report の配達・ledger の更新・通知は先に済んでいる
+- 子の実行中に watchd が止まっても、子は自分の時間上限まで走って行を書く。配達の後、子を起動する前に watchd が
+  止まった report は評価されない (再起動後に拾い直さない)
+- `WATCH_TASK_EVAL=0` で止まる。出力先は `WATCH_TASK_EVALS_FILE` で変えられる (既定は watchd のある checkout の
+  `metrics/task_evals.jsonl`)
+- このファイルは gitignore している。`metrics/task_costs.jsonl` は計測した人が選んで commit するので追跡しているが、
+  こちらは本番の main checkout で watchd が task ごとに追記するので、追跡すると main が常に dirty になる
+- watchd に反映するには、merge 後に watchd の再起動が要る
+
+行の schema (評価の出力は平らに並べる):
+
+| キー | 型 | 意味 |
+|---|---|---|
+| project / task_id / report_id | str | report の値 |
+| worker | str | report の `worker` (無ければ report のファイル名の `workerN`) |
+| agent | str | report の `agent` (無ければ空文字) |
+| status | str | report の `status` (`completed` / `blocked`) |
+| evaluated_at | str | 行を作った時刻 (TZ 付き ISO8601) |
+| source | str | `watchd` (手で走らせた行には無い) |
+| error | str \| null | 評価に失敗した理由。成功なら null。`timeout: ...` / `not_found: ...` (report か transcript が無い) / `exit=<n>: <stderr>` / `spawn: ...` / 例外の traceback |
+| tool_calls ... measured_at | | 成功したときだけ。`eval_trajectory.py` の出力そのもの (`tool_calls`, `tool_errors`, `retries`, `verify_ran`, `verify_attempt`, `verify_result`, `memory_calls`, `trace_search_calls`, `writes_outside_workspace`, `deny_pattern_matches`, `denied_samples`, `external_write_attempts`, `external_write_attempt_dups`, `attribution`, `measured_at`) |
+
+`bench_report.py` は `error` のある行を読み飛ばす (失敗した行で前の正常な行を隠さない)。

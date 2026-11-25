@@ -304,6 +304,14 @@ def test_load_evals_uses_last_line(tmp_path: Path) -> None:
     assert bench_report.load_task_evals(tmp_path / 'none.jsonl') == {}
 
 
+def test_load_evals_skips_error_rows(tmp_path: Path) -> None:
+    """自動評価 (watchd) が失敗した行で、前の正常な行を隠さない."""
+    out = tmp_path / 'e.jsonl'
+    ok = {'project': 'pj', 'task_id': 'T1', 'tool_calls': 3, 'error': None}
+    out.write_text(json.dumps(ok) + '\n' + json.dumps({'project': 'pj', 'task_id': 'T1', 'error': 'timeout'}) + '\n')
+    assert bench_report.load_task_evals(out) == {('pj', 'T1'): ok}
+
+
 def _bench(task_id: str, config: str, trial: int) -> dict:
     return {
         'task_id': task_id,
