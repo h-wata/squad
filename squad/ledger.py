@@ -65,8 +65,13 @@ SCHEMA = (
     'lease TEXT NOT NULL, '
     'attempt_count INTEGER NOT NULL, '
     'next_attempt_at INTEGER NOT NULL, '
+    'delivered_at REAL NOT NULL DEFAULT 0, '
     'PRIMARY KEY (project, report_id))'
 )
+# delivered_at: commit() で delivered にした時刻 (epoch 秒, wall clock)。task 完了時の自動評価の再走査
+# (watchd.rescan_task_evals) が、起点より後に配達した report だけを拾うのに使う。列を足す前の行と
+# 旧 ledger から移した行は 0 (= 自動評価の導入前に配達した)。古い ledger には _connect() が列を足す。
+DELIVERED_AT_COLUMN = 'delivered_at'
 # 配達した report の task YAML 退避が済んでいない印 (SQUAD-361 B1/B2)。行がある間は watchd が毎サイクル続きを行う。
 #   pending  退避がまだ (tasks/ への権限・容量の障害で失敗したら、このまま次サイクルで再試行する)
 #   verify   退避した。until までに退避先へ書き込みがあれば tasks/ へ戻す (rename 前に開かれた fd からの書込み)
@@ -295,6 +300,13 @@ class ReportLedger:
         conn.execute(f'PRAGMA busy_timeout = {int(self.timeout * 1000)}')
         conn.execute(SCHEMA)
         conn.execute(TASK_ARCHIVE_SCHEMA)
+        cols = {row[1] for row in conn.execute('PRAGMA table_info(deliveries)')}
+        if DELIVERED_AT_COLUMN not in cols:
+            try:
+                conn.execute(f'ALTER TABLE deliveries ADD COLUMN {DELIVERED_AT_COLUMN} REAL NOT NULL DEFAULT 0')
+            except sqlite3.OperationalError as e:
+                if 'duplicate column' not in str(e):  # 別の watcher が同時に足した
+                    raise
         return conn
 
     @contextmanager
@@ -383,9 +395,9 @@ class ReportLedger:
                 if state == DELIVERED or lease != token:
                     return True
                 conn.execute(
-                    'UPDATE deliveries SET state = ?, lease = ?, next_attempt_at = 0 '
+                    'UPDATE deliveries SET state = ?, lease = ?, next_attempt_at = 0, delivered_at = ? '
                     'WHERE project = ? AND report_id = ?',
-                    (DELIVERED, '', project, report_id),
+                    (DELIVERED, '', time.time(), project, report_id),
                 )
                 if archive is not None:
                     conn.execute(
@@ -396,6 +408,29 @@ class ReportLedger:
                 return True
         except sqlite3.Error:
             return False
+
+    def delivered_since(self, projects: Iterable[str], since: float) -> list[tuple[str, str, float]]:
+        """担当 project で since (epoch 秒) 以後に delivered にした (project, report_id, delivered_at). 古い順.
+
+        delivered_at が 0 の行 (配達時刻を記録する前の配達) は since に関わらず返さない。
+
+        DB を読めなければ例外 (sqlite3.Error) をそのまま返す (呼び出し側が次の再走査で再試行する)。
+        """
+        names = list(projects)
+        if not names:
+            return []
+        conn = self._connect()
+        try:
+            marks = ','.join('?' * len(names))
+            rows = conn.execute(
+                f'SELECT project, report_id, delivered_at FROM deliveries '  # noqa: S608 (marks は ? の並びだけ)
+                f'WHERE state = ? AND delivered_at > 0 AND delivered_at >= ? AND project IN ({marks}) '
+                'ORDER BY delivered_at',
+                (DELIVERED, since, *names),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [(str(p), str(r), float(t)) for p, r, t in rows]
 
     def task_archives(self, projects: Iterable[str]) -> list[dict[str, object]]:
         """担当 project の task YAML 退避で、まだ済んでいないもの (SQUAD-361). DB を読めなければ空."""

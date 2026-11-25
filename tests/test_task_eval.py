@@ -422,18 +422,22 @@ def test_waiting_queue_is_capped_and_overflow_is_rescanned(
 
 
 def test_rescan_skips_reports_before_since(env: tuple[Watcher, Path, Path]) -> None:
-    """自動評価を入れる前の report は再走査で評価しない (起点は queue/.task_eval_since)."""
+    """自動評価を入れる前に配達した report は再走査で評価しない (起点は queue/.task_eval_since).
+
+    導入前かどうかは ledger の delivered_at で決め、写しの mtime は見ない (N4)。写しを touch して新しくしても拾わない。
+    """
     w, d, out = env
     w.cfg.task_eval_enabled = False  # 導入前の watchd が配達した
     _write(d)
     w.report_bridge()
+    future = time.time() + 3600
     for p in (d / 'reports' / 'archive').glob('*.yaml'):
-        os.utime(p, (START, START))  # 写しの mtime = 元の report の mtime (導入前)
+        os.utime(p, (future, future))  # cp / restore / touch で写しの mtime が新しくなった
     cfg2 = Config(**{**w.cfg.__dict__, 'task_eval_enabled': True})
     w2 = Watcher(cfg=cfg2, tmux=FakeTmux('testsess'))
     w2.refresh_owned_projects()
     w2.poll_task_evals()
-    assert w2.task_eval_since_file.exists()  # 初回の再走査で起点を記録した
+    assert w2.task_eval_since_file.exists()  # 起点を記録した
     assert not w2._evals_waiting and not w2._evals_running  # noqa: SLF001
     assert not out.exists()
     # 起点を前にずらせば (WATCH_TASK_EVAL_SINCE) 拾う
@@ -521,3 +525,222 @@ def test_commit_failure_does_not_schedule_eval(
     assert not w._evals_waiting and not w._evals_running  # noqa: SLF001
     assert spawned == []
     assert not out.exists()
+
+
+# ---- PR #142 re-review N1-N4 ----
+
+LEASE_EVAL = """import sys, time
+from pathlib import Path
+sys.path.insert(0, {squad!r})
+sys.path.insert(0, {scripts!r})
+import eval_trajectory
+import task_eval
+
+def fake(queue_dir, project, task_id):
+    with open({counter!r}, 'a') as f:
+        f.write(task_id + '\\n')
+    time.sleep(1.0)  # 重い評価の代わり (この間にもう一方の watcher の子が lock を取りに来る)
+    return {{'project': project, 'task_id': task_id, 'worker': 'worker1', 'tool_calls': 0}}
+
+eval_trajectory.evaluate = fake
+sys.exit(task_eval.main(sys.argv[1:]))
+"""
+
+
+def _watcher_like(w: Watcher, **over: object) -> Watcher:
+    """同じ queue / ledger / 出力先を見る別の watcher (再起動か、同じ project を見るもう 1 つの watchd)."""
+    w2 = Watcher(cfg=Config(**{**w.cfg.__dict__, **over}), tmux=FakeTmux('testsess'))
+    w2.sleep = lambda _s: None
+    w2.refresh_owned_projects()
+    return w2
+
+
+def test_since_is_recorded_before_first_delivery(env: tuple[Watcher, Path, Path]) -> None:
+    """起点 queue/.task_eval_since は最初の report_bridge() より前に作る (N1)."""
+    w, d, _out = env
+    _write(d)
+    seen: list[bool] = []
+    real = w.report_bridge
+
+    def bridge() -> None:
+        seen.append(w.task_eval_since_file.exists())
+        real()
+
+    w.report_bridge = bridge  # type: ignore[method-assign]
+    w.cycle()
+    assert seen == [True]
+    since = watchd._parse_iso(w.task_eval_since_file.read_text().strip())  # noqa: SLF001
+    conn = sqlite3.connect(w.cfg.ledger_path)
+    try:
+        (at,) = conn.execute('SELECT delivered_at FROM deliveries WHERE report_id = ?', (ID1,)).fetchone()
+    finally:
+        conn.close()
+    assert since is not None and at >= since
+
+
+def test_since_file_is_not_overwritten(env: tuple[Watcher, Path, Path]) -> None:
+    """既にある起点はそのまま使う (O_EXCL で作る。別の watchd や再起動で書き換えない)."""
+    w, _d, _out = env
+    w.task_eval_since_file.parent.mkdir(parents=True, exist_ok=True)
+    w.task_eval_since_file.write_text('2026-01-01T00:00:00+09:00\n')
+    w.cycle()
+    assert w.task_eval_since_file.read_text() == '2026-01-01T00:00:00+09:00\n'
+    assert w.ensure_task_eval_since() == watchd._parse_iso('2026-01-01T00:00:00+09:00')  # noqa: SLF001
+
+
+def test_failed_schedule_is_recovered_by_rescan_after_restart(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S6: 配達は確定したが予約に失敗し、そのまま watchd が止まった report も、再起動後の再走査で評価される (N1).
+
+    report は起点より前に書かれている (写しの mtime < 起点) が、配達は起点の後なので拾う。
+    """
+    w, d, out = env
+    p = _write(d)
+    os.utime(p, (START, START))  # watchd を入れる前に書かれた report
+    real_ids = task_eval.evaluated_ids
+
+    def boom(_out: Path) -> set[str]:
+        raise OSError('metrics unreadable')
+
+    monkeypatch.setattr(task_eval, 'evaluated_ids', boom)
+    w._eval_rescan_at = time.monotonic() + 3600  # noqa: SLF001 (このサイクルでは再走査しない)
+    w.cycle()
+    assert w.ledger.is_delivered('pj', ID1)
+    assert not w._evals_waiting and not w._evals_running  # noqa: SLF001 (予約に失敗した)
+    monkeypatch.setattr(task_eval, 'evaluated_ids', real_ids)
+    time.sleep(1.2)
+    w2 = _watcher_like(w)  # 再起動
+    w2.cycle()
+    assert ID1 in w2._evals_waiting or ID1 in w2._evals_running  # noqa: SLF001
+    _drain(w2)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+
+
+def test_ledger_rows_without_delivered_at_are_not_rescanned(env: tuple[Watcher, Path, Path]) -> None:
+    """delivered_at 列を足す前の ledger で配達済みの行 (0) は、起点を前にずらしても拾わない (N4)."""
+    w, d, out = env
+    db = w.cfg.ledger_path
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            'CREATE TABLE deliveries (project TEXT NOT NULL, report_id TEXT NOT NULL, path TEXT NOT NULL, '
+            'content_sha256 TEXT NOT NULL, state TEXT NOT NULL, lease TEXT NOT NULL, attempt_count INTEGER NOT NULL, '
+            'next_attempt_at INTEGER NOT NULL, PRIMARY KEY (project, report_id))'
+        )
+        conn.execute("INSERT INTO deliveries VALUES ('pj', ?, 'x', 'sha', 'delivered', '', 1, 0)", (ID1,))
+        conn.commit()
+    finally:
+        conn.close()
+    arch = d / 'reports' / 'archive'
+    arch.mkdir()
+    (arch / f'T1__{ID1}.yaml').write_text(f'report_id: "{ID1}"\ntask_id: T1\nstatus: completed\n')
+    w.cfg.task_eval_since = '1970-01-01T00:00:00+00:00'
+    w.poll_task_evals()
+    assert w.ledger.is_delivered('pj', ID1)
+    assert w.ledger.delivered_since(['pj'], 0.0) == []  # 列は足され、値は 0 (配達時刻が分からない)
+    assert not w._evals_waiting and not w._evals_running  # noqa: SLF001
+    assert not out.exists()
+
+
+class _LateProc:
+    """kill しても猶予の間は終わらず、後で終わる子."""
+
+    def __init__(self) -> None:
+        self.done = False
+        self.pid = 4242
+
+    def poll(self) -> int | None:
+        return -9 if self.done else None
+
+    def kill(self) -> None:
+        pass
+
+
+def test_abandoned_child_is_reaped_later(env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """見放した子は見放し中の一覧に残り、遅れて終わったら次の見回りで回収される (N2)."""
+    w, _d, out = env
+    monkeypatch.setattr(watchd, 'TASK_EVAL_REAP_GRACE', 0)
+    job, _ = _stuck_job(w)
+    late = _LateProc()
+    job.proc = late  # type: ignore[assignment]
+    w.poll_task_evals()  # kill
+    w.poll_task_evals()  # 猶予を過ぎた -> error 行を書いて見放す
+    assert ID1 not in w._evals_running  # noqa: SLF001
+    assert w._evals_abandoned == [job]  # noqa: SLF001
+    assert len(_rows(out)) == 1
+    t0 = time.monotonic()
+    w.poll_task_evals()  # まだ終わっていない: 待たずに戻り、一覧に残す
+    assert time.monotonic() - t0 < 0.5
+    assert w._evals_abandoned == [job]  # noqa: SLF001
+    late.done = True
+    w.poll_task_evals()
+    assert w._evals_abandoned == []  # noqa: SLF001
+    assert len(_rows(out)) == 1  # 回収で行は増えない
+
+
+def test_abandoned_real_child_leaves_no_zombie(env: tuple[Watcher, Path, Path]) -> None:
+    """実際の子プロセスを見放し中の一覧に入れ、終わった後の見回りで回収されて zombie が残らない (N2)."""
+    w, _d, _out = env
+    proc = watchd.subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(0.3)'])
+    w._evals_abandoned.append(watchd.EvalJob(base={}, argv=[], proc=proc))  # noqa: SLF001
+    w._eval_rescan_at = time.monotonic() + 3600  # noqa: SLF001
+    deadline = time.monotonic() + 10
+    while w._evals_abandoned:  # noqa: SLF001
+        assert time.monotonic() < deadline
+        w.poll_task_evals()
+        time.sleep(0.05)
+    assert proc.returncode == 0
+    with pytest.raises(ChildProcessError):
+        os.waitpid(proc.pid, os.WNOHANG)  # 回収済み (zombie なら (pid, status) が返る)
+
+
+def test_abandoned_list_is_capped_with_warn(env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    w, _d, _out = env
+    logs: list[str] = []
+    monkeypatch.setattr(w, 'log', logs.append)
+    monkeypatch.setattr(watchd, 'TASK_EVAL_MAX_ABANDONED', 2)
+    jobs = [watchd.EvalJob(base={}, argv=[], proc=_LateProc()) for _ in range(3)]  # type: ignore[arg-type]
+    for job in jobs:
+        w._abandon_task_eval(job)  # noqa: SLF001
+    assert w._evals_abandoned == jobs[1:]  # noqa: SLF001
+    assert sum(m.startswith('[WARN] 見放した task 評価の子が') for m in logs) == 1
+
+
+def test_lease_allows_one_holder(tmp_path: Path) -> None:
+    first = task_eval.acquire_lease(tmp_path, ID1)
+    assert first is not None
+    assert task_eval.acquire_lease(tmp_path, ID1) is None  # 同じ report_id は取れない
+    other = task_eval.acquire_lease(tmp_path, ID2)
+    assert other is not None
+    first.close()  # type: ignore[attr-defined]
+    again = task_eval.acquire_lease(tmp_path, ID1)  # 持ち主が終われば取れる (ファイルは残っていてよい)
+    assert again is not None
+    assert task_eval.lock_path(tmp_path, ID1).exists()
+    again.close()  # type: ignore[attr-defined]
+    other.close()  # type: ignore[attr-defined]
+
+
+def test_two_watchers_rescan_same_archive_evaluate_once(env: tuple[Watcher, Path, Path], tmp_path: Path) -> None:
+    """同じ project を見る watcher 2 つが同じ archive を同時に再走査しても、evaluate は 1 回だけ走る (N3)."""
+    w, d, out = env
+    counter = tmp_path / 'evaluate_calls.txt'
+    script = tmp_path / 'lease_eval.py'
+    script.write_text(
+        LEASE_EVAL.format(squad=str(ROOT / 'squad'), scripts=str(ROOT / 'scripts'), counter=str(counter))
+    )
+    w.cfg.task_eval_enabled = False  # 予約させずに配達だけ済ませる
+    _write(d)
+    w.report_bridge()
+    cmd = [sys.executable, str(script)]
+    wa = _watcher_like(w, task_eval_enabled=True, task_eval_since=SINCE_EARLY, task_eval_cmd=cmd)
+    wb = _watcher_like(w, task_eval_enabled=True, task_eval_since=SINCE_EARLY, task_eval_cmd=cmd)
+    wa.poll_task_evals()
+    wb.poll_task_evals()
+    assert ID1 in wa._evals_running and ID1 in wb._evals_running  # noqa: SLF001 (両方が子を起動した)
+    _drain(wa)
+    _drain(wb)
+    assert counter.read_text().splitlines() == ['T1']  # evaluate は 1 回
+    rows = _rows(out)
+    assert [r['report_id'] for r in rows] == [ID1] and rows[0]['error'] is None

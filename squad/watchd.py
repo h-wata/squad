@@ -376,6 +376,7 @@ TASK_EVAL_MAX_RUNNING = 2  # 同時に走らせる評価の子プロセス数 (l
 TASK_EVAL_MAX_WAITING = 20  # 起動待ちの上限。溢れた分は捨てて、次の再走査で reports/archive/ から拾い直す
 TASK_EVAL_KILL_GRACE = 10  # 子が自分の時間上限で行を書けなかったとき、watchd が kill するまでの猶予 (秒)
 TASK_EVAL_REAP_GRACE = 30  # kill した子がこの秒数 (monotonic) を過ぎても回収できなければ error 行を書いて見放す
+TASK_EVAL_MAX_ABANDONED = 20  # 見放した後も毎サイクル poll して回収する子の上限 (超えたら一番古いものを諦めて WARN)
 TASK_EVAL_RESCAN_SECONDS = 300  # 評価漏れの再走査の間隔 (monotonic)。watchd 起動後の最初の見回りでは必ず走る
 TASK_EVAL_STDERR_CHARS = 2000
 
@@ -631,6 +632,10 @@ class Watcher:
         self._evals_running: dict[str, EvalJob] = {}
         self._eval_rescan_at: float | None = None  # 次の再走査 (monotonic)。None = まだ一度も走っていない
         self._eval_overflow_warned = False
+        self._eval_since: float | None = None  # queue/.task_eval_since の値 (読めたら覚えておく)
+        self._eval_since_warned = False
+        # kill 後に回収できず見放した子 (N2)。error 行は書き済み。毎サイクル poll して、終わったら回収する
+        self._evals_abandoned: list[EvalJob] = []
         # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
         self._tasks_sig: tuple | None = None
         # sync 失敗時は dirty を残し backoff で再試行する (一時的な失敗で永久に古いままにしない)
@@ -1053,18 +1058,24 @@ class Watcher:
     def task_eval_since_file(self) -> Path:
         return self.cfg.queue_dir / '.task_eval_since'
 
-    def _task_eval_since(self) -> float:
-        """再走査で拾う report の起点 (epoch 秒). この時刻より前の report は再走査では評価しない.
+    def ensure_task_eval_since(self) -> float:
+        """再走査で拾う report の起点 (epoch 秒) を決める. 起点より前に配達した report は再走査では評価しない.
 
         WATCH_TASK_EVAL_SINCE (ISO8601) があればそれ。無ければ queue/.task_eval_since。ファイルも無ければ
-        今の時刻を書いて作る (= 自動評価付きの watchd が初めて再走査した時刻。導入前の report を一斉に評価しない)。
-        全 session の watchd が同じファイルを使い、O_EXCL で作るので最初に作った値が残る。
+        今の時刻 (マイクロ秒まで) を書いて作る。全 session の watchd が同じファイルを使い、O_EXCL で作るので
+        最初に作った値が残る。watchd は起動時と毎サイクルの report_bridge() の前に呼ぶ (N1)。こうすると、
+        自動評価付きの watchd が配達した report の ledger の delivered_at は必ず起点以後になり、
+        予約に失敗した report も再走査で拾える。一度決めた値はこの watcher の中で覚えておく。
         """
         if self.cfg.task_eval_since:
             ts = _parse_iso(self.cfg.task_eval_since)
             if ts is not None:
                 return ts
-            self.log(f'[WARN] WATCH_TASK_EVAL_SINCE を読めません ({self.cfg.task_eval_since!r})。既定の起点を使う')
+            if not self._eval_since_warned:
+                self._eval_since_warned = True
+                self.log(f'[WARN] WATCH_TASK_EVAL_SINCE を読めません ({self.cfg.task_eval_since!r})。既定の起点を使う')
+        if self._eval_since is not None:
+            return self._eval_since
         path = self.task_eval_since_file
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -1072,54 +1083,64 @@ class Watcher:
             ts = _parse_iso(path.read_text(encoding='utf-8').strip())
             if ts is None:
                 raise ValueError(f'{path} を ISO8601 として読めません') from None
+            self._eval_since = ts
             return ts
         now = self.wall()
+        stamp = datetime.fromtimestamp(now).astimezone().isoformat(timespec='microseconds')
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(datetime.fromtimestamp(now).astimezone().isoformat(timespec='seconds') + '\n')
-        self.log(f'task 評価の再走査の起点を記録: {path}')
-        return float(int(now))
+            f.write(stamp + '\n')
+        self.log(f'task 評価の再走査の起点を記録: {path} ({stamp})')
+        self._eval_since = _parse_iso(stamp) or now
+        return self._eval_since
+
+    def _prepare_task_eval_since(self) -> None:
+        """起動時と毎サイクルの report_bridge() の前に起点を決めておく. 失敗しても配達は止めない."""
+        if not self.cfg.task_eval_enabled or self._eval_since is not None:
+            return
+        try:
+            self.ensure_task_eval_since()
+        except Exception as e:  # noqa: BLE001 (起点を作れなくても配達は続ける。次のサイクルで再試行)
+            self.log(f'[WARN] task 評価の起点を決められません (次のサイクルで再試行): {e}')
 
     def rescan_task_evals(self) -> None:
-        """配達済みで task_evals.jsonl に行の無い最終 report を reports/archive/ から拾い直す (F1).
+        """配達済みで task_evals.jsonl に行の無い最終 report を拾い直す (F1 / N1 / N4).
 
         待ち行列はメモリにしか無いので、watchd が再起動すると待っていた評価は消え、配達済みの report は
-        再配達されない。配達した report は必ず reports/archive/<task_id>__<report_id>.yaml に写す (_archive_copy)
-        ので、そこを正本として見直す。拾うのは次のすべてを満たすもの:
-        写しの mtime (= 元の report の mtime) が起点 (_task_eval_since) 以降 / report_id が UUID /
-        status が FINAL_STATUSES / review の書式 (verdict キー) でない / ledger で配達済み /
-        task_evals.jsonl に同じ report_id の行が無い。古い順に、待ち行列の上限まで積む。
+        再配達されない。そこで ledger の deliveries から、起点 (ensure_task_eval_since) 以後に delivered にした
+        report を配達の古い順に引き、配達時に写した reports/archive/<task_id>__<report_id>.yaml を読んで
+        予約し直す。導入前の report かどうかは ledger の delivered_at だけで決め、写しの mtime や中身の時刻は
+        見ない (写しを cp / restore / touch しても対象は変わらない)。delivered_at の無い行 (列を足す前の配達、
+        旧 ledger から移した行) は 0 なので拾わない。
+        拾うのは、さらに次を満たすもの: 写しがある / report_id が UUID / status が FINAL_STATUSES /
+        review の書式 (verdict キー) でない / task_evals.jsonl に同じ report_id の行が無い。待ち行列の上限まで積む。
         """
         if not self.cfg.task_eval_enabled:
             return
-        since = self._task_eval_since()
+        since = self.ensure_task_eval_since()
         evaluated = task_eval.evaluated_ids(self.cfg.task_evals_file)
-        found: list[tuple[float, str, Path]] = []
-        for d in self.owned:
-            for p in (d / 'reports' / 'archive').glob('*.yaml'):
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                if mtime >= since:
-                    found.append((mtime, d.name, p))
+        by_name = {d.name: d for d in self.owned}
         added = 0
-        for _mtime, project, p in sorted(found):
+        for project, report_id, _at in self.ledger.delivered_since(by_name, since):
             if len(self._evals_waiting) >= TASK_EVAL_MAX_WAITING:
                 break
-            try:
-                data = p.read_bytes()
-            except OSError:
+            if report_id in evaluated or report_id in self._evals_waiting or report_id in self._evals_running:
                 continue
-            sha, meta, err = report_identity(data)
-            report_id, invalid = delivery_key(meta, sha, err, str(p))
-            if invalid or 'verdict' in meta or report_id in evaluated:
-                continue
-            if meta.get('status', '') not in task_eval.FINAL_STATUSES:
-                continue
-            if not self.ledger.is_delivered(project, report_id):
-                continue  # 配達を確定していない (commit に失敗した) report は評価しない
-            if self._enqueue_task_eval(project, report_id, meta, '', evaluated):
-                added += 1
+            rid = ARCHIVE_NAME_UNSAFE_RE.sub('_', report_id)
+            copies = sorted((by_name[project] / 'reports' / 'archive').glob(f'*__{globmod.escape(rid)}.yaml'))
+            for p in copies:
+                try:
+                    data = p.read_bytes()
+                except OSError:
+                    continue
+                sha, meta, err = report_identity(data)
+                key, invalid = delivery_key(meta, sha, err, str(p))
+                if invalid or key != report_id or 'verdict' in meta:
+                    continue
+                if meta.get('status', '') not in task_eval.FINAL_STATUSES:
+                    break
+                if self._enqueue_task_eval(project, report_id, meta, '', evaluated):
+                    added += 1
+                break
         if added:
             self.log(f'task 評価の漏れを再走査で {added} 件拾い直した')
 
@@ -1141,6 +1162,29 @@ class Watcher:
         except (OSError, AttributeError, ValueError):
             return ''
 
+    def _abandon_task_eval(self, job: EvalJob) -> None:
+        """回収できない子を見放し中の一覧に移す (N2). 一覧が上限なら一番古いものの追跡をやめて WARN."""
+        self._evals_abandoned.append(job)
+        if len(self._evals_abandoned) > TASK_EVAL_MAX_ABANDONED:
+            old = self._evals_abandoned.pop(0)
+            pid = getattr(old.proc, 'pid', '?')
+            self.log(
+                f'[WARN] 見放した task 評価の子が {TASK_EVAL_MAX_ABANDONED} 件を超えたので、一番古い子 (pid={pid}) の'
+                '回収をやめます (終わらない子が残っていないか確認してください)'
+            )
+
+    def _reap_abandoned_task_evals(self) -> None:
+        """見放した子を待たずに poll し、終わっていたら回収する (zombie を残さない, N2)."""
+        for job in list(self._evals_abandoned):
+            try:
+                rc = job.proc.poll()
+            except Exception as e:  # noqa: BLE001 (回収の失敗で watcher を止めない)
+                self.log(f'[WARN] 見放した task 評価の子を poll できません: {e}')
+                continue
+            if rc is not None:
+                self._evals_abandoned.remove(job)
+                self.log(f'見放した task 評価の子を回収: pid={getattr(job.proc, "pid", "?")} exit={rc}')
+
     def poll_task_evals(self) -> None:
         """評価の子プロセスを見回る. 終わったものを回収し、時間切れは kill し、空きがあれば次を起動する.
 
@@ -1148,7 +1192,7 @@ class Watcher:
         error 行で書く。子が行を書けずに終わった (異常終了) か、時間上限 + TASK_EVAL_KILL_GRACE を過ぎても
         終わらないときは watchd が error 行を書く。watchd は子の終了を待たない (サイクルを止めない)。
         kill した子も待たず、次の見回り以降に poll で回収する。kill から TASK_EVAL_REAP_GRACE 秒を過ぎても
-        回収できなければ error 行と WARN を残して見放す。
+        回収できなければ error 行と WARN を残して見放し、見放した子も毎回待たずに poll して終わったら回収する (N2)。
         最初の見回りと TASK_EVAL_RESCAN_SECONDS ごとに rescan_task_evals() で評価漏れを拾い直す。
         """
         now = self.mono()
@@ -1158,6 +1202,7 @@ class Watcher:
                 self.rescan_task_evals()
             except Exception as e:  # noqa: BLE001 (再走査の失敗で watcher を止めない。次の再走査で再試行)
                 self.log(f'[WARN] task 評価の再走査に失敗 (次の再走査で再試行): {e}')
+        self._reap_abandoned_task_evals()
         for report_id, job in list(self._evals_running.items()):
             try:
                 rc = job.proc.poll()
@@ -1168,6 +1213,7 @@ class Watcher:
                         self._task_eval_failed(
                             report_id, job, f'timeout: kill 後 {TASK_EVAL_REAP_GRACE}s を過ぎても回収できない'
                         )
+                        self._abandon_task_eval(job)
                     elif self.mono() - job.started < self.cfg.task_eval_timeout + TASK_EVAL_KILL_GRACE:
                         continue
                     else:
@@ -1176,7 +1222,7 @@ class Watcher:
                         continue
                 elif job.killed_at is not None:
                     self._task_eval_failed(report_id, job, f'timeout: {self.cfg.task_eval_timeout}s を過ぎたので kill')
-                elif rc not in (task_eval.EXIT_WRITTEN, task_eval.EXIT_DUPLICATE):
+                elif rc not in (task_eval.EXIT_WRITTEN, task_eval.EXIT_DUPLICATE, task_eval.EXIT_BUSY):
                     self._task_eval_failed(report_id, job, f'exit={rc}: {self._stderr_tail(job)}')
             except Exception as e:  # noqa: BLE001 (評価の見回りで watcher を止めない)
                 self._task_eval_failed(report_id, job, f'watchd: {e}')
@@ -2454,6 +2500,7 @@ class Watcher:
         except Exception as e:  # noqa: BLE001 (区切りの失敗で watcher を止めない。区切らない側に倒す)
             self.log(f'[WARN] Dispatcher の区切りの判定に失敗 (今回は区切らない): {e}')
         self.archive_verdicts()
+        self._prepare_task_eval_since()  # 配達より前に起点を決める (N1)
         self.report_bridge()
         try:
             self.poll_task_evals()
@@ -2513,6 +2560,7 @@ class Watcher:
             f'ledger={c.ledger_path})'
         )
         self.prepare_ledger()
+        self._prepare_task_eval_since()
         self.warn_missing_markers()
         self.sleep(c.boot_delay)
         # GC を起動直後に走らせない。last_gc=0 初期化だと最初の cycle() で無条件に

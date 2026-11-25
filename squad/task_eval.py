@@ -13,6 +13,11 @@ scripts/eval_trajectory.py の evaluate() で 1 task 分を数え、report の�
   行 (report_id 無し) はキーにならない。
 - 評価の例外・import 失敗・時間切れ (--timeout 秒、SIGALRM) は `error` に理由を入れた行として残す。
   子が行を書けずに終わったときは watchd が error 行を書く (watchd.Watcher.poll_task_evals)。
+- 同じ report_id を同時に評価するのは 1 つの子だけ (N3)。子は評価の前に
+  `<queue>/.task_eval_locks/<report_id>.lock` に非ブロックの flock を取り、取れなければ評価も追記もせず
+  EXIT_BUSY で終わる。lock は子が終われば (異常終了や kill でも) OS が外す。ファイルは消さずに残す
+  (report 1 件につき空のファイル 1 つ。残っていても lock は掛かっていないので害は無い。消すと、開いている
+  子と新しい子が別の inode を lock して二重に走る隙ができる)。
 
 stdlib only (watchd から import する。eval_trajectory は watchd を import するので main() の中でだけ読む)。
 """
@@ -26,6 +31,7 @@ from datetime import datetime
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import sys
@@ -36,6 +42,9 @@ FINAL_STATUSES = frozenset({'completed', 'blocked'})
 ERROR_CHARS = 2000
 EXIT_WRITTEN = 0
 EXIT_DUPLICATE = 3  # 同じ report_id の行が既にあったので書かなかった
+EXIT_BUSY = 4  # 同じ report_id を別の子が評価中 (lock を取れなかった) なので何もしなかった
+LOCK_DIR_NAME = '.task_eval_locks'
+_LOCK_NAME_UNSAFE_RE = re.compile(r'[^\w.-]')
 
 
 def now_iso() -> str:
@@ -82,6 +91,23 @@ def append_row(out: Path, row: dict) -> bool:
             return True
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def lock_path(queue_dir: Path, report_id: str) -> Path:
+    return queue_dir / LOCK_DIR_NAME / f'{_LOCK_NAME_UNSAFE_RE.sub("_", report_id)}.lock'
+
+
+def acquire_lease(queue_dir: Path, report_id: str) -> object | None:
+    """Report_id の評価の lease (非ブロック flock) を取る. 取れたら開いたファイル、別の子が持っていれば None."""
+    path = lock_path(queue_dir, report_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = path.open('a')  # noqa: SIM115 (lease の間は開いておく。閉じると lock が外れる)
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        return None
+    return f
 
 
 def base_row(project: str, task_id: str, report_id: str, worker: str, agent: str, status: str) -> dict:
@@ -147,10 +173,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--timeout', type=int, default=0, help='評価の時間上限 (秒, 0 で無制限)')
     args = parser.parse_args(argv)
-    if args.report_id in evaluated_ids(args.out):
-        return EXIT_DUPLICATE
-    row = run(args)
-    return EXIT_WRITTEN if append_row(args.out, row) else EXIT_DUPLICATE
+    lease = acquire_lease(args.queue_dir, args.report_id)
+    if lease is None:
+        return EXIT_BUSY
+    with lease:  # 確認・評価・追記をすべて lease の中で行う (終われば lease は外れる)
+        if args.report_id in evaluated_ids(args.out):
+            return EXIT_DUPLICATE
+        row = run(args)
+        return EXIT_WRITTEN if append_row(args.out, row) else EXIT_DUPLICATE
 
 
 if __name__ == '__main__':
