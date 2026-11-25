@@ -85,20 +85,23 @@ watchd は worker の report の配達を確定すると、その task を `scri
   (異常終了、起動失敗) と、上限 + 10 秒を過ぎても終わらないとき (kill する) は watchd が `error` 付きの行を書き、
   `watch.log` に `[WARN] task 評価に失敗` を出す。kill した子の終了は待たず、次のサイクル以降に回収する。kill から
   30 秒たっても回収できなければ `error` 付きの行と WARN を残して見放すが、見放した子も毎サイクル待たずに poll し、
-  終わったら回収する (zombie を残さない。追跡は 20 件まで、超えたら一番古い子を諦めて WARN)。どの場合も report の
+  終わったら回収する (zombie を残さない)。見放した子が 20 件たまったら、追跡は外さずに新しい評価の起動を止めて
+  WARN を出し、回収されて 20 件を下回ったら再開する。どの場合も report の
   配達・ledger の更新・通知は先に済んでいる。ledger の更新 (配達の確定) に失敗した report は評価しない
 - 起動を待つ評価はメモリにしか持たない (上限 20 件。溢れた分は捨てる)。代わりに watchd は起動直後と 5 分ごとに、
   ledger (`queue/.report_ledger.db`) の `deliveries.delivered_at` (配達を確定した時刻) が起点以後の report を
   配達の古い順に引き、`reports/archive/` の写しを読んで、最終 report で `task_evals.jsonl` に行が無いものを
   拾い直す。watchd の再起動で待っていた評価が消えても、溢れても、予約に失敗しても、次の見直しで評価される
-- 起点は `queue/.task_eval_since`。自動評価付きの watchd が起動したとき (最初の配達より前) に今の時刻を書いて作り、
-  既にあれば書き換えない (O_EXCL)。`WATCH_TASK_EVAL_SINCE` (TZ 付き ISO8601) を与えるとそちらを使う。
+- 起点は `queue/.task_eval_since`。自動評価付きの watchd が起動したときと、毎サイクルの配達の前に、無ければ作る。
+  書く値は作った時刻ではなく watchd の起動時刻で、既にあれば書き換えない (O_EXCL)。作れない間の見直しは、
+  メモリ上の起動時刻を起点に使う。どちらでも、その watchd が配達した report より後の起点にはならない。`WATCH_TASK_EVAL_SINCE` (TZ 付き ISO8601) を与えるとそちらを使う。
   前にずらせば過去の report を評価し直せる。`delivered_at` 列はこの機能で足したもので、それより前に配達した行は 0
   なので、起点をどこにずらしても拾わない。導入前かどうかは `delivered_at` だけで決め、写しの mtime や中身の時刻は
   見ないので、`reports/archive/` を cp / restore / touch しても対象は変わらない
 - 同じ report を同時に評価するのは 1 つの子だけ。子は評価の前に `queue/.task_eval_locks/<report_id>.lock` に
   非ブロックの flock を取り、取れなければ何もせずに終わる (同じ project を見る watchd が 2 つあっても重い評価は
-  1 回)。lock は子が終われば外れる。ファイルは消さずに残す (report 1 件に空のファイル 1 つ。残っていても害は無い)
+  1 回)。lock は子が終われば外れる。子はファイルを消さない。watchd の見直しのついでに、評価済み (`task_evals.jsonl`
+  に行がある) で 1 日触られていない lock を、flock を取れたときだけ消す (評価中の lock は消さない)
 - 子の実行中に watchd が止まっても、子は自分の時間上限まで走って行を書く。再起動後の見直しが同じ report を
   もう一度起動しても、lock と追記の直前の確認で 2 回目の評価・2 行目は起きない
 - `WATCH_TASK_EVAL=0` で止まる。出力先は `WATCH_TASK_EVALS_FILE` で変えられる (既定は watchd のある checkout の

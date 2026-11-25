@@ -8,10 +8,11 @@
   `squad/task_eval.py` を子プロセスで起動し、`scripts/eval_trajectory.py` の 1 task 分の評価に report_id / worker /
   agent / evaluated_at / error を足した 1 行を `metrics/task_evals.jsonl` に追記する。同じ report_id は 2 回書かない。
   評価の失敗・時間切れ (既定 300 秒) は `error` 付きの行で残し、配達は止めない。kill した子は待たずに次のサイクルで
-  回収し、見放した子も後で回収する。起動待ちの評価はメモリに持つが、watchd は起動直後と 5 分ごとに、ledger の
+  回収し、見放した子も追跡を外さずに後で回収する (20 件たまったら新しい評価の起動を止める)。起動待ちの評価はメモリに持つが、watchd は起動直後と 5 分ごとに、ledger の
   `deliveries` に足した `delivered_at` (配達を確定した時刻) が起点以後で行の無い report を `reports/archive/`
-  から拾い直す (再起動で消えた分・予約に失敗した分も評価される)。起点は `queue/.task_eval_since` (watchd の起動時に
-  作る) か `WATCH_TASK_EVAL_SINCE`。同じ report の評価は `queue/.task_eval_locks/` の flock で 1 つに絞る。`metrics/task_evals.jsonl` は gitignore した。反映には watchd の
+  から拾い直す (再起動で消えた分・予約に失敗した分も評価される)。起点は `queue/.task_eval_since` (値は
+  watchd の起動時刻) か `WATCH_TASK_EVAL_SINCE`。同じ report の評価は `queue/.task_eval_locks/` の flock で 1 つに絞り、
+  評価済みで 1 日触られていない lock は消す。`metrics/task_evals.jsonl` は gitignore した。反映には watchd の
   再起動が要る。`WATCH_TASK_EVAL=0` で止められる。
 - review 指摘の category 集計 (#136, Refs #130)。cross-review の指摘 (`findings` / `blocking` / `non_blocking` の
   どちらの書式も読む) と、worker report の `issues` のうち `category` を持つものを `scripts/review_category_tally.py`

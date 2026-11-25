@@ -436,7 +436,7 @@ def test_rescan_skips_reports_before_since(env: tuple[Watcher, Path, Path]) -> N
     cfg2 = Config(**{**w.cfg.__dict__, 'task_eval_enabled': True})
     w2 = Watcher(cfg=cfg2, tmux=FakeTmux('testsess'))
     w2.refresh_owned_projects()
-    w2.poll_task_evals()
+    w2.cycle()
     assert w2.task_eval_since_file.exists()  # 起点を記録した
     assert not w2._evals_waiting and not w2._evals_running  # noqa: SLF001
     assert not out.exists()
@@ -585,7 +585,7 @@ def test_since_file_is_not_overwritten(env: tuple[Watcher, Path, Path]) -> None:
     w.task_eval_since_file.write_text('2026-01-01T00:00:00+09:00\n')
     w.cycle()
     assert w.task_eval_since_file.read_text() == '2026-01-01T00:00:00+09:00\n'
-    assert w.ensure_task_eval_since() == watchd._parse_iso('2026-01-01T00:00:00+09:00')  # noqa: SLF001
+    assert w.task_eval_since() == watchd._parse_iso('2026-01-01T00:00:00+09:00')  # noqa: SLF001
 
 
 def test_failed_schedule_is_recovered_by_rescan_after_restart(
@@ -696,16 +696,37 @@ def test_abandoned_real_child_leaves_no_zombie(env: tuple[Watcher, Path, Path]) 
         os.waitpid(proc.pid, os.WNOHANG)  # 回収済み (zombie なら (pid, status) が返る)
 
 
-def test_abandoned_list_is_capped_with_warn(env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
-    w, _d, _out = env
+def test_full_abandoned_list_blocks_new_spawns_but_keeps_reaping(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """見放した子が上限まで溜まったら、追跡は外さず新しい評価を起動しない。回収されたら起動を再開する (R2)."""
+    w, d, _out = env
     logs: list[str] = []
     monkeypatch.setattr(w, 'log', logs.append)
     monkeypatch.setattr(watchd, 'TASK_EVAL_MAX_ABANDONED', 2)
+    spawned: list[object] = []
+    monkeypatch.setattr(watchd.subprocess, 'Popen', lambda *a, **_k: spawned.append(a) or _LateProc())
     jobs = [watchd.EvalJob(base={}, argv=[], proc=_LateProc()) for _ in range(3)]  # type: ignore[arg-type]
     for job in jobs:
         w._abandon_task_eval(job)  # noqa: SLF001
-    assert w._evals_abandoned == jobs[1:]  # noqa: SLF001
-    assert sum(m.startswith('[WARN] 見放した task 評価の子が') for m in logs) == 1
+    assert w._evals_abandoned == jobs  # noqa: SLF001 (上限を超えても追跡は外さない)
+    w._eval_rescan_at = time.monotonic() + 3600  # noqa: SLF001
+    _write(d)
+    w.report_bridge()
+    assert ID1 in w._evals_waiting  # noqa: SLF001
+    w.poll_task_evals()
+    w.poll_task_evals()
+    assert spawned == []  # 満杯の間は起動しない
+    assert ID1 in w._evals_waiting  # noqa: SLF001 (待ちは残す)
+    assert sum(m.startswith('[WARN] 終わらない task 評価の子が') for m in logs) == 1
+    jobs[0].proc.done = True  # type: ignore[attr-defined]  # 一番古い子が遅れて終わった
+    w.poll_task_evals()
+    assert w._evals_abandoned == jobs[1:]  # noqa: SLF001 (回収された)
+    assert spawned == []  # まだ 2 件 (上限) 残っている
+    jobs[1].proc.done = True  # type: ignore[attr-defined]
+    w.poll_task_evals()
+    assert w._evals_abandoned == jobs[2:]  # noqa: SLF001
+    assert len(spawned) == 1 and ID1 in w._evals_running  # noqa: SLF001 (上限を下回ったので起動を再開)
 
 
 def test_lease_allows_one_holder(tmp_path: Path) -> None:
@@ -744,3 +765,101 @@ def test_two_watchers_rescan_same_archive_evaluate_once(env: tuple[Watcher, Path
     assert counter.read_text().splitlines() == ['T1']  # evaluate は 1 回
     rows = _rows(out)
     assert [r['report_id'] for r in rows] == [ID1] and rows[0]['error'] is None
+
+
+# ---- PR #142 3rd review R1-R3 ----
+
+
+def test_since_value_is_watchd_start_even_if_creation_fails_first(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: 起点ファイルの作成と予約が同じサイクルで一度ずつ失敗しても、起点 > 配達時刻 にならず再起動後に評価される.
+
+    起点の値は起点ファイルを作れた時刻ではなく watchd の起動時刻。作れない間の再走査はメモリ上の起動時刻を使う。
+    """
+    w, d, out = env
+    w.cfg.task_eval_cmd = _fake(tmp_path_of(out), SLOW)  # 子は終わらないうちに watchd が止まる
+    since_file = str(w.task_eval_since_file)
+    real_open = watchd.os.open
+    fails = {'open': 1}
+
+    def flaky_open(path: object, *a: object, **k: object) -> int:
+        if str(path) == since_file and fails['open']:
+            fails['open'] -= 1
+            raise OSError('queue is read-only for a moment')
+        return real_open(path, *a, **k)
+
+    real_ids = task_eval.evaluated_ids
+    fails['ids'] = 1
+
+    def flaky_ids(path: Path) -> set[str]:
+        if fails['ids']:
+            fails['ids'] -= 1
+            raise OSError('metrics unreadable')
+        return real_ids(path)
+
+    monkeypatch.setattr(watchd.os, 'open', flaky_open)
+    monkeypatch.setattr(task_eval, 'evaluated_ids', flaky_ids)
+    _write(d)
+    time.sleep(0.05)  # 起動時刻と配達時刻の間を空ける
+    try:
+        w.cycle()  # 起点の作成に失敗 -> 配達 -> 予約に失敗 -> 再走査 (起動時刻を起点に使う)
+        assert not w.task_eval_since_file.exists()
+        assert w.ledger.is_delivered('pj', ID1)
+        assert ID1 in w._evals_running  # noqa: SLF001 (同じサイクルの再走査で拾った)
+        time.sleep(0.05)
+        w.cycle()  # 次のサイクルで起点ファイルを作る。値は起動時刻
+        since = watchd._parse_iso(w.task_eval_since_file.read_text().strip())  # noqa: SLF001
+        (at,) = w.ledger.delivered_since(['pj'], 0.0)[0][2:]
+        assert since is not None and since <= at  # 起点 > 配達時刻 にならない
+    finally:
+        _kill_all(w)  # 評価が終わる前に watchd が止まった
+    assert not out.exists()
+    w2 = _watcher_like(w, task_eval_cmd=list(watchd.Config().task_eval_cmd))  # 再起動
+    w2.cycle()
+    _drain(w2)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+
+
+def tmp_path_of(out: Path) -> Path:
+    return out.parent.parent
+
+
+def _lock(queue: Path, rid: str, age: float) -> Path:
+    p = task_eval.lock_path(queue, rid)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.touch()
+    t = time.time() - age
+    os.utime(p, (t, t))
+    return p
+
+
+def test_gc_removes_old_evaluated_locks_only(env: tuple[Watcher, Path, Path]) -> None:
+    """R3: 評価済みで古い lock は消え、評価中 (flock 保持)・新しい・未評価の lock は残る."""
+    w, _d, out = env
+    queue = w.cfg.queue_dir
+    id4 = '44444444-4444-4444-8444-444444444444'
+    day = watchd.TASK_EVAL_LOCK_TTL
+    for rid in (ID1, ID2, id4):
+        task_eval.append_row(out, task_eval.base_row('pj', 'T1', rid, 'worker1', 'claude', 'completed'))
+    old_done = _lock(queue, ID1, day + 60)
+    held = _lock(queue, ID2, day + 60)
+    fresh = _lock(queue, id4, 60)
+    not_done = _lock(queue, ID3, day + 60)
+    lease = task_eval.acquire_lease(queue, ID2)  # 評価中の子が持っている
+    os.utime(held, (time.time() - day - 60,) * 2)
+    try:
+        w.cfg.task_eval_since = SINCE_EARLY
+        w.poll_task_evals()  # 再走査のついでに消す
+    finally:
+        lease.close()  # type: ignore[union-attr]
+    assert not old_done.exists()
+    assert held.exists() and fresh.exists() and not_done.exists()
+
+
+def test_lease_refreshes_lock_mtime(tmp_path: Path) -> None:
+    p = _lock(tmp_path, ID1, 10 * 86400)
+    lease = task_eval.acquire_lease(tmp_path, ID1)
+    assert lease is not None
+    assert time.time() - p.stat().st_mtime < 60  # 評価を始めた時刻になる (GC の対象から外れる)
+    lease.close()  # type: ignore[attr-defined]

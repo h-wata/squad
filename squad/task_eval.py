@@ -15,9 +15,10 @@ scripts/eval_trajectory.py の evaluate() で 1 task 分を数え、report の�
   子が行を書けずに終わったときは watchd が error 行を書く (watchd.Watcher.poll_task_evals)。
 - 同じ report_id を同時に評価するのは 1 つの子だけ (N3)。子は評価の前に
   `<queue>/.task_eval_locks/<report_id>.lock` に非ブロックの flock を取り、取れなければ評価も追記もせず
-  EXIT_BUSY で終わる。lock は子が終われば (異常終了や kill でも) OS が外す。ファイルは消さずに残す
-  (report 1 件につき空のファイル 1 つ。残っていても lock は掛かっていないので害は無い。消すと、開いている
-  子と新しい子が別の inode を lock して二重に走る隙ができる)。
+  EXIT_BUSY で終わる。lock は子が終われば (異常終了や kill でも) OS が外す。子はファイルを消さない。
+  watchd の再走査が、評価済み (jsonl に行がある) で 1 日触られていない lock を、flock を取れたときだけ消す
+  (watchd.Watcher._gc_task_eval_locks)。評価済みなので、消した後に同じ report_id の子が来ても評価済みの確認で
+  何もせずに終わる。
 
 stdlib only (watchd から import する。eval_trajectory は watchd を import するので main() の中でだけ読む)。
 """
@@ -107,6 +108,8 @@ def acquire_lease(queue_dir: Path, report_id: str) -> object | None:
     except BlockingIOError:
         f.close()
         return None
+    with contextlib.suppress(OSError):
+        os.utime(path)  # 最後に評価を始めた時刻。watchd は評価済みで古い lock だけを消す (R3)
     return f
 
 

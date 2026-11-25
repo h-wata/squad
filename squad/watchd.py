@@ -376,7 +376,8 @@ TASK_EVAL_MAX_RUNNING = 2  # 同時に走らせる評価の子プロセス数 (l
 TASK_EVAL_MAX_WAITING = 20  # 起動待ちの上限。溢れた分は捨てて、次の再走査で reports/archive/ から拾い直す
 TASK_EVAL_KILL_GRACE = 10  # 子が自分の時間上限で行を書けなかったとき、watchd が kill するまでの猶予 (秒)
 TASK_EVAL_REAP_GRACE = 30  # kill した子がこの秒数 (monotonic) を過ぎても回収できなければ error 行を書いて見放す
-TASK_EVAL_MAX_ABANDONED = 20  # 見放した後も毎サイクル poll して回収する子の上限 (超えたら一番古いものを諦めて WARN)
+TASK_EVAL_MAX_ABANDONED = 20  # 見放した子がこの数まで溜まったら新しい評価を起動しない (追跡は外さない, R2)
+TASK_EVAL_LOCK_TTL = 86400  # 評価済みの lock ファイルを消すまでの、最後に触られてからの秒数 (R3)
 TASK_EVAL_RESCAN_SECONDS = 300  # 評価漏れの再走査の間隔 (monotonic)。watchd 起動後の最初の見回りでは必ず走る
 TASK_EVAL_STDERR_CHARS = 2000
 
@@ -634,6 +635,8 @@ class Watcher:
         self._eval_overflow_warned = False
         self._eval_since: float | None = None  # queue/.task_eval_since の値 (読めたら覚えておく)
         self._eval_since_warned = False
+        self._eval_started_at = self.wall()  # 起点ファイルが無いときの起点。起動時に 1 回だけ取る (R1)
+        self._eval_abandoned_warned = False
         # kill 後に回収できず見放した子 (N2)。error 行は書き済み。毎サイクル poll して、終わったら回収する
         self._evals_abandoned: list[EvalJob] = []
         # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
@@ -1058,14 +1061,13 @@ class Watcher:
     def task_eval_since_file(self) -> Path:
         return self.cfg.queue_dir / '.task_eval_since'
 
-    def ensure_task_eval_since(self) -> float:
-        """再走査で拾う report の起点 (epoch 秒) を決める. 起点より前に配達した report は再走査では評価しない.
+    def task_eval_since(self) -> float:
+        """再走査で拾う report の起点 (epoch 秒). 起点より前に配達した report は再走査では評価しない (R1).
 
-        WATCH_TASK_EVAL_SINCE (ISO8601) があればそれ。無ければ queue/.task_eval_since。ファイルも無ければ
-        今の時刻 (マイクロ秒まで) を書いて作る。全 session の watchd が同じファイルを使い、O_EXCL で作るので
-        最初に作った値が残る。watchd は起動時と毎サイクルの report_bridge() の前に呼ぶ (N1)。こうすると、
-        自動評価付きの watchd が配達した report の ledger の delivered_at は必ず起点以後になり、
-        予約に失敗した report も再走査で拾える。一度決めた値はこの watcher の中で覚えておく。
+        WATCH_TASK_EVAL_SINCE (ISO8601) があればそれ。無ければ queue/.task_eval_since の値。ファイルが無い・
+        読めない間は、この watchd の起動時刻 (__init__ で 1 回だけ取る) を使う。この watchd が配達した report の
+        delivered_at は必ず起動時刻より後なので、ファイルを作れなくても「起点 > 配達時刻」にはならない。
+        ここではファイルを作らない (作るのは _prepare_task_eval_since だけ)。
         """
         if self.cfg.task_eval_since:
             ts = _parse_iso(self.cfg.task_eval_since)
@@ -1078,35 +1080,49 @@ class Watcher:
             return self._eval_since
         path = self.task_eval_since_file
         try:
+            text = path.read_text(encoding='utf-8').strip()
+        except FileNotFoundError:
+            return self._eval_started_at
+        except OSError as e:
+            self.log(f'[WARN] {path} を読めないので watchd の起動時刻を起点にする: {e}')
+            return self._eval_started_at
+        ts = _parse_iso(text)
+        if ts is None:
+            self.log(f'[WARN] {path} を ISO8601 として読めないので watchd の起動時刻を起点にする')
+            return self._eval_started_at
+        self._eval_since = ts
+        return ts
+
+    def _prepare_task_eval_since(self) -> None:
+        """起点ファイル queue/.task_eval_since が無ければ、この watchd の起動時刻を書いて作る (N1 / R1).
+
+        watchd の起動時と、毎サイクルの report_bridge() の前に呼ぶ。値は作った時刻ではなく起動時刻なので、
+        作るのが何サイクル遅れても、この watchd が配達した report より後の起点にはならない。既にあれば
+        書き換えない (O_EXCL。全 session の watchd で最初に作った値が残る)。作れなくても配達は止めず、
+        次のサイクルで作り直す (その間の再走査は task_eval_since() がメモリ上の起動時刻を使う)。
+        """
+        if not self.cfg.task_eval_enabled or self._eval_since is not None:
+            return
+        path = self.task_eval_since_file
+        stamp = datetime.fromtimestamp(self._eval_started_at).astimezone().isoformat(timespec='microseconds')
+        try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         except FileExistsError:
-            ts = _parse_iso(path.read_text(encoding='utf-8').strip())
-            if ts is None:
-                raise ValueError(f'{path} を ISO8601 として読めません') from None
-            self._eval_since = ts
-            return ts
-        now = self.wall()
-        stamp = datetime.fromtimestamp(now).astimezone().isoformat(timespec='microseconds')
+            self.task_eval_since()  # 既にある値を読んで覚える
+            return
+        except OSError as e:
+            self.log(f'[WARN] task 評価の起点を記録できません (次のサイクルで再試行、それまでは起動時刻を使う): {e}')
+            return
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(stamp + '\n')
         self.log(f'task 評価の再走査の起点を記録: {path} ({stamp})')
-        self._eval_since = _parse_iso(stamp) or now
-        return self._eval_since
-
-    def _prepare_task_eval_since(self) -> None:
-        """起動時と毎サイクルの report_bridge() の前に起点を決めておく. 失敗しても配達は止めない."""
-        if not self.cfg.task_eval_enabled or self._eval_since is not None:
-            return
-        try:
-            self.ensure_task_eval_since()
-        except Exception as e:  # noqa: BLE001 (起点を作れなくても配達は続ける。次のサイクルで再試行)
-            self.log(f'[WARN] task 評価の起点を決められません (次のサイクルで再試行): {e}')
+        self._eval_since = _parse_iso(stamp)
 
     def rescan_task_evals(self) -> None:
         """配達済みで task_evals.jsonl に行の無い最終 report を拾い直す (F1 / N1 / N4).
 
         待ち行列はメモリにしか無いので、watchd が再起動すると待っていた評価は消え、配達済みの report は
-        再配達されない。そこで ledger の deliveries から、起点 (ensure_task_eval_since) 以後に delivered にした
+        再配達されない。そこで ledger の deliveries から、起点 (task_eval_since) 以後に delivered にした
         report を配達の古い順に引き、配達時に写した reports/archive/<task_id>__<report_id>.yaml を読んで
         予約し直す。導入前の report かどうかは ledger の delivered_at だけで決め、写しの mtime や中身の時刻は
         見ない (写しを cp / restore / touch しても対象は変わらない)。delivered_at の無い行 (列を足す前の配達、
@@ -1116,7 +1132,7 @@ class Watcher:
         """
         if not self.cfg.task_eval_enabled:
             return
-        since = self.ensure_task_eval_since()
+        since = self.task_eval_since()
         evaluated = task_eval.evaluated_ids(self.cfg.task_evals_file)
         by_name = {d.name: d for d in self.owned}
         added = 0
@@ -1143,6 +1159,37 @@ class Watcher:
                 break
         if added:
             self.log(f'task 評価の漏れを再走査で {added} 件拾い直した')
+        self._gc_task_eval_locks(evaluated)
+
+    def _gc_task_eval_locks(self, evaluated: set[str]) -> None:
+        """評価済みで TASK_EVAL_LOCK_TTL 秒以上触られていない lock ファイルを消す (R3).
+
+        消すのは、report_id の行が task_evals.jsonl にあり、非ブロックの flock を取れたものだけ
+        (評価中の子が持っている lock は消さない)。flock を持ったまま消すので、消した後に同じ report_id の子が
+        来ても新しいファイルを lock し、評価済みの確認で何もせずに終わる。
+        """
+        lock_dir = self.cfg.queue_dir / task_eval.LOCK_DIR_NAME
+        if not evaluated or not lock_dir.is_dir():
+            return
+        cutoff = self.wall() - TASK_EVAL_LOCK_TTL
+        removed = 0
+        for p in lock_dir.glob('*.lock'):
+            if p.stem not in evaluated:
+                continue
+            try:
+                if p.stat().st_mtime > cutoff:
+                    continue
+                with p.open('a') as f:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue  # 評価中
+                    p.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        if removed:
+            self.log(f'評価済みの task 評価の lock を {removed} 件消した')
 
     def _task_eval_failed(self, report_id: str, job: EvalJob, error: str) -> None:
         """子が行を書けなかった評価を error 行で残す (同じ report_id の行があれば書かない)."""
@@ -1163,15 +1210,8 @@ class Watcher:
             return ''
 
     def _abandon_task_eval(self, job: EvalJob) -> None:
-        """回収できない子を見放し中の一覧に移す (N2). 一覧が上限なら一番古いものの追跡をやめて WARN."""
+        """回収できない子を見放し中の一覧に移す (N2). 一覧からは終わるまで外さない (R2)."""
         self._evals_abandoned.append(job)
-        if len(self._evals_abandoned) > TASK_EVAL_MAX_ABANDONED:
-            old = self._evals_abandoned.pop(0)
-            pid = getattr(old.proc, 'pid', '?')
-            self.log(
-                f'[WARN] 見放した task 評価の子が {TASK_EVAL_MAX_ABANDONED} 件を超えたので、一番古い子 (pid={pid}) の'
-                '回収をやめます (終わらない子が残っていないか確認してください)'
-            )
 
     def _reap_abandoned_task_evals(self) -> None:
         """見放した子を待たずに poll し、終わっていたら回収する (zombie を残さない, N2)."""
@@ -1231,6 +1271,17 @@ class Watcher:
             del self._evals_running[report_id]
         if not self._evals_waiting:
             self._eval_overflow_warned = False
+        if self._evals_waiting and len(self._evals_abandoned) >= TASK_EVAL_MAX_ABANDONED:
+            # 見放した子が上限まで溜まった間は新しい評価を起動しない (R2)。待ちはそのまま残し、溢れた分は
+            # jsonl に行が無いので次の再走査で拾われる
+            if not self._eval_abandoned_warned:
+                self._eval_abandoned_warned = True
+                self.log(
+                    f'[WARN] 終わらない task 評価の子が {len(self._evals_abandoned)} 件あるので、'
+                    '新しい評価を起動しない (回収されたら再開する。残っている子を確認してください)'
+                )
+            return
+        self._eval_abandoned_warned = False
         while self._evals_waiting and len(self._evals_running) < TASK_EVAL_MAX_RUNNING:
             report_id = next(iter(self._evals_waiting))
             job = self._evals_waiting.pop(report_id)
