@@ -10,14 +10,21 @@
 同じ report (配達前の `worker4_review.yaml` と reports/archive/ の写し) は report_id (無ければ中身のハッシュ) で
 1 件にする。category は語彙 (VOCABULARY) の外の値もそのまま数える。
 
-category ごとに 件数 / 初出 / 直近 / 該当 PR を出す。日時は report の `completed_at`、無ければファイルの mtime
-(mtime は archive への写しで進むことがあるので近似。表の下に注記する)。
+指摘は 1 件ずつ blocking / non_blocking / 確認項目 (check) に分ける (classify)。確認項目は「指摘ではなく
+確かめた項目」(`result: pass` / `status: resolved` / `severity: info` 等) で、失敗には数えない。
+判定の順は classify の docstring に書く。
+
+category ごとに task 数 / blocking / non_blocking / 確認項目 / 初出 / 直近 / 該当 PR を出す。task 数は失敗
+(blocking + non_blocking) を出した distinct task_id の数で、同じ task の中の複数の指摘は 1 と数える (SQUAD-406)。
+初出 / 直近 / PR は失敗から出す (失敗が無い category だけ確認項目から)。日時は report の `completed_at`、
+無ければファイルの mtime (mtime は archive への写しで進むことがあるので近似。表の下に注記する)。
 
 使い方:
   review_category_tally.py [--queue-dir <queue>] [--json] [--inbox <_inbox.md>]
 
-`--inbox` を付けると、同じ category (uncategorized 以外) が 2 件以上になったものを `queue/_inbox.md` に
-チェック化の候補として 1 行ずつ足す。行には `category:<name>` の印を入れ、同じ印の行が既にあれば足さない。
+`--inbox` を付けると、同じ category (uncategorized 以外) の失敗が別々の task_id で 2 つ以上になったものを
+`queue/_inbox.md` にチェック化の候補として 1 行ずつ足す。行には `category:<name>` の印を入れ、同じ印の行が既にあれば
+(`- [x]` で閉じた行も) 足さない。
 `squad graph sync` も同じ集計を `queue/.graph.db` の `review_categories` 表に書く (web dashboard の読み元)。
 """
 
@@ -50,6 +57,16 @@ VOCABULARY = (
 )
 UNCATEGORIZED = 'uncategorized'
 FINDING_KEYS = ('findings', 'blocking', 'non_blocking')
+BLOCKING, NON_BLOCKING, CHECK = 'blocking', 'non_blocking', 'check'
+KINDS = (BLOCKING, NON_BLOCKING, CHECK)
+CANDIDATE_TASKS = 2  # この数の distinct task_id で失敗した category を inbox の候補にする
+# 実データ (reports/ と archive/ の review) に出てくる値。小文字・空白と `_` を `-` にしてから比べる
+_CHECK_RESULTS = ('pass',)  # result が pass / pass_with_comment(s) なら確認項目
+_FAIL_RESULTS = ('fail',)
+_CHECK_STATUSES = ('resolved', 'verified')  # resolved / resolved (no regression) / resolved_for_single_watcher 等
+_OPEN_STATUSES = ('open', 'partial', 'partially-resolved', 'unresolved')
+_CHECK_SEVERITIES = ('info', 'none', 'resolved')
+_BLOCKING_SEVERITIES = ('blocking', 'critical', 'major', 'high')
 PR_LIMIT = 3  # 表に出す PR の数。残りは「他 N 件」
 _LOADER = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
@@ -97,6 +114,61 @@ def _category(item: object) -> str:
     return _s(item.get('category')) if isinstance(item, dict) else ''
 
 
+def _norm(value: object) -> str:
+    return re.sub(r'[\s_]+', '-', _s(value).lower())
+
+
+def _flag(value: object) -> bool | None:
+    """Bool と 'true' / 'false' の文字列を bool にする. それ以外は None."""
+    if isinstance(value, bool):
+        return value
+    return {'true': True, 'false': False}.get(_norm(value))
+
+
+def classify(item: object, key: str) -> str:
+    """指摘 1 件を blocking / non_blocking / check に分ける. key は指摘が入っていた配列の名前.
+
+    確認項目 (check) かどうかを先に決め、失敗なら blocking / non_blocking を決める:
+      1. `result` が pass で始まる (pass / pass_with_comment(s)) → check。fail で始まる → 失敗
+      2. `resolved: true` か、`status` が resolved / verified で始まる → check (前回の指摘の解消確認)。
+         `status` が open / partial 等なら失敗
+      3. `severity` が info / none / resolved で始まる → check (指摘ではなく所見)
+      4. 残りは失敗。トップレベルの `blocking` / `non_blocking` 配列はその名前で分ける。`findings` の要素は
+         `blocking: true|false` があればそれ、無ければ severity が blocking / critical / major / high なら blocking、
+         それ以外 (minor / nit / suggestion / non-blocking / 無し) は non_blocking
+    文字列だけの要素は 4 のみ (配列の名前で分け、findings なら non_blocking)。
+    """
+    if isinstance(item, dict):
+        result, status, severity = _norm(item.get('result')), _norm(item.get('status')), _norm(item.get('severity'))
+        if result.startswith(_CHECK_RESULTS):
+            return CHECK
+        failed = result.startswith(_FAIL_RESULTS) or status.startswith(_OPEN_STATUSES)
+        if not failed and (_flag(item.get('resolved')) or status.startswith(_CHECK_STATUSES)):
+            return CHECK
+        if not failed and severity.startswith(_CHECK_SEVERITIES):
+            return CHECK
+    if key in (BLOCKING, NON_BLOCKING):
+        return key
+    if not isinstance(item, dict):
+        return NON_BLOCKING
+    if (flag := _flag(item.get('blocking'))) is not None:
+        return BLOCKING if flag else NON_BLOCKING
+    return BLOCKING if _norm(item.get('severity')).startswith(_BLOCKING_SEVERITIES) else NON_BLOCKING
+
+
+def _findings(data: dict[str, Any]) -> list[tuple[object, str]]:
+    """(指摘, 入っていた配列の名前). findings の下の入れ子 blocking / non_blocking はその名前を使う."""
+    out: list[tuple[object, str]] = []
+    for key in FINDING_KEYS:
+        value = data.get(key)
+        if isinstance(value, dict):
+            out += [(item, sub) for sub in (BLOCKING, NON_BLOCKING) for item in _items(value.get(sub))]
+            out += [(item, key) for item in _items(value.get('findings'))]
+        else:
+            out += [(item, key) for item in _items(value)]
+    return out
+
+
 def collect(queue_dir: Path) -> list[dict[str, Any]]:
     """Category 付きの出現を 1 件 1 要素で返す. YAML は読むだけで書き換えない."""
     entries: list[dict[str, Any]] = []
@@ -124,36 +196,64 @@ def collect(queue_dir: Path) -> list[dict[str, Any]]:
             'approx': at is None,
         }
         if is_review(path, data):
-            for item in (i for k in FINDING_KEYS for i in _items(data.get(k))):
-                entries.append({**base, 'category': _category(item) or UNCATEGORIZED, 'source': 'review'})
+            for item, k in _findings(data):
+                entries.append(
+                    {
+                        **base,
+                        'category': _category(item) or UNCATEGORIZED,
+                        'kind': classify(item, k),
+                        'source': 'review',
+                    }
+                )
         elif _s(data.get('status')):
+            # worker の report の issues は review の指摘ではない。severity / blocking を書いていなければ non_blocking
             issues = data.get('issues')
             for item in issues if isinstance(issues, list) else []:
                 if category := _category(item):
-                    entries.append({**base, 'category': category, 'source': 'report'})
+                    entries.append(
+                        {**base, 'category': category, 'kind': classify(item, 'issues'), 'source': 'report'}
+                    )
     return entries
 
 
+def sort_key(row: dict[str, Any]) -> tuple[bool, int, int, str]:
+    """Task 数の多い順、同じなら失敗件数の多い順。uncategorized は最後 (squad/web.py も同じ規則で並べる)."""
+    return (
+        row['category'] == UNCATEGORIZED,
+        -row['task_count'],
+        -row['blocking'] - row['non_blocking'],
+        row['category'],
+    )
+
+
 def tally(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Category ごとの 件数 / 初出 / 直近 / 該当 PR / task. 件数の多い順で、uncategorized は最後."""
+    """Category ごとの task 数 / blocking / non_blocking / 確認項目 / 初出 / 直近 / 該当 PR / task.
+
+    task 数と tasks は失敗 (blocking + non_blocking) を出した distinct task_id。確認項目は件数だけ数える。
+    """
     groups: dict[str, list[dict[str, Any]]] = {}
     for e in entries:
         groups.setdefault(e['category'], []).append(e)
     rows = []
     for category, es in groups.items():
         es.sort(key=lambda e: e['at'])
+        failures = [e for e in es if e['kind'] != CHECK]
+        basis = failures or es  # 初出 / 直近 / PR は失敗から。失敗の無い category だけ確認項目から
+        tasks = list(dict.fromkeys(e['task_id'] for e in failures))
         rows.append(
             {
                 'category': category,
-                'count': len(es),
-                'first_seen': es[0]['at'],
-                'last_seen': es[-1]['at'],
-                'prs': list(dict.fromkeys(e['pr_url'] for e in es if e['pr_url'])),
-                'tasks': list(dict.fromkeys(e['task_id'] for e in es)),
-                'approx': any(e['approx'] for e in es),
+                'task_count': len(tasks),
+                **{kind: sum(e['kind'] == kind for e in es) for kind in (BLOCKING, NON_BLOCKING)},
+                'checks': sum(e['kind'] == CHECK for e in es),
+                'first_seen': basis[0]['at'],
+                'last_seen': basis[-1]['at'],
+                'prs': list(dict.fromkeys(e['pr_url'] for e in failures if e['pr_url'])),
+                'tasks': tasks,
+                'approx': any(e['approx'] for e in basis),
             }
         )
-    rows.sort(key=lambda r: (r['category'] == UNCATEGORIZED, -r['count'], r['category']))
+    rows.sort(key=sort_key)
     return rows
 
 
@@ -163,14 +263,18 @@ def _pr_label(url: str) -> str:
 
 
 def render_markdown(rows: list[dict[str, Any]]) -> list[str]:
-    lines = ['| category | 件数 | 初出 | 直近 | PR |', '|---|---|---|---|---|']
+    lines = [
+        '| category | task 数 | blocking | non_blocking | 確認項目 | 初出 | 直近 | PR |',
+        '|---|---|---|---|---|---|---|---|',
+    ]
     for r in rows:
         prs = ', '.join(_pr_label(p) for p in r['prs'][:PR_LIMIT]) or '-'
         if len(r['prs']) > PR_LIMIT:
             prs += f' 他 {len(r["prs"]) - PR_LIMIT} 件'
         mark = '*' if r['approx'] else ''
         lines.append(
-            f'| {r["category"]} | {r["count"]} | {r["first_seen"][:10]}{mark} | {r["last_seen"][:10]}{mark} | {prs} |'
+            f'| {r["category"]} | {r["task_count"]} | {r["blocking"]} | {r["non_blocking"]} | {r["checks"]} | '
+            f'{r["first_seen"][:10]}{mark} | {r["last_seen"][:10]}{mark} | {prs} |'
         )
     if any(r['approx'] for r in rows):
         lines += ['', '* completed_at の無い report を含み、日付はファイルの mtime による近似']
@@ -182,12 +286,14 @@ def marker(category: str) -> str:
 
 
 def append_inbox(inbox: Path, rows: list[dict[str, Any]]) -> list[str]:
-    """2 件以上になった category を inbox に 1 行ずつ足し、足した行を返す (同じ印の行があれば足さない).
+    """別々の task で 2 回以上失敗した category を inbox に 1 行ずつ足し、足した行を返す.
 
+    同じ task の中の複数の指摘は 1 回と数える (task_count)。同じ印の行があれば、`- [x]` で閉じた行でも足さない
+    (誤検知として閉じた候補が sync のたびに戻らないように)。
     印は backtick で囲んで完全一致で探す (`category:stale-state-x` の行は `stale-state` の印とみなさない)。
     複数の watchd が同時に sync しても二重に足さないよう、確認から追記までファイルをロックする。
     """
-    due = [r for r in rows if r['category'] != UNCATEGORIZED and r['count'] >= 2]
+    due = [r for r in rows if r['category'] != UNCATEGORIZED and r['task_count'] >= CANDIDATE_TASKS]
     if not due:
         return []
     inbox.parent.mkdir(parents=True, exist_ok=True)
@@ -201,7 +307,8 @@ def append_inbox(inbox: Path, rows: list[dict[str, Any]]) -> list[str]:
                 continue
             tasks = ' / '.join(r['tasks'][:PR_LIMIT])
             added.append(
-                f'- [ ] [review-category] category `{r["category"]}` の指摘が {r["count"]} 件 ({tasks})。'
+                f'- [ ] [review-category] category `{r["category"]}` の失敗が {r["task_count"]} task で '
+                f'{r["blocking"] + r["non_blocking"]} 件 ({tasks})。'
                 f'チェック化の候補  {marker(r["category"])}'
             )
         if added:
@@ -218,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--queue-dir', type=Path, default=QUEUE_ROOT / 'queue')
     parser.add_argument('--json', action='store_true', help='Markdown の代わりに JSON を出す')
     parser.add_argument(
-        '--inbox', type=Path, help='2 件目に達した category を候補として足す inbox (queue/_inbox.md 等)'
+        '--inbox', type=Path, help='2 task 目で失敗した category を候補として足す inbox (queue/_inbox.md 等)'
     )
     args = parser.parse_args(argv)
     rows = tally(collect(args.queue_dir))

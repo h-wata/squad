@@ -243,7 +243,8 @@ report に記録しておくと `scripts/measure_task_cost.py` が
 
 `issues` の要素と cross-review の指摘には、任意で `category` を 1 つ書ける (#136)。
 `scripts/review_category_tally.py` と `squad graph sync` が category ごとに数え、web dashboard の
-「review 指摘」タブに出す。同じ category が 2 件になると `queue/_inbox.md` にチェック化の候補が 1 行入る。
+「review 指摘」タブに出す。同じ category の失敗が別々の task で 2 回出ると `queue/_inbox.md` にチェック化の
+候補が 1 行入る (同じ task の中の複数の指摘は 1 回と数え、`result: pass` 等の確認項目は失敗に数えない)。
 category を付けたい `issues` の要素は文字列ではなく次の形にする。category の無い `issues` は数えない。
 
 ```yaml

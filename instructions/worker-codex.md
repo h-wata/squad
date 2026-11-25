@@ -96,8 +96,9 @@ criteria が検証形式を指定していればそちらを優先する。自�
 5. `queue/projects/<project>/reports/worker4_review.yaml` に結果を書く。
 
 `category` は `scripts/review_category_tally.py` と `squad graph sync` が数え、web dashboard の
-「review 指摘」タブに出す (#136)。同じ category が 2 件になると `queue/_inbox.md` にチェック化の
-候補が 1 行入る。当てはまらなければ `other` にする。付けなかった指摘は `uncategorized` として数える。
+「review 指摘」タブに出す (#136)。同じ category の失敗が別々の task で 2 回出ると `queue/_inbox.md` に
+チェック化の候補が 1 行入る (同じ task の中の複数の指摘は 1 回と数え、`result: pass` 等の確認項目は失敗に
+数えない)。当てはまらなければ `other` にする。付けなかった指摘は `uncategorized` として数える。
 
 | category | 意味 |
 |---|---|
