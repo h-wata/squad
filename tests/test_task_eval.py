@@ -9,6 +9,7 @@ transcript は tmp の HOME 下の ~/.claude/projects に置き、子プロセ�
 from __future__ import annotations
 
 import json
+import sqlite3
 import os
 from pathlib import Path
 import sys
@@ -201,7 +202,9 @@ def test_timeout_does_not_block_delivery(
     assert _delivered(w)
     job = next(iter(w._evals_running.values()))  # noqa: SLF001
     time.sleep(1.2)
-    w.poll_task_evals()
+    w.poll_task_evals()  # kill する (待たない)
+    assert job.killed_at is not None
+    _drain(w, limit=10)  # 次の見回り以降で回収する
     assert job.proc.poll() is not None  # kill された
     rows = _rows(out)
     assert len(rows) == 1 and rows[0]['error'].startswith('timeout')
@@ -298,3 +301,223 @@ def test_run_records_own_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     row = task_eval.run(_args(tmp_path, timeout=1))
     assert time.monotonic() - t0 < 3
     assert row['error'].startswith('timeout')
+
+
+# ---- PR #142 review F1-F3 ----
+
+ID3 = '33333333-3333-4333-8333-333333333333'
+SINCE_EARLY = '2000-01-01T00:00:00+00:00'
+SLOW = 'import time\ntime.sleep(30)\n'
+
+
+def _write_many(d: Path, ids: list[str]) -> None:
+    """worker1..N の最終 report を 1 件ずつ書く (task はどれも T1)."""
+    for n, rid in enumerate(ids, 1):
+        _write(d, report_id=rid, name=f'worker{n}_report.yaml')
+
+
+def _kill_all(*ws: Watcher) -> None:
+    for w in ws:
+        for job in w._evals_running.values():  # noqa: SLF001
+            if job.proc is not None and job.proc.poll() is None:
+                job.proc.kill()
+                job.proc.wait()
+
+
+class _StuckProc:
+    """kill しても終わらない子 (回収できない状態). wait は timeout まで待って TimeoutExpired を投げる."""
+
+    def __init__(self) -> None:
+        self.killed = False
+
+    def poll(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> None:
+        time.sleep(timeout or 0)
+        raise watchd.subprocess.TimeoutExpired('stuck', timeout or 0)
+
+
+def _stuck_job(w: Watcher) -> tuple[watchd.EvalJob, _StuckProc]:
+    proc = _StuckProc()
+    job = watchd.EvalJob(
+        base=task_eval.base_row('pj', 'T1', ID1, 'worker1', 'claude', 'completed'),
+        argv=[],
+        proc=proc,  # type: ignore[arg-type]
+        started=w.mono() - w.cfg.task_eval_timeout - watchd.TASK_EVAL_KILL_GRACE - 1,  # 上限を過ぎている
+    )
+    w._evals_running[ID1] = job  # noqa: SLF001
+    w._eval_rescan_at = w.mono() + 3600  # noqa: SLF001 (再走査はこのテストの対象外)
+    return job, proc
+
+
+def test_running_is_capped_at_max(env: tuple[Watcher, Path, Path], tmp_path: Path) -> None:
+    """同時に走る評価は 2 件まで。残りは待つ (上限を変えたら落ちる)."""
+    w, d, _out = env
+    w.cfg.task_eval_cmd = _fake(tmp_path, SLOW)
+    _write_many(d, [ID1, ID2, ID3])
+    try:
+        w.report_bridge()
+        w.poll_task_evals()
+        assert len(w._evals_running) == 2  # noqa: SLF001
+        assert list(w._evals_waiting) == [ID3]  # noqa: SLF001
+        w.poll_task_evals()
+        assert len(w._evals_running) == 2  # noqa: SLF001 (終わるまで 3 件目は起動しない)
+    finally:
+        _kill_all(w)
+
+
+def test_waiting_survives_restart_via_rescan(env: tuple[Watcher, Path, Path], tmp_path: Path) -> None:
+    """3 件を同時に配達し 1 件が上限で待っている間に watchd を作り直しても、各 report_id がちょうど 1 行になる (F1)."""
+    w, d, out = env
+    w.cfg.task_eval_since = SINCE_EARLY
+    w.cfg.task_eval_cmd = _fake(tmp_path, SLOW)
+    _write_many(d, [ID1, ID2, ID3])
+    try:
+        w.report_bridge()
+        w.poll_task_evals()
+        assert list(w._evals_waiting) == [ID3]  # noqa: SLF001
+    finally:
+        _kill_all(w)  # 再起動: 走っていた評価も待っていた評価も失われる (行は 1 つも書かれていない)
+    assert not out.exists()
+    cfg2 = Config(**{**w.cfg.__dict__, 'task_eval_cmd': list(watchd.Config().task_eval_cmd)})
+    w2 = Watcher(cfg=cfg2, tmux=FakeTmux('testsess'))
+    w2.refresh_owned_projects()
+    w2.report_bridge()
+    assert not w2._evals_waiting  # noqa: SLF001 (配達済みなので再配達・再予約は起きない)
+    deadline = time.monotonic() + 60
+    while len(_rows(out)) < 3:
+        assert time.monotonic() < deadline, _rows(out)
+        w2.poll_task_evals()
+        w2._eval_rescan_at = 0.0  # noqa: SLF001 (次の見回りでも再走査する)
+        time.sleep(0.05)
+    _drain(w2)
+    w2._eval_rescan_at = 0.0  # noqa: SLF001
+    w2.poll_task_evals()  # もう一度再走査しても行は増えない
+    _drain(w2)
+    assert sorted(r['report_id'] for r in _rows(out)) == sorted([ID1, ID2, ID3])
+
+
+def test_waiting_queue_is_capped_and_overflow_is_rescanned(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """待ち行列は上限まで。溢れた分は捨てず、次の再走査で拾い直す (F1)."""
+    w, d, out = env
+    monkeypatch.setattr(watchd, 'TASK_EVAL_MAX_WAITING', 1)
+    w.cfg.task_eval_since = SINCE_EARLY
+    _write_many(d, [ID1, ID2, ID3])
+    w.report_bridge()
+    assert len(w._evals_waiting) == 1  # noqa: SLF001 (2 件は溢れた)
+    deadline = time.monotonic() + 60
+    while len(_rows(out)) < 3:
+        assert time.monotonic() < deadline, _rows(out)
+        assert len(w._evals_waiting) <= 1  # noqa: SLF001
+        w.poll_task_evals()
+        w._eval_rescan_at = 0.0  # noqa: SLF001
+        time.sleep(0.05)
+    assert sorted(r['report_id'] for r in _rows(out)) == sorted([ID1, ID2, ID3])
+
+
+def test_rescan_skips_reports_before_since(env: tuple[Watcher, Path, Path]) -> None:
+    """自動評価を入れる前の report は再走査で評価しない (起点は queue/.task_eval_since)."""
+    w, d, out = env
+    w.cfg.task_eval_enabled = False  # 導入前の watchd が配達した
+    _write(d)
+    w.report_bridge()
+    for p in (d / 'reports' / 'archive').glob('*.yaml'):
+        os.utime(p, (START, START))  # 写しの mtime = 元の report の mtime (導入前)
+    cfg2 = Config(**{**w.cfg.__dict__, 'task_eval_enabled': True})
+    w2 = Watcher(cfg=cfg2, tmux=FakeTmux('testsess'))
+    w2.refresh_owned_projects()
+    w2.poll_task_evals()
+    assert w2.task_eval_since_file.exists()  # 初回の再走査で起点を記録した
+    assert not w2._evals_waiting and not w2._evals_running  # noqa: SLF001
+    assert not out.exists()
+    # 起点を前にずらせば (WATCH_TASK_EVAL_SINCE) 拾う
+    w2.cfg.task_eval_since = SINCE_EARLY
+    w2._eval_rescan_at = 0.0  # noqa: SLF001
+    w2.poll_task_evals()
+    _drain(w2)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+
+
+def test_rescan_skips_undelivered_reports(env: tuple[Watcher, Path, Path]) -> None:
+    """Archive に写しがあっても ledger で配達済みでなければ評価しない."""
+    w, d, out = env
+    w.cfg.task_eval_since = SINCE_EARLY
+    arch = d / 'reports' / 'archive'
+    arch.mkdir()
+    (arch / f'T1__{ID1}.yaml').write_text(f'report_id: "{ID1}"\ntask_id: T1\nstatus: completed\n')
+    w.poll_task_evals()
+    assert not w._evals_waiting and not w._evals_running  # noqa: SLF001
+    assert not out.exists()
+
+
+def test_poll_returns_immediately_after_kill(env: tuple[Watcher, Path, Path]) -> None:
+    """時間切れの子を kill した後、終了を待たずにすぐ戻る (F2)."""
+    w, _d, out = env
+    job, proc = _stuck_job(w)
+    t0 = time.monotonic()
+    w.poll_task_evals()
+    assert time.monotonic() - t0 < 0.5
+    assert proc.killed and job.killed_at is not None
+    assert ID1 in w._evals_running  # noqa: SLF001 (次の見回りで回収する)
+    assert not out.exists()
+    t0 = time.monotonic()
+    w.poll_task_evals()  # 回収を待つ見回りもすぐ戻る
+    assert time.monotonic() - t0 < 0.5
+
+
+def test_unreapable_child_writes_error_row_and_warns(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill 後も回収できない状態が TASK_EVAL_REAP_GRACE を過ぎたら error 行 + WARN を残して見放す (F2)."""
+    w, _d, out = env
+    logs: list[str] = []
+    monkeypatch.setattr(w, 'log', logs.append)
+    monkeypatch.setattr(watchd, 'TASK_EVAL_REAP_GRACE', 0)
+    _stuck_job(w)
+    w.poll_task_evals()  # kill
+    assert not out.exists()
+    w.poll_task_evals()  # 回収できないまま猶予を過ぎた
+    assert ID1 not in w._evals_running  # noqa: SLF001
+    rows = _rows(out)
+    assert len(rows) == 1 and rows[0]['error'].startswith('timeout: kill 後')
+    assert any(m.startswith('[WARN] task 評価に失敗') for m in logs)
+
+
+def test_commit_failure_does_not_schedule_eval(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ledger.commit() に失敗したら、評価の予約・子の起動・行の追記は起きず、通知の再送状態が残る (F3)."""
+    w, d, out = env
+    w.cfg.task_eval_since = SINCE_EARLY
+    spawned: list[object] = []
+    real_popen = watchd.subprocess.Popen
+
+    def popen(*a: object, **k: object) -> object:
+        spawned.append(a)
+        return real_popen(*a, **k)
+
+    monkeypatch.setattr(watchd.subprocess, 'Popen', popen)
+    monkeypatch.setattr(w.ledger, 'commit', lambda *_a, **_k: False)
+    _write(d)
+    w.cycle()
+    assert queued(w)  # 通知は queue に積まれた
+    assert not w.ledger.is_delivered('pj', ID1)
+    conn = sqlite3.connect(w.cfg.ledger_path)
+    try:
+        state, attempts, next_at = conn.execute(
+            'SELECT state, attempt_count, next_attempt_at FROM deliveries WHERE project = ? AND report_id = ?',
+            ('pj', ID1),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert state == 'pending' and attempts >= 1 and next_at > 0  # backoff 後に再送される
+    w.poll_task_evals()
+    assert not w._evals_waiting and not w._evals_running  # noqa: SLF001
+    assert spawned == []
+    assert not out.exists()

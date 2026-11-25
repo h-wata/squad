@@ -83,9 +83,17 @@ watchd は worker の report の配達を確定すると、その task を `scri
 - 評価は子プロセスで走り、watchd は終わるのを待たない (同時に 2 件まで)。子は `WATCH_TASK_EVAL_TIMEOUT`
   (既定 300 秒) で自分を打ち切り、`error` に `timeout` を入れた行を書く。子が行を書けずに終わったとき
   (異常終了、起動失敗) と、上限 + 10 秒を過ぎても終わらないとき (kill する) は watchd が `error` 付きの行を書き、
-  `watch.log` に `[WARN] task 評価に失敗` を出す。どの場合も report の配達・ledger の更新・通知は先に済んでいる
-- 子の実行中に watchd が止まっても、子は自分の時間上限まで走って行を書く。配達の後、子を起動する前に watchd が
-  止まった report は評価されない (再起動後に拾い直さない)
+  `watch.log` に `[WARN] task 評価に失敗` を出す。kill した子の終了は待たず、次のサイクル以降に回収する。kill から
+  30 秒たっても回収できなければ `error` 付きの行と WARN を残して見放す。どの場合も report の配達・ledger の更新・
+  通知は先に済んでいる。ledger の更新 (配達の確定) に失敗した report は評価しない
+- 起動を待つ評価はメモリにしか持たない (上限 20 件。溢れた分は捨てる)。代わりに watchd は起動直後と 5 分ごとに
+  `reports/archive/` (配達した report の写し) を見直し、ledger で配達済み・最終 report・`task_evals.jsonl` に
+  行が無いものを古い順に拾い直す。watchd の再起動で待っていた評価が消えても、溢れても、次の見直しで評価される
+- 見直しで拾うのは、写しの mtime (= 元の report の mtime) が起点以降のものだけ。起点は `queue/.task_eval_since`
+  で、自動評価付きの watchd が初めて見直したときに今の時刻を書いて作る (導入前の report を一斉に評価しない)。
+  `WATCH_TASK_EVAL_SINCE` (TZ 付き ISO8601) を与えるとそちらを使う。前にずらせば過去の report を評価し直せる
+- 子の実行中に watchd が止まっても、子は自分の時間上限まで走って行を書く。再起動後の見直しが同じ report を
+  もう一度評価しても、追記の直前の確認で 2 行目は書かない
 - `WATCH_TASK_EVAL=0` で止まる。出力先は `WATCH_TASK_EVALS_FILE` で変えられる (既定は watchd のある checkout の
   `metrics/task_evals.jsonl`)
 - このファイルは gitignore している。`metrics/task_costs.jsonl` は計測した人が選んで commit するので追跡しているが、

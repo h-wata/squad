@@ -7,8 +7,11 @@
 - task 完了時の自動評価 (Refs #130, #136)。watchd が status: completed / blocked の worker report の配達を確定すると、
   `squad/task_eval.py` を子プロセスで起動し、`scripts/eval_trajectory.py` の 1 task 分の評価に report_id / worker /
   agent / evaluated_at / error を足した 1 行を `metrics/task_evals.jsonl` に追記する。同じ report_id は 2 回書かない。
-  評価の失敗・時間切れ (既定 300 秒) は `error` 付きの行で残し、配達は止めない。`metrics/task_evals.jsonl` は
-  gitignore した。反映には watchd の再起動が要る。`WATCH_TASK_EVAL=0` で止められる。
+  評価の失敗・時間切れ (既定 300 秒) は `error` 付きの行で残し、配達は止めない。kill した子は待たずに次のサイクルで
+  回収する。起動待ちの評価はメモリに持つが、watchd は起動直後と 5 分ごとに `reports/archive/` を見直して
+  行の無い配達済み report を拾い直す (再起動で消えた分も評価される)。見直しの起点は `queue/.task_eval_since`
+  (初回に作る) か `WATCH_TASK_EVAL_SINCE`。`metrics/task_evals.jsonl` は gitignore した。反映には watchd の
+  再起動が要る。`WATCH_TASK_EVAL=0` で止められる。
 - review 指摘の category 集計 (#136, Refs #130)。cross-review の指摘 (`findings` / `blocking` / `non_blocking` の
   どちらの書式も読む) と、worker report の `issues` のうち `category` を持つものを `scripts/review_category_tally.py`
   が category ごとに数え、件数 / 初出 / 直近 / 該当 PR を Markdown (`--json` で JSON) で出す。`category` の無い

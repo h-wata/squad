@@ -19,7 +19,7 @@
             WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Dispatcher window 直送。1 で durable queue 経路)
             WATCH_CRITICAL_FALLBACK_SECONDS / WATCH_NORMAL_FALLBACK_SECONDS / WATCH_LOW_FALLBACK_SECONDS
             WATCH_TASK_EVAL (既定 1。0 で task 完了時の自動評価を止める) / WATCH_TASK_EVALS_FILE /
-            WATCH_TASK_EVAL_TIMEOUT(s)
+            WATCH_TASK_EVAL_TIMEOUT(s) / WATCH_TASK_EVAL_SINCE (再走査の起点, ISO8601)
 
 複数セッション並行運用 (SQUAD_SESSION を変えて start.sh を複数起動する場合):
   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
@@ -373,7 +373,10 @@ def _flat(text: str) -> str:
 # graph sync 失敗後の再試行間隔 (秒)。最後の値を上限として使い続ける
 GRAPH_RETRY_BACKOFF = (5, 30, 300)
 TASK_EVAL_MAX_RUNNING = 2  # 同時に走らせる評価の子プロセス数 (ledger を作り直した直後などに一斉に起動しない)
+TASK_EVAL_MAX_WAITING = 20  # 起動待ちの上限。溢れた分は捨てて、次の再走査で reports/archive/ から拾い直す
 TASK_EVAL_KILL_GRACE = 10  # 子が自分の時間上限で行を書けなかったとき、watchd が kill するまでの猶予 (秒)
+TASK_EVAL_REAP_GRACE = 30  # kill した子がこの秒数 (monotonic) を過ぎても回収できなければ error 行を書いて見放す
+TASK_EVAL_RESCAN_SECONDS = 300  # 評価漏れの再走査の間隔 (monotonic)。watchd 起動後の最初の見回りでは必ず走る
 TASK_EVAL_STDERR_CHARS = 2000
 
 
@@ -386,6 +389,7 @@ class EvalJob:
     proc: subprocess.Popen | None = None
     stderr: object = None  # 子の stderr を受ける一時ファイル
     started: float = 0.0  # monotonic
+    killed_at: float | None = None  # kill した時刻 (monotonic)。回収は次の見回り以降に poll で行う
 
 
 @dataclass
@@ -433,6 +437,8 @@ class Config:
         )
     )
     task_eval_timeout: int = field(default_factory=lambda: _int_env('WATCH_TASK_EVAL_TIMEOUT', 300))
+    # 再走査で拾い直す report の起点 (TZ 付き ISO8601)。空なら queue/.task_eval_since (初回に作る) を使う
+    task_eval_since: str = field(default_factory=lambda: os.environ.get('WATCH_TASK_EVAL_SINCE', ''))
     # 評価の子プロセスの argv の先頭 (テストが偽の評価に差し替える)
     task_eval_cmd: list[str] = field(default_factory=lambda: [sys.executable, str(ROOT / 'task_eval.py')])
 
@@ -623,6 +629,8 @@ class Watcher:
         # task 完了時の自動評価 (Refs #130, #136)。report_id -> 待ち / 実行中の子プロセス
         self._evals_waiting: dict[str, EvalJob] = {}
         self._evals_running: dict[str, EvalJob] = {}
+        self._eval_rescan_at: float | None = None  # 次の再走査 (monotonic)。None = まだ一度も走っていない
+        self._eval_overflow_warned = False
         # tasks/ 以下の task YAML の (path, mtime, ctime, size) 一覧。変わったら発注・書換・移動・削除があった (#84)
         self._tasks_sig: tuple | None = None
         # sync 失敗時は dirty を残し backoff で再試行する (一時的な失敗で永久に古いままにしない)
@@ -993,36 +1001,127 @@ class Watcher:
     def _schedule_task_eval(self, project: str, report_id: str, path: str, meta: dict[str, str]) -> None:
         """配達を確定した最終 report の評価を予約する. 起動は poll_task_evals() が行う.
 
-        評価するのは workerN_report.yaml で status が task_eval.FINAL_STATUSES (completed / blocked) のものだけ。
+        呼ぶのは ledger.commit() が成功した後だけ (配達を確定する前には評価しない)。評価するのは
+        workerN_report.yaml で status が task_eval.FINAL_STATUSES (completed / blocked) のものだけ。
         progress などの途中の report と review は評価しない。配達・ledger 更新・通知は呼ぶ前に済んでいるので、
-        ここで何が起きても配達は止めない (例外はログに残して捨てる)。
+        ここで何が起きても配達は止めない (例外はログに残して捨てる)。待ち行列が一杯なら予約せず、
+        次の再走査 (rescan_task_evals) が reports/archive/ の写しから拾い直す。
         """
         try:
             name = Path(path).name
-            status = meta.get('status', '')
-            if not self.cfg.task_eval_enabled or status not in task_eval.FINAL_STATUSES:
-                return
             if '_review' in name or not name.endswith('_report.yaml'):
                 return
-            if report_id in self._evals_waiting or report_id in self._evals_running:
-                return
-            if report_id in task_eval.evaluated_ids(self.cfg.task_evals_file):
-                return  # 再配達・watchd の再起動後でも同じ report_id は 2 回評価しない
             wm = WORKER_NUM_RE.search(name)
-            worker = meta.get('worker') or (f'worker{wm.group(1)}' if wm else '')
-            task_id = meta.get('task_id') or 'unknown'
-            agent = meta.get('agent', '')
-            base = task_eval.base_row(project, task_id, report_id, worker, agent, status)
-            argv = [
-                *self.cfg.task_eval_cmd,
-                *('--project', project, '--task-id', task_id, '--report-id', report_id),
-                *('--worker', worker, '--agent', agent, '--status', status),
-                *('--queue-dir', str(self.cfg.queue_dir), '--out', str(self.cfg.task_evals_file)),
-                *('--timeout', str(self.cfg.task_eval_timeout)),
-            ]
-            self._evals_waiting[report_id] = EvalJob(base=base, argv=argv)
+            fallback = f'worker{wm.group(1)}' if wm else ''
+            self._enqueue_task_eval(
+                project, report_id, meta, fallback, task_eval.evaluated_ids(self.cfg.task_evals_file)
+            )
         except Exception as e:  # noqa: BLE001 (評価の失敗で配達を止めない)
             self.log(f'[WARN] task 評価を予約できません (配達は確定済み): {path}: {e}')
+
+    def _enqueue_task_eval(
+        self, project: str, report_id: str, meta: dict[str, str], worker_fallback: str, evaluated: set[str]
+    ) -> bool:
+        """評価を待ち行列に積む. 積んだら True. 対象外・評価済み・予約済み・待ち行列が一杯なら False."""
+        status = meta.get('status', '')
+        if not self.cfg.task_eval_enabled or status not in task_eval.FINAL_STATUSES:
+            return False
+        if report_id in self._evals_waiting or report_id in self._evals_running:
+            return False
+        if report_id in evaluated:
+            return False  # 再配達・watchd の再起動後でも同じ report_id は 2 回評価しない
+        if len(self._evals_waiting) >= TASK_EVAL_MAX_WAITING:
+            if not self._eval_overflow_warned:
+                self._eval_overflow_warned = True
+                self.log(f'task 評価の待ちが {TASK_EVAL_MAX_WAITING} 件で一杯。溢れた分は次の再走査で拾い直す')
+            return False
+        worker = meta.get('worker') or worker_fallback
+        task_id = meta.get('task_id') or 'unknown'
+        agent = meta.get('agent', '')
+        base = task_eval.base_row(project, task_id, report_id, worker, agent, status)
+        argv = [
+            *self.cfg.task_eval_cmd,
+            *('--project', project, '--task-id', task_id, '--report-id', report_id),
+            *('--worker', worker, '--agent', agent, '--status', status),
+            *('--queue-dir', str(self.cfg.queue_dir), '--out', str(self.cfg.task_evals_file)),
+            *('--timeout', str(self.cfg.task_eval_timeout)),
+        ]
+        self._evals_waiting[report_id] = EvalJob(base=base, argv=argv)
+        return True
+
+    @property
+    def task_eval_since_file(self) -> Path:
+        return self.cfg.queue_dir / '.task_eval_since'
+
+    def _task_eval_since(self) -> float:
+        """再走査で拾う report の起点 (epoch 秒). この時刻より前の report は再走査では評価しない.
+
+        WATCH_TASK_EVAL_SINCE (ISO8601) があればそれ。無ければ queue/.task_eval_since。ファイルも無ければ
+        今の時刻を書いて作る (= 自動評価付きの watchd が初めて再走査した時刻。導入前の report を一斉に評価しない)。
+        全 session の watchd が同じファイルを使い、O_EXCL で作るので最初に作った値が残る。
+        """
+        if self.cfg.task_eval_since:
+            ts = _parse_iso(self.cfg.task_eval_since)
+            if ts is not None:
+                return ts
+            self.log(f'[WARN] WATCH_TASK_EVAL_SINCE を読めません ({self.cfg.task_eval_since!r})。既定の起点を使う')
+        path = self.task_eval_since_file
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            ts = _parse_iso(path.read_text(encoding='utf-8').strip())
+            if ts is None:
+                raise ValueError(f'{path} を ISO8601 として読めません') from None
+            return ts
+        now = self.wall()
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(datetime.fromtimestamp(now).astimezone().isoformat(timespec='seconds') + '\n')
+        self.log(f'task 評価の再走査の起点を記録: {path}')
+        return float(int(now))
+
+    def rescan_task_evals(self) -> None:
+        """配達済みで task_evals.jsonl に行の無い最終 report を reports/archive/ から拾い直す (F1).
+
+        待ち行列はメモリにしか無いので、watchd が再起動すると待っていた評価は消え、配達済みの report は
+        再配達されない。配達した report は必ず reports/archive/<task_id>__<report_id>.yaml に写す (_archive_copy)
+        ので、そこを正本として見直す。拾うのは次のすべてを満たすもの:
+        写しの mtime (= 元の report の mtime) が起点 (_task_eval_since) 以降 / report_id が UUID /
+        status が FINAL_STATUSES / review の書式 (verdict キー) でない / ledger で配達済み /
+        task_evals.jsonl に同じ report_id の行が無い。古い順に、待ち行列の上限まで積む。
+        """
+        if not self.cfg.task_eval_enabled:
+            return
+        since = self._task_eval_since()
+        evaluated = task_eval.evaluated_ids(self.cfg.task_evals_file)
+        found: list[tuple[float, str, Path]] = []
+        for d in self.owned:
+            for p in (d / 'reports' / 'archive').glob('*.yaml'):
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime >= since:
+                    found.append((mtime, d.name, p))
+        added = 0
+        for _mtime, project, p in sorted(found):
+            if len(self._evals_waiting) >= TASK_EVAL_MAX_WAITING:
+                break
+            try:
+                data = p.read_bytes()
+            except OSError:
+                continue
+            sha, meta, err = report_identity(data)
+            report_id, invalid = delivery_key(meta, sha, err, str(p))
+            if invalid or 'verdict' in meta or report_id in evaluated:
+                continue
+            if meta.get('status', '') not in task_eval.FINAL_STATUSES:
+                continue
+            if not self.ledger.is_delivered(project, report_id):
+                continue  # 配達を確定していない (commit に失敗した) report は評価しない
+            if self._enqueue_task_eval(project, report_id, meta, '', evaluated):
+                added += 1
+        if added:
+            self.log(f'task 評価の漏れを再走査で {added} 件拾い直した')
 
     def _task_eval_failed(self, report_id: str, job: EvalJob, error: str) -> None:
         """子が行を書けなかった評価を error 行で残す (同じ report_id の行があれば書かない)."""
@@ -1048,15 +1147,34 @@ class Watcher:
         子 (task_eval.py) は自分で SIGALRM の時間上限 (task_eval_timeout) を持ち、時間切れ・例外・import 失敗を
         error 行で書く。子が行を書けずに終わった (異常終了) か、時間上限 + TASK_EVAL_KILL_GRACE を過ぎても
         終わらないときは watchd が error 行を書く。watchd は子の終了を待たない (サイクルを止めない)。
+        kill した子も待たず、次の見回り以降に poll で回収する。kill から TASK_EVAL_REAP_GRACE 秒を過ぎても
+        回収できなければ error 行と WARN を残して見放す。
+        最初の見回りと TASK_EVAL_RESCAN_SECONDS ごとに rescan_task_evals() で評価漏れを拾い直す。
         """
+        now = self.mono()
+        if self._eval_rescan_at is None or now >= self._eval_rescan_at:
+            self._eval_rescan_at = now + TASK_EVAL_RESCAN_SECONDS
+            try:
+                self.rescan_task_evals()
+            except Exception as e:  # noqa: BLE001 (再走査の失敗で watcher を止めない。次の再走査で再試行)
+                self.log(f'[WARN] task 評価の再走査に失敗 (次の再走査で再試行): {e}')
         for report_id, job in list(self._evals_running.items()):
             try:
                 rc = job.proc.poll()
                 if rc is None:
-                    if self.mono() - job.started < self.cfg.task_eval_timeout + TASK_EVAL_KILL_GRACE:
+                    if job.killed_at is not None:
+                        if self.mono() - job.killed_at < TASK_EVAL_REAP_GRACE:
+                            continue
+                        self._task_eval_failed(
+                            report_id, job, f'timeout: kill 後 {TASK_EVAL_REAP_GRACE}s を過ぎても回収できない'
+                        )
+                    elif self.mono() - job.started < self.cfg.task_eval_timeout + TASK_EVAL_KILL_GRACE:
                         continue
-                    job.proc.kill()
-                    job.proc.wait(timeout=5)
+                    else:
+                        job.proc.kill()  # 待たない。次の見回りで poll して回収する
+                        job.killed_at = self.mono()
+                        continue
+                elif job.killed_at is not None:
                     self._task_eval_failed(report_id, job, f'timeout: {self.cfg.task_eval_timeout}s を過ぎたので kill')
                 elif rc not in (task_eval.EXIT_WRITTEN, task_eval.EXIT_DUPLICATE):
                     self._task_eval_failed(report_id, job, f'exit={rc}: {self._stderr_tail(job)}')
@@ -1065,6 +1183,8 @@ class Watcher:
             with contextlib.suppress(Exception):
                 job.stderr.close()
             del self._evals_running[report_id]
+        if not self._evals_waiting:
+            self._eval_overflow_warned = False
         while self._evals_waiting and len(self._evals_running) < TASK_EVAL_MAX_RUNNING:
             report_id = next(iter(self._evals_waiting))
             job = self._evals_waiting.pop(report_id)
