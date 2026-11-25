@@ -93,9 +93,10 @@ watchd は worker の report の配達を確定すると、その task を `scri
   `reports/archive/` の写しを読んで、最終 report で `task_evals.jsonl` に行が無いものを拾い直す。watchd の再起動で
   待っていた評価が消えても、溢れても、予約に失敗しても、次の見直しで評価される。同じ project を見る別の watchd
   (別 session) が見直しても同じように拾う
-- `delivered_at` はこの機能で足した列で、自動評価が有効な watchd が配達を確定した時刻を書く。列を足す前の配達、
-  旧 ledger から移した行、自動評価が無効な watchd (`WATCH_TASK_EVAL=0`) や旧コードが配達した行は 0 で、見直しでは
-  拾わない (導入前の report を一斉に評価しない)。境界はこれだけで、起点のファイルは持たない。導入前かどうかは
+- `delivered_at` はこの機能で足した列で、時刻を書くのは自動評価が有効な watchd の配達だけ。main (この機能より前の
+  コード) が書いた行、列を足す前の配達、旧 ledger から移した行、`squad ledger commit` (手で配達済みにする CLI)、
+  自動評価が無効な watchd (`WATCH_TASK_EVAL=0`) の配達は 0 で、見直しでは拾わない (導入前の report を一斉に
+  評価しない)。境界はこれだけで、起点のファイルは持たない。導入前かどうかは
   `delivered_at` だけで決め、写しの mtime や中身の時刻は見ないので、`reports/archive/` を cp / restore / touch しても
   対象は変わらない。新しいコードを旧コードへ戻して再び新しいコードにした場合、旧コードで動いていた間に配達した
   report は 0 のままなので評価されない
