@@ -19,7 +19,7 @@
             WATCH_NOTIFY_QUEUE (既定 0 = 従来どおり Dispatcher window 直送。1 で durable queue 経路)
             WATCH_CRITICAL_FALLBACK_SECONDS / WATCH_NORMAL_FALLBACK_SECONDS / WATCH_LOW_FALLBACK_SECONDS
             WATCH_TASK_EVAL (既定 1。0 で task 完了時の自動評価を止める) / WATCH_TASK_EVALS_FILE /
-            WATCH_TASK_EVAL_TIMEOUT(s) / WATCH_TASK_EVAL_SINCE (再走査の起点, ISO8601)
+            WATCH_TASK_EVAL_TIMEOUT(s) / WATCH_TASK_EVAL_SINCE (再走査の任意の下限, ISO8601)
 
 複数セッション並行運用 (SQUAD_SESSION を変えて start.sh を複数起動する場合):
   queue/projects/<pj>/.squad_session に担当セッション名を1行書くと、その project の
@@ -439,7 +439,7 @@ class Config:
         )
     )
     task_eval_timeout: int = field(default_factory=lambda: _int_env('WATCH_TASK_EVAL_TIMEOUT', 300))
-    # 再走査で拾い直す report の起点 (TZ 付き ISO8601)。空なら queue/.task_eval_since (初回に作る) を使う
+    # 再走査の任意の下限 (TZ 付き ISO8601)。これより前に配達した report は再走査しない。空なら下限なし
     task_eval_since: str = field(default_factory=lambda: os.environ.get('WATCH_TASK_EVAL_SINCE', ''))
     # 評価の子プロセスの argv の先頭 (テストが偽の評価に差し替える)
     task_eval_cmd: list[str] = field(default_factory=lambda: [sys.executable, str(ROOT / 'task_eval.py')])
@@ -633,9 +633,7 @@ class Watcher:
         self._evals_running: dict[str, EvalJob] = {}
         self._eval_rescan_at: float | None = None  # 次の再走査 (monotonic)。None = まだ一度も走っていない
         self._eval_overflow_warned = False
-        self._eval_since: float | None = None  # queue/.task_eval_since の値 (読めたら覚えておく)
         self._eval_since_warned = False
-        self._eval_started_at = self.wall()  # 起点ファイルが無いときの起点。起動時に 1 回だけ取る (R1)
         self._eval_abandoned_warned = False
         # kill 後に回収できず見放した子 (N2)。error 行は書き済み。毎サイクル poll して、終わったら回収する
         self._evals_abandoned: list[EvalJob] = []
@@ -972,7 +970,9 @@ class Watcher:
             self._record_report_notified()
         # 退避の予定は commit と同じトランザクションで ledger に残し、report_bridge() の最後に行う (SQUAD-361 B1)
         archive = None if invalid else self._task_archive_target(path, meta, mtime)
-        if enqueued and self.ledger.commit(project, report_id, token, archive):
+        # 自動評価が有効なときだけ配達時刻を残す。再走査はこれが 0 でない report だけを拾う
+        record_at = self.cfg.task_eval_enabled
+        if enqueued and self.ledger.commit(project, report_id, token, archive, record_delivered_at=record_at):
             self._graph_dirty = True
             if not invalid:
                 self._schedule_task_eval(project, report_id, path, meta)
@@ -1057,82 +1057,39 @@ class Watcher:
         self._evals_waiting[report_id] = EvalJob(base=base, argv=argv)
         return True
 
-    @property
-    def task_eval_since_file(self) -> Path:
-        return self.cfg.queue_dir / '.task_eval_since'
+    def task_eval_lower_bound(self) -> float:
+        """再走査の任意の下限 (epoch 秒). WATCH_TASK_EVAL_SINCE (ISO8601) があればそれ、無ければ 0.
 
-    def task_eval_since(self) -> float:
-        """再走査で拾う report の起点 (epoch 秒). 起点より前に配達した report は再走査では評価しない (R1).
-
-        WATCH_TASK_EVAL_SINCE (ISO8601) があればそれ。無ければ queue/.task_eval_since の値。ファイルが無い・
-        読めない間は、この watchd の起動時刻 (__init__ で 1 回だけ取る) を使う。この watchd が配達した report の
-        delivered_at は必ず起動時刻より後なので、ファイルを作れなくても「起点 > 配達時刻」にはならない。
-        ここではファイルを作らない (作るのは _prepare_task_eval_since だけ)。
+        プロセスごとの設定で、ファイルには書かない。これより前に配達した report は再走査では評価しない。
+        導入前の report を除くのはこの下限ではなく ledger の delivered_at > 0 (rescan_task_evals)。
         """
-        if self.cfg.task_eval_since:
-            ts = _parse_iso(self.cfg.task_eval_since)
-            if ts is not None:
-                return ts
-            if not self._eval_since_warned:
-                self._eval_since_warned = True
-                self.log(f'[WARN] WATCH_TASK_EVAL_SINCE を読めません ({self.cfg.task_eval_since!r})。既定の起点を使う')
-        if self._eval_since is not None:
-            return self._eval_since
-        path = self.task_eval_since_file
-        try:
-            text = path.read_text(encoding='utf-8').strip()
-        except FileNotFoundError:
-            return self._eval_started_at
-        except OSError as e:
-            self.log(f'[WARN] {path} を読めないので watchd の起動時刻を起点にする: {e}')
-            return self._eval_started_at
-        ts = _parse_iso(text)
-        if ts is None:
-            self.log(f'[WARN] {path} を ISO8601 として読めないので watchd の起動時刻を起点にする')
-            return self._eval_started_at
-        self._eval_since = ts
-        return ts
-
-    def _prepare_task_eval_since(self) -> None:
-        """起点ファイル queue/.task_eval_since が無ければ、この watchd の起動時刻を書いて作る (N1 / R1).
-
-        watchd の起動時と、毎サイクルの report_bridge() の前に呼ぶ。値は作った時刻ではなく起動時刻なので、
-        作るのが何サイクル遅れても、この watchd が配達した report より後の起点にはならない。既にあれば
-        書き換えない (O_EXCL。全 session の watchd で最初に作った値が残る)。作れなくても配達は止めず、
-        次のサイクルで作り直す (その間の再走査は task_eval_since() がメモリ上の起動時刻を使う)。
-        """
-        if not self.cfg.task_eval_enabled or self._eval_since is not None:
-            return
-        path = self.task_eval_since_file
-        stamp = datetime.fromtimestamp(self._eval_started_at).astimezone().isoformat(timespec='microseconds')
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            self.task_eval_since()  # 既にある値を読んで覚える
-            return
-        except OSError as e:
-            self.log(f'[WARN] task 評価の起点を記録できません (次のサイクルで再試行、それまでは起動時刻を使う): {e}')
-            return
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            f.write(stamp + '\n')
-        self.log(f'task 評価の再走査の起点を記録: {path} ({stamp})')
-        self._eval_since = _parse_iso(stamp)
+        if not self.cfg.task_eval_since:
+            return 0.0
+        ts = _parse_iso(self.cfg.task_eval_since)
+        if ts is not None:
+            return ts
+        if not self._eval_since_warned:
+            self._eval_since_warned = True
+            self.log(f'[WARN] WATCH_TASK_EVAL_SINCE を読めません ({self.cfg.task_eval_since!r})。下限なしで再走査する')
+        return 0.0
 
     def rescan_task_evals(self) -> None:
-        """配達済みで task_evals.jsonl に行の無い最終 report を拾い直す (F1 / N1 / N4).
+        """配達済みで task_evals.jsonl に行の無い最終 report を拾い直す (F1 / N1 / N4 / 4 回目 review F1).
 
         待ち行列はメモリにしか無いので、watchd が再起動すると待っていた評価は消え、配達済みの report は
-        再配達されない。そこで ledger の deliveries から、起点 (task_eval_since) 以後に delivered にした
-        report を配達の古い順に引き、配達時に写した reports/archive/<task_id>__<report_id>.yaml を読んで
-        予約し直す。導入前の report かどうかは ledger の delivered_at だけで決め、写しの mtime や中身の時刻は
-        見ない (写しを cp / restore / touch しても対象は変わらない)。delivered_at の無い行 (列を足す前の配達、
-        旧 ledger から移した行) は 0 なので拾わない。
+        再配達されない。そこで ledger の deliveries から delivered_at > 0 の report を配達の古い順に引き、
+        配達時に写した reports/archive/<task_id>__<report_id>.yaml を読んで予約し直す。
+        delivered_at は自動評価が有効な watchd が配達を確定したときだけ書く (_deliver)。列を足す前の配達、
+        旧 ledger から移した行、自動評価が無効な watchd や旧コードが配達した行は 0 なので拾わない。
+        境界はこれだけで、起点ファイルや watchd の起動時刻は使わない (session をまたいで値を合わせる必要が無い)。
+        写しの mtime や中身の時刻も見ない (写しを cp / restore / touch しても対象は変わらない)。
+        WATCH_TASK_EVAL_SINCE があれば、それより前に配達したものも拾わない (task_eval_lower_bound)。
         拾うのは、さらに次を満たすもの: 写しがある / report_id が UUID / status が FINAL_STATUSES /
         review の書式 (verdict キー) でない / task_evals.jsonl に同じ report_id の行が無い。待ち行列の上限まで積む。
         """
         if not self.cfg.task_eval_enabled:
             return
-        since = self.task_eval_since()
+        since = self.task_eval_lower_bound()
         evaluated = task_eval.evaluated_ids(self.cfg.task_evals_file)
         by_name = {d.name: d for d in self.owned}
         added = 0
@@ -2551,7 +2508,6 @@ class Watcher:
         except Exception as e:  # noqa: BLE001 (区切りの失敗で watcher を止めない。区切らない側に倒す)
             self.log(f'[WARN] Dispatcher の区切りの判定に失敗 (今回は区切らない): {e}')
         self.archive_verdicts()
-        self._prepare_task_eval_since()  # 配達より前に起点を決める (N1)
         self.report_bridge()
         try:
             self.poll_task_evals()
@@ -2611,7 +2567,6 @@ class Watcher:
             f'ledger={c.ledger_path})'
         )
         self.prepare_ledger()
-        self._prepare_task_eval_since()
         self.warn_missing_markers()
         self.sleep(c.boot_delay)
         # GC を起動直後に走らせない。last_gc=0 初期化だと最初の cycle() で無条件に

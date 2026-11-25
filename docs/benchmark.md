@@ -89,15 +89,18 @@ watchd は worker の report の配達を確定すると、その task を `scri
   WARN を出し、回収されて 20 件を下回ったら再開する。どの場合も report の
   配達・ledger の更新・通知は先に済んでいる。ledger の更新 (配達の確定) に失敗した report は評価しない
 - 起動を待つ評価はメモリにしか持たない (上限 20 件。溢れた分は捨てる)。代わりに watchd は起動直後と 5 分ごとに、
-  ledger (`queue/.report_ledger.db`) の `deliveries.delivered_at` (配達を確定した時刻) が起点以後の report を
-  配達の古い順に引き、`reports/archive/` の写しを読んで、最終 report で `task_evals.jsonl` に行が無いものを
-  拾い直す。watchd の再起動で待っていた評価が消えても、溢れても、予約に失敗しても、次の見直しで評価される
-- 起点は `queue/.task_eval_since`。自動評価付きの watchd が起動したときと、毎サイクルの配達の前に、無ければ作る。
-  書く値は作った時刻ではなく watchd の起動時刻で、既にあれば書き換えない (O_EXCL)。作れない間の見直しは、
-  メモリ上の起動時刻を起点に使う。どちらでも、その watchd が配達した report より後の起点にはならない。`WATCH_TASK_EVAL_SINCE` (TZ 付き ISO8601) を与えるとそちらを使う。
-  前にずらせば過去の report を評価し直せる。`delivered_at` 列はこの機能で足したもので、それより前に配達した行は 0
-  なので、起点をどこにずらしても拾わない。導入前かどうかは `delivered_at` だけで決め、写しの mtime や中身の時刻は
-  見ないので、`reports/archive/` を cp / restore / touch しても対象は変わらない
+  ledger (`queue/.report_ledger.db`) の `deliveries.delivered_at` が 0 でない report を配達の古い順に引き、
+  `reports/archive/` の写しを読んで、最終 report で `task_evals.jsonl` に行が無いものを拾い直す。watchd の再起動で
+  待っていた評価が消えても、溢れても、予約に失敗しても、次の見直しで評価される。同じ project を見る別の watchd
+  (別 session) が見直しても同じように拾う
+- `delivered_at` はこの機能で足した列で、自動評価が有効な watchd が配達を確定した時刻を書く。列を足す前の配達、
+  旧 ledger から移した行、自動評価が無効な watchd (`WATCH_TASK_EVAL=0`) や旧コードが配達した行は 0 で、見直しでは
+  拾わない (導入前の report を一斉に評価しない)。境界はこれだけで、起点のファイルは持たない。導入前かどうかは
+  `delivered_at` だけで決め、写しの mtime や中身の時刻は見ないので、`reports/archive/` を cp / restore / touch しても
+  対象は変わらない。新しいコードを旧コードへ戻して再び新しいコードにした場合、旧コードで動いていた間に配達した
+  report は 0 のままなので評価されない
+- `WATCH_TASK_EVAL_SINCE` (TZ 付き ISO8601) を与えると、それより前に配達した report も見直しで拾わない
+  (プロセスごとの任意の下限。ファイルには書かない)。0 の行を拾わせることはできない
 - 同じ report を同時に評価するのは 1 つの子だけ。子は評価の前に `queue/.task_eval_locks/<report_id>.lock` に
   非ブロックの flock を取り、取れなければ何もせずに終わる (同じ project を見る watchd が 2 つあっても重い評価は
   1 回)。lock は子が終われば外れる。子はファイルを消さない。watchd の見直しのついでに、評価済み (`task_evals.jsonl`

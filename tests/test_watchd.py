@@ -2175,7 +2175,7 @@ class TestArchiveTaskOnDeliver:
         w, queue = watcher
         d = self._setup(w, queue)
         write_report(d, task_id='T1', verify_status='pass')
-        monkeypatch.setattr(w.ledger, 'commit', lambda *_a: False)
+        monkeypatch.setattr(w.ledger, 'commit', lambda *_a, **_k: False)
         w.report_bridge()
         assert len(queued(w)) == 1  # queue には積めた
         assert (d / 'tasks' / 'worker1.yaml').exists()

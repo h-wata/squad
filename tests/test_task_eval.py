@@ -421,33 +421,6 @@ def test_waiting_queue_is_capped_and_overflow_is_rescanned(
     assert sorted(r['report_id'] for r in _rows(out)) == sorted([ID1, ID2, ID3])
 
 
-def test_rescan_skips_reports_before_since(env: tuple[Watcher, Path, Path]) -> None:
-    """自動評価を入れる前に配達した report は再走査で評価しない (起点は queue/.task_eval_since).
-
-    導入前かどうかは ledger の delivered_at で決め、写しの mtime は見ない (N4)。写しを touch して新しくしても拾わない。
-    """
-    w, d, out = env
-    w.cfg.task_eval_enabled = False  # 導入前の watchd が配達した
-    _write(d)
-    w.report_bridge()
-    future = time.time() + 3600
-    for p in (d / 'reports' / 'archive').glob('*.yaml'):
-        os.utime(p, (future, future))  # cp / restore / touch で写しの mtime が新しくなった
-    cfg2 = Config(**{**w.cfg.__dict__, 'task_eval_enabled': True})
-    w2 = Watcher(cfg=cfg2, tmux=FakeTmux('testsess'))
-    w2.refresh_owned_projects()
-    w2.cycle()
-    assert w2.task_eval_since_file.exists()  # 起点を記録した
-    assert not w2._evals_waiting and not w2._evals_running  # noqa: SLF001
-    assert not out.exists()
-    # 起点を前にずらせば (WATCH_TASK_EVAL_SINCE) 拾う
-    w2.cfg.task_eval_since = SINCE_EARLY
-    w2._eval_rescan_at = 0.0  # noqa: SLF001
-    w2.poll_task_evals()
-    _drain(w2)
-    assert [r['report_id'] for r in _rows(out)] == [ID1]
-
-
 def test_rescan_skips_undelivered_reports(env: tuple[Watcher, Path, Path]) -> None:
     """Archive に写しがあっても ledger で配達済みでなければ評価しない."""
     w, d, out = env
@@ -555,39 +528,6 @@ def _watcher_like(w: Watcher, **over: object) -> Watcher:
     return w2
 
 
-def test_since_is_recorded_before_first_delivery(env: tuple[Watcher, Path, Path]) -> None:
-    """起点 queue/.task_eval_since は最初の report_bridge() より前に作る (N1)."""
-    w, d, _out = env
-    _write(d)
-    seen: list[bool] = []
-    real = w.report_bridge
-
-    def bridge() -> None:
-        seen.append(w.task_eval_since_file.exists())
-        real()
-
-    w.report_bridge = bridge  # type: ignore[method-assign]
-    w.cycle()
-    assert seen == [True]
-    since = watchd._parse_iso(w.task_eval_since_file.read_text().strip())  # noqa: SLF001
-    conn = sqlite3.connect(w.cfg.ledger_path)
-    try:
-        (at,) = conn.execute('SELECT delivered_at FROM deliveries WHERE report_id = ?', (ID1,)).fetchone()
-    finally:
-        conn.close()
-    assert since is not None and at >= since
-
-
-def test_since_file_is_not_overwritten(env: tuple[Watcher, Path, Path]) -> None:
-    """既にある起点はそのまま使う (O_EXCL で作る。別の watchd や再起動で書き換えない)."""
-    w, _d, _out = env
-    w.task_eval_since_file.parent.mkdir(parents=True, exist_ok=True)
-    w.task_eval_since_file.write_text('2026-01-01T00:00:00+09:00\n')
-    w.cycle()
-    assert w.task_eval_since_file.read_text() == '2026-01-01T00:00:00+09:00\n'
-    assert w.task_eval_since() == watchd._parse_iso('2026-01-01T00:00:00+09:00')  # noqa: SLF001
-
-
 def test_failed_schedule_is_recovered_by_rescan_after_restart(
     env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -636,7 +576,6 @@ def test_ledger_rows_without_delivered_at_are_not_rescanned(env: tuple[Watcher, 
     arch = d / 'reports' / 'archive'
     arch.mkdir()
     (arch / f'T1__{ID1}.yaml').write_text(f'report_id: "{ID1}"\ntask_id: T1\nstatus: completed\n')
-    w.cfg.task_eval_since = '1970-01-01T00:00:00+00:00'
     w.poll_task_evals()
     assert w.ledger.is_delivered('pj', ID1)
     assert w.ledger.delivered_since(['pj'], 0.0) == []  # 列は足され、値は 0 (配達時刻が分からない)
@@ -751,9 +690,9 @@ def test_two_watchers_rescan_same_archive_evaluate_once(env: tuple[Watcher, Path
     script.write_text(
         LEASE_EVAL.format(squad=str(ROOT / 'squad'), scripts=str(ROOT / 'scripts'), counter=str(counter))
     )
-    w.cfg.task_eval_enabled = False  # 予約させずに配達だけ済ませる
     _write(d)
     w.report_bridge()
+    w._evals_waiting.clear()  # noqa: SLF001 (配達だけ済ませ、予約は消えた = 再起動と同じ)
     cmd = [sys.executable, str(script)]
     wa = _watcher_like(w, task_eval_enabled=True, task_eval_since=SINCE_EARLY, task_eval_cmd=cmd)
     wb = _watcher_like(w, task_eval_enabled=True, task_eval_since=SINCE_EARLY, task_eval_cmd=cmd)
@@ -768,61 +707,6 @@ def test_two_watchers_rescan_same_archive_evaluate_once(env: tuple[Watcher, Path
 
 
 # ---- PR #142 3rd review R1-R3 ----
-
-
-def test_since_value_is_watchd_start_even_if_creation_fails_first(
-    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R1: 起点ファイルの作成と予約が同じサイクルで一度ずつ失敗しても、起点 > 配達時刻 にならず再起動後に評価される.
-
-    起点の値は起点ファイルを作れた時刻ではなく watchd の起動時刻。作れない間の再走査はメモリ上の起動時刻を使う。
-    """
-    w, d, out = env
-    w.cfg.task_eval_cmd = _fake(tmp_path_of(out), SLOW)  # 子は終わらないうちに watchd が止まる
-    since_file = str(w.task_eval_since_file)
-    real_open = watchd.os.open
-    fails = {'open': 1}
-
-    def flaky_open(path: object, *a: object, **k: object) -> int:
-        if str(path) == since_file and fails['open']:
-            fails['open'] -= 1
-            raise OSError('queue is read-only for a moment')
-        return real_open(path, *a, **k)
-
-    real_ids = task_eval.evaluated_ids
-    fails['ids'] = 1
-
-    def flaky_ids(path: Path) -> set[str]:
-        if fails['ids']:
-            fails['ids'] -= 1
-            raise OSError('metrics unreadable')
-        return real_ids(path)
-
-    monkeypatch.setattr(watchd.os, 'open', flaky_open)
-    monkeypatch.setattr(task_eval, 'evaluated_ids', flaky_ids)
-    _write(d)
-    time.sleep(0.05)  # 起動時刻と配達時刻の間を空ける
-    try:
-        w.cycle()  # 起点の作成に失敗 -> 配達 -> 予約に失敗 -> 再走査 (起動時刻を起点に使う)
-        assert not w.task_eval_since_file.exists()
-        assert w.ledger.is_delivered('pj', ID1)
-        assert ID1 in w._evals_running  # noqa: SLF001 (同じサイクルの再走査で拾った)
-        time.sleep(0.05)
-        w.cycle()  # 次のサイクルで起点ファイルを作る。値は起動時刻
-        since = watchd._parse_iso(w.task_eval_since_file.read_text().strip())  # noqa: SLF001
-        (at,) = w.ledger.delivered_since(['pj'], 0.0)[0][2:]
-        assert since is not None and since <= at  # 起点 > 配達時刻 にならない
-    finally:
-        _kill_all(w)  # 評価が終わる前に watchd が止まった
-    assert not out.exists()
-    w2 = _watcher_like(w, task_eval_cmd=list(watchd.Config().task_eval_cmd))  # 再起動
-    w2.cycle()
-    _drain(w2)
-    assert [r['report_id'] for r in _rows(out)] == [ID1]
-
-
-def tmp_path_of(out: Path) -> Path:
-    return out.parent.parent
 
 
 def _lock(queue: Path, rid: str, age: float) -> Path:
@@ -863,3 +747,119 @@ def test_lease_refreshes_lock_mtime(tmp_path: Path) -> None:
     assert lease is not None
     assert time.time() - p.stat().st_mtime < 60  # 評価を始めた時刻になる (GC の対象から外れる)
     lease.close()  # type: ignore[attr-defined]
+
+
+# ---- PR #142 4th review F1: 起点ファイルをやめ delivered_at > 0 を境界にする ----
+
+
+def _deliver_with_failed_schedule(w: Watcher, d: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """配達は確定したが予約に失敗し、このサイクルの再走査も走らない watcher A を作る.
+
+    旧方式の起点ファイル queue/.task_eval_since も作れない状態にする (新方式では使わないので影響しない)。
+    差し替えはこのサイクルの間だけ (fixture の HOME などは戻さない)。
+    """
+    real_ids, real_open = task_eval.evaluated_ids, watchd.os.open
+    target = str(w.cfg.queue_dir / '.task_eval_since')
+    left = [1]
+
+    def flaky_ids(path: Path) -> set[str]:
+        if left[0]:
+            left[0] -= 1
+            raise OSError('metrics unreadable')
+        return real_ids(path)
+
+    def flaky_open(path: object, *a: object, **k: object) -> int:
+        if str(path) == target:
+            raise OSError('queue is read-only for a moment')
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(task_eval, 'evaluated_ids', flaky_ids)
+    monkeypatch.setattr(watchd.os, 'open', flaky_open)
+    try:
+        w._eval_rescan_at = time.monotonic() + 3600  # noqa: SLF001
+        _write(d)
+        w.cycle()
+    finally:
+        monkeypatch.setattr(task_eval, 'evaluated_ids', real_ids)
+        monkeypatch.setattr(watchd.os, 'open', real_open)
+    assert w.ledger.is_delivered('pj', ID1)
+    assert not w._evals_waiting and not w._evals_running  # noqa: SLF001
+
+
+def test_f1_late_second_watcher_evaluates_first_watchers_report(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: A が予約に失敗した report を、A の配達より後に起動した B の再走査が評価する."""
+    w, d, out = env
+    _deliver_with_failed_schedule(w, d, monkeypatch)
+    time.sleep(0.05)
+    wb = _watcher_like(w)  # 後発の B (別 session で同じ project を見る)
+    wb.cycle()
+    _drain(wb)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+
+
+def test_f1_first_watcher_restart_still_evaluates(
+    env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: 後発の B が先に起動した後で A を再起動しても、A の report は評価される."""
+    w, d, out = env
+    _deliver_with_failed_schedule(w, d, monkeypatch)
+    time.sleep(0.05)
+    wb = _watcher_like(w)
+    wb._eval_rescan_at = time.monotonic() + 3600  # noqa: SLF001 (B は再走査しないまま)
+    wb.cycle()
+    assert not out.exists()
+    time.sleep(0.05)
+    wa2 = _watcher_like(w)  # A の再起動
+    wa2.cycle()
+    _drain(wa2)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+
+
+def test_stale_since_file_is_ignored(env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """旧方式の queue/.task_eval_since が残っていても (未来の値でも) 評価対象に影響しない."""
+    w, d, out = env
+    since_file = w.cfg.queue_dir / '.task_eval_since'
+    since_file.parent.mkdir(parents=True, exist_ok=True)
+    since_file.write_text('2099-01-01T00:00:00+00:00\n')
+    _deliver_with_failed_schedule(w, d, monkeypatch)
+    w2 = _watcher_like(w)
+    w2.cycle()
+    _drain(w2)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+    assert since_file.read_text() == '2099-01-01T00:00:00+00:00\n'  # 読みも書きもしない
+
+
+def test_env_since_is_optional_lower_bound(env: tuple[Watcher, Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
+    """WATCH_TASK_EVAL_SINCE はプロセスごとの任意の下限。これより前に配達した report は再走査しない."""
+    w, d, out = env
+    _deliver_with_failed_schedule(w, d, monkeypatch)
+    w2 = _watcher_like(w, task_eval_since='2099-01-01T00:00:00+00:00')
+    w2.cycle()
+    assert not w2._evals_waiting and not w2._evals_running  # noqa: SLF001
+    assert not (w.cfg.queue_dir / '.task_eval_since').exists()  # 下限はファイルに書かない
+    w3 = _watcher_like(w, task_eval_since=SINCE_EARLY)
+    w3.cycle()
+    _drain(w3)
+    assert [r['report_id'] for r in _rows(out)] == [ID1]
+
+
+def test_disabled_watchd_delivery_is_not_rescanned_later(env: tuple[Watcher, Path, Path]) -> None:
+    """自動評価が無効な watchd が配達した report は delivered_at=0 で、後で有効にしても一斉に評価しない.
+
+    導入前かどうかは delivered_at だけで決め、写しの mtime は見ない (N4)。写しを touch して新しくしても拾わない。
+    """
+    w, d, out = env
+    w.cfg.task_eval_enabled = False
+    _write(d)
+    w.report_bridge()
+    assert w.ledger.is_delivered('pj', ID1)
+    assert w.ledger.delivered_since(['pj'], 0.0) == []
+    future = time.time() + 3600
+    for p in (d / 'reports' / 'archive').glob('*.yaml'):
+        os.utime(p, (future, future))  # cp / restore / touch で写しの mtime が新しくなった
+    w2 = _watcher_like(w, task_eval_enabled=True)
+    w2.cycle()
+    assert not w2._evals_waiting and not w2._evals_running  # noqa: SLF001
+    assert not out.exists()

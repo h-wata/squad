@@ -68,9 +68,9 @@ SCHEMA = (
     'delivered_at REAL NOT NULL DEFAULT 0, '
     'PRIMARY KEY (project, report_id))'
 )
-# delivered_at: commit() で delivered にした時刻 (epoch 秒, wall clock)。task 完了時の自動評価の再走査
-# (watchd.rescan_task_evals) が、起点より後に配達した report だけを拾うのに使う。列を足す前の行と
-# 旧 ledger から移した行は 0 (= 自動評価の導入前に配達した)。古い ledger には _connect() が列を足す。
+# delivered_at: 自動評価が有効な watchd が commit() で delivered にした時刻 (epoch 秒, wall clock)。task 完了時の
+# 自動評価の再走査 (watchd.rescan_task_evals) は、これが 0 でない report だけを拾う。列を足す前の行、旧 ledger から
+# 移した行、自動評価が無効な watchd や旧コードが配達した行は 0。古い ledger には _connect() が列を足す。
 DELIVERED_AT_COLUMN = 'delivered_at'
 # 配達した report の task YAML 退避が済んでいない印 (SQUAD-361 B1/B2)。行がある間は watchd が毎サイクル続きを行う。
 #   pending  退避がまだ (tasks/ への権限・容量の障害で失敗したら、このまま次サイクルで再試行する)
@@ -375,7 +375,13 @@ class ReportLedger:
         return Claim('claim', None, attempts + 1)
 
     def commit(
-        self, project: str, report_id: str, token: str | None, archive: tuple[str, str, float] | None = None
+        self,
+        project: str,
+        report_id: str,
+        token: str | None,
+        archive: tuple[str, str, float] | None = None,
+        *,
+        record_delivered_at: bool = True,
     ) -> bool:
         """送信成功後に delivered へ確定する.
 
@@ -383,6 +389,8 @@ class ReportLedger:
         False を返す (呼び出し側が fail() で backoff を進め、いずれ再通知される)。
         archive に (worker 番号, task_id, report の mtime) を渡すと、同じトランザクションで task YAML
         退避の予定 (task_archives の pending 行) を入れる (SQUAD-361 B1)。
+        record_delivered_at が False なら delivered_at は 0 のまま (自動評価が無効な watchd の配達。
+        task 完了時の自動評価の再走査はこれを拾わない)。
         """
         if token is None:
             return False
@@ -397,7 +405,7 @@ class ReportLedger:
                 conn.execute(
                     'UPDATE deliveries SET state = ?, lease = ?, next_attempt_at = 0, delivered_at = ? '
                     'WHERE project = ? AND report_id = ?',
-                    (DELIVERED, '', time.time(), project, report_id),
+                    (DELIVERED, '', time.time() if record_delivered_at else 0.0, project, report_id),
                 )
                 if archive is not None:
                     conn.execute(
