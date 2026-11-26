@@ -397,25 +397,70 @@ def test_backfill_second_run_appends_nothing(tmp_path: Path, monkeypatch: pytest
     queue = _setup(tmp_path, monkeypatch, r)
     out = tmp_path / 'evals.jsonl'
     _archive(queue, 'T1__r1.yaml', _final('r1'))
-    _archive(queue, 'T9__r2.yaml', _final('r2', task_id='T9').replace(SID, 'none'), project='other')  # error 行
     assert _backfill(queue, out) == 0
-    assert len(_rows(out)) == 2
+    assert len(_rows(out)) == 1
     assert _backfill(queue, out) == 0
-    assert len(_rows(out)) == 2
+    assert len(_rows(out)) == 1
+
+
+def test_backfill_not_found_writes_no_row_and_reports_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Transcript が見つからない report は行を書かず stderr に出す (毎回 error 行が増えないように, SQUAD-433)."""
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    _archive(queue, 'T1__r1.yaml', _final('r1'))
+    _archive(queue, 'T9__r2.yaml', _final('r2', task_id='T9').replace(SID, 'none'), project='other')
+    assert _backfill(queue, out) == 0
+    assert [x['report_id'] for x in _rows(out)] == ['r1']
+    err = capsys.readouterr().err
+    assert 'other/T9' in err
+    assert 'r2' in err
+
+
+def test_backfill_retries_report_that_has_only_error_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Error 行しか無い report_id は評価済みに数えず、次回やり直す (SQUAD-433)."""
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    out.write_text(
+        json.dumps({'project': 'pj', 'task_id': 'T1', 'report_id': 'r1', 'error': 'not_found: x'})
+        + '\n'
+        + json.dumps({'project': 'pj', 'task_id': 'T1', 'report_id': 'r-ok', 'error': None, 'tool_calls': 5})
+        + '\n'
+    )
+    assert eval_trajectory.evaluated_ids(out) == {'r-ok'}
+    _archive(queue, 'T1__r1.yaml', _final('r1'))
+    _archive(queue, 'T1__r-ok.yaml', _final('r-ok'))
+    assert _backfill(queue, out) == 0
+    rows = _rows(out)
+    assert len(rows) == 3
+    assert rows[-1]['report_id'] == 'r1'
+    assert rows[-1]['error'] is None
+    assert rows[-1]['tool_calls'] == 1
 
 
 def test_backfill_failure_becomes_error_row_excluded_from_bench(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """not_found 以外の評価失敗は error 行で残し、bench_report.py は集計に使わない."""
     r = Rows()
     r.bash('a')
     queue = _setup(tmp_path, monkeypatch, r)
     out = tmp_path / 'evals.jsonl'
-    _archive(queue, 'T9__r2.yaml', _final('r2', task_id='T9').replace(SID, 'none'), project='other')
+    _archive(queue, 'T1__r2.yaml', _final('r2'))
+
+    def boom(*_: object) -> None:
+        raise OSError('読めない')
+
+    monkeypatch.setattr(eval_trajectory, 'evaluate', boom)
     assert _backfill(queue, out) == 0
     (row,) = _rows(out)
     assert row['report_id'] == 'r2'
-    assert row['error']
+    assert row['error'] == 'OSError: 読めない'
     assert bench_report.load_task_evals(out) == {}
 
 

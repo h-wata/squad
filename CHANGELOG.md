@@ -5,8 +5,11 @@
 ### Added
 
 - `scripts/eval_trajectory.py --backfill`: 未評価の最終 report (completed / blocked) だけを `metrics/task_evals.jsonl` に
-  追記するバッチ評価 (Refs #130)。`report_id` で重複排除し、失敗は error 行で残す (`bench_report.py` は error 行を
-  集計から除く)。transcript が 30 日で消えるため週 1 回の実行を想定 (docs/benchmark.md)。
+  追記するバッチ評価 (Refs #130)。`report_id` で重複排除する。transcript が見つからない report は行を書かず stderr に
+  出し、それ以外の失敗は error 行で残して次回やり直す (`bench_report.py` は error 行を集計から除く)。transcript が
+  30 日で消えるため週 1 回の実行を想定 (docs/benchmark.md)。
+  あわせて `measure_task_cost.py` が worker の transcript (`config/claude-worker/`) を副 worktree からでも主 checkout の
+  下で探すようにした (SQUAD-433)。
 - review 指摘の category 集計 (#136, Refs #130)。cross-review の指摘 (`findings` / `blocking` / `non_blocking` の
   どちらの書式も読む) と、worker report の `issues` のうち `category` を持つものを `scripts/review_category_tally.py`
   が category ごとに数え、件数 / 初出 / 直近 / 該当 PR を Markdown (`--json` で JSON) で出す。`category` の無い

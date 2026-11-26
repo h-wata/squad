@@ -842,3 +842,18 @@ def test_compare_cli_prints_table(
     mtc.main()
 
     assert '| sonnet | claude | after | 1 |' in capsys.readouterr().out
+
+
+def test_worker_transcript_found_under_main_checkout_when_run_from_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """副 worktree から実行しても、主 checkout の config/claude-worker の transcript を見つける (SQUAD-433)."""
+    _setup_repo(tmp_path, monkeypatch)
+    worktree = tmp_path / 'wt'
+    (worktree / 'config' / 'claude-worker').mkdir(parents=True)  # 副 worktree には追跡ファイルだけがある
+    monkeypatch.setattr(mtc, 'REPO_ROOT', worktree)
+    d = mtc.QUEUE_ROOT / 'config' / 'claude-worker' / 'squad' / 'w1' / 'projects' / '-home-x'
+    d.mkdir(parents=True)
+    (d / 'sid-main.jsonl').write_text('{}\n', encoding='utf-8')
+
+    assert mtc.find_session_transcript('sid-main') == d / 'sid-main.jsonl'

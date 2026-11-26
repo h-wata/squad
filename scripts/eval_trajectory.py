@@ -15,9 +15,10 @@ transcript の特定・読み込み・secret マスクは squad/trace_search.py 
 再試行で pass したかは `verify_attempt >= 2` かつ `verify_result == "pass"` で分かる。
 
 バッチ評価 (`--backfill`): 全 project の `reports/archive/` にある最終 report (status が completed / blocked、
-`report_id` あり、ファイル名に review を含まないもの) のうち、`--out` にその report_id の行がまだ無いものだけを
-評価して追記する。再実行しても同じ report_id の行は増えない。評価に失敗した (transcript が無い等) report は
-`error` に理由を入れた行で残す (bench_report.py は error 行を集計に使わない)。transcript は 30 日で消えるので、
+`report_id` あり、ファイル名に review を含まないもの) のうち、`--out` にその report_id の error の無い行がまだ
+無いものだけを評価して追記する。再実行しても評価済みの report_id の行は増えない。transcript が見つからない
+report は行を書かず stderr に出す。それ以外の評価失敗は `error` に理由を入れた行で残し、次回やり直す
+(bench_report.py は error 行を集計に使わない)。transcript は 30 日で消えるので、
 それより短い間隔 (週 1 回) で回す。手順は docs/benchmark.md。
 
 使い方:
@@ -177,7 +178,10 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
 
 
 def evaluated_ids(out: Path) -> set[str]:
-    """既に out に行がある report_id の集合. ファイルが無ければ空."""
+    """既に out に評価済みの行 (error が空) がある report_id の集合. ファイルが無ければ空.
+
+    error 行は評価済みに数えない (一時的に読めなかっただけの report を次回やり直すため)。
+    """
     ids: set[str] = set()
     if not out.is_file():
         return ids
@@ -186,7 +190,12 @@ def evaluated_ids(out: Path) -> set[str]:
             rec = json.loads(line)
         except ValueError:
             continue
-        if isinstance(rec, dict) and isinstance(rec.get('report_id'), str) and rec['report_id']:
+        if (
+            isinstance(rec, dict)
+            and isinstance(rec.get('report_id'), str)
+            and rec['report_id']
+            and not rec.get('error')
+        ):
             ids.add(rec['report_id'])
     return ids
 
@@ -207,9 +216,10 @@ def backfill(queue_dir: Path, out: Path) -> int:
         base = {'report_id': report_id, 'status': s['status'].strip(), 'source': 'backfill', 'error': None}
         try:
             rec = evaluate(queue_dir, project, task_id)
-            row = {**(rec or {'project': project, 'task_id': task_id}), **base}
-            if rec is None:
-                row['error'] = 'not_found: report か transcript が見つからない'
+            if rec is None:  # 行を書くと毎回 error 行が増えるので stderr にだけ出す
+                print(f'{project}/{task_id} ({report_id}): report か transcript が見つかりません', file=sys.stderr)
+                continue
+            row = {**rec, **base}
         except Exception as e:  # noqa: BLE001 (1 件の失敗で残りを止めず、error 行に残す)
             row = {'project': project, 'task_id': task_id, **base, 'error': f'{type(e).__name__}: {e}'[-ERROR_CHARS:]}
         row.setdefault('measured_at', datetime.now().astimezone().isoformat(timespec='seconds'))

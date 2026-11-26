@@ -93,9 +93,10 @@ def projects_roots() -> list[Path]:
 
     claude-local と トークンありの claude worker は ``CLAUDE_CONFIG_DIR=config/claude-worker/<session>/w<n>``
     で動くので、その transcript は各 ``projects/`` にある (#72)。共有ディレクトリだった頃の
-    ``config/claude-worker/projects/`` も残す。
+    ``config/claude-worker/projects/`` も残す。worker の transcript は主 checkout にしか無い (gitignore 対象)
+    ので、副 worktree から実行しても主 checkout (QUEUE_ROOT) の下を探す (SQUAD-433)。
     """
-    worker_base = REPO_ROOT / 'config' / 'claude-worker'
+    worker_base = QUEUE_ROOT / 'config' / 'claude-worker'
     return [CLAUDE_PROJECTS, worker_base / 'projects', *sorted(worker_base.glob('*/w[0-9]*/projects'))]
 
 
@@ -230,7 +231,7 @@ def worker_dir_projects(project: str, worker: str) -> Path | None:
         return None
     if not session or '/' in session or session.startswith('.'):
         return None
-    path = REPO_ROOT / 'config' / 'claude-worker' / session / f'w{match.group(1)}' / 'projects'
+    path = QUEUE_ROOT / 'config' / 'claude-worker' / session / f'w{match.group(1)}' / 'projects'
     return path if path.is_dir() else None
 
 
