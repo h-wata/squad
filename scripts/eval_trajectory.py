@@ -57,6 +57,7 @@ from watchd import verdict_history_name  # noqa: E402,F401 (テストが写し�
 DENY_RE = re.compile(APPROVAL_DENY_DEFAULT, re.IGNORECASE)
 EXTERNAL_WRITE_RE = re.compile(r'\bgh\s+(pr|issue)\s+(create|comment|merge|close)\b|\bgit\s+push\b')
 WORKSPACE_RE = re.compile(r'^[ \t]+workspace:[ \t]*["\']?([^\s"\']+)', re.MULTILINE)
+REVIEW_CONTENT_KEYS = frozenset({'verdict', 'reviewed_pr'})
 WRITE_TOOLS = {'Edit': 'file_path', 'Write': 'file_path', 'MultiEdit': 'file_path', 'NotebookEdit': 'notebook_path'}
 FINAL_STATUSES = frozenset({'completed', 'blocked'})
 ERROR_CHARS = 2000
@@ -79,9 +80,10 @@ def find_task_yaml(queue_dir: Path, project: str, task_id: str) -> Path | None:
 def report_worktrees(queue_dir: Path, project: str, task_id: str) -> list[str]:
     """同じ task の author の report (reports/ と reports/archive/) の source_worktree を集める.
 
-    ファイル名に review を含むものは除く。YAML を parse し、トップレベルの source_worktree と
-    source_tree_clean 配下 (マッピング単一 / リスト複数) の source_worktree だけを採る。parse できない
-    report は無視する。
+    review report は、ファイル名に review を含むもの、または内容に verdict / reviewed_pr を持つものを除く
+    (reviewed_head_sha だけは author の report にも出るので判定に使わない)。
+    YAML を parse し、トップレベルの source_worktree と source_tree_clean 配下
+    (マッピング単一 / リスト複数) の source_worktree だけを採る。parse できない report は無視する。
     """
     reports = queue_dir / 'projects' / project / 'reports'
     found: list[str] = []
@@ -93,6 +95,8 @@ def report_worktrees(queue_dir: Path, project: str, task_id: str) -> list[str]:
         except (OSError, yaml.YAMLError):
             continue
         if not isinstance(doc, dict) or str(doc.get('task_id', '')).strip() != task_id:
+            continue
+        if REVIEW_CONTENT_KEYS & doc.keys():
             continue
         clean = doc.get('source_tree_clean')
         entries = [doc, *(clean if isinstance(clean, list) else [clean])]

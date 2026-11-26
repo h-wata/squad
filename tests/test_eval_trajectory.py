@@ -595,3 +595,25 @@ def test_unparsable_report_is_ignored(tmp_path: Path, monkeypatch: pytest.Monkey
     _report(queue, 'source_worktree: "/wt/mine"\n')
     _extra_report(queue, 'broken.yaml', 'task_id: T1\nsource_worktree: /wt/broken\nx: [unclosed\n  : :\n')
     assert _writes_outside(queue) == 1  # 壊れた report の /wt/broken は無視、落ちない
+
+
+def test_review_report_detected_by_content_is_not_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/reviewed/a.py')
+    r.write('/wt/mine/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(queue, 'source_worktree: "/wt/mine"\n')
+    # ファイル名に review を含まないが、内容が review report (SQUAD-395 型)
+    for i, key in enumerate(('verdict: approve', 'reviewed_pr: 145')):
+        _extra_report(queue, f'T1__{i}.yaml', f'task_id: T1\nsource_worktree: "/wt/reviewed"\n{key}\n', archive=True)
+    assert _writes_outside(queue) == 1  # /wt/reviewed だけが外。/wt/mine は author の report で許可
+
+
+def test_author_report_with_only_reviewed_head_sha_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/mine/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(queue, 'source_worktree: "/wt/mine"\nreviewed_head_sha: "abc"\n')
+    assert _writes_outside(queue) == 0
