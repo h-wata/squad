@@ -217,6 +217,8 @@ def backfill(queue_dir: Path, out: Path) -> int:
     if rows:
         out.parent.mkdir(parents=True, exist_ok=True)
         with out.open('a', encoding='utf-8') as f:
+            if out.stat().st_size > 0 and out.read_bytes()[-1:] != b'\n':  # 末尾改行なしの既存行と結合させない
+                f.write('\n')
             f.writelines(json.dumps(r, ensure_ascii=False) + '\n' for r in rows)
     return len(rows)
 

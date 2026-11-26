@@ -417,3 +417,18 @@ def test_backfill_failure_becomes_error_row_excluded_from_bench(
     assert row['report_id'] == 'r2'
     assert row['error']
     assert bench_report.load_task_evals(out) == {}
+
+
+def test_backfill_separates_rows_when_existing_file_lacks_trailing_newline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    out.write_text(json.dumps({'project': 'pj', 'task_id': 'OLD', 'report_id': 'r-old', 'tool_calls': 1}))  # 改行なし
+    _archive(queue, 'T1__r1.yaml', _final('r1'))
+    assert _backfill(queue, out) == 0
+    lines = out.read_text().splitlines()
+    assert len(lines) == 2
+    assert [json.loads(x)['report_id'] for x in lines] == ['r-old', 'r1']
