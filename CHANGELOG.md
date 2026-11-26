@@ -51,6 +51,7 @@
 
 ### Changed
 
+- `metrics/task_evals.jsonl` を `.gitignore` に足した。`--backfill` が追記し続けるファイルで、追跡すると main が常に dirty になるため (Refs #130)。
 - P0 の追いかけ修正 (Refs #130)。trace は session が一致しても時間窓の両端が揃わなければ approximate にし、session_id があるのに JSONL が無い report は他 session の近似にせず missing とする。
   外部書き込みの指標は `is_error` の呼び出しを数えず、試行と読める `external_write_attempts` / `external_write_attempt_dups` に改名した。
   `verify_attempt` は verdict の task_id が対象 task と一致するときだけ採る。
