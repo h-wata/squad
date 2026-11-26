@@ -41,6 +41,8 @@ from pathlib import Path
 import re
 import sys
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'squad'))
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -55,7 +57,6 @@ from watchd import verdict_history_name  # noqa: E402,F401 (テストが写し�
 DENY_RE = re.compile(APPROVAL_DENY_DEFAULT, re.IGNORECASE)
 EXTERNAL_WRITE_RE = re.compile(r'\bgh\s+(pr|issue)\s+(create|comment|merge|close)\b|\bgit\s+push\b')
 WORKSPACE_RE = re.compile(r'^[ \t]+workspace:[ \t]*["\']?([^\s"\']+)', re.MULTILINE)
-SOURCE_WORKTREE_RE = re.compile(r'^[ \t]*(?:-[ \t]+)?source_worktree:[ \t]*["\']?([^\s"\']+)', re.MULTILINE)
 WRITE_TOOLS = {'Edit': 'file_path', 'Write': 'file_path', 'MultiEdit': 'file_path', 'NotebookEdit': 'notebook_path'}
 FINAL_STATUSES = frozenset({'completed', 'blocked'})
 ERROR_CHARS = 2000
@@ -76,20 +77,29 @@ def find_task_yaml(queue_dir: Path, project: str, task_id: str) -> Path | None:
 
 
 def report_worktrees(queue_dir: Path, project: str, task_id: str) -> list[str]:
-    """同じ task の report (reports/ と reports/archive/) の source_worktree を全部集める.
+    """同じ task の author の report (reports/ と reports/archive/) の source_worktree を集める.
 
-    top-level と source_tree_clean: 配下 (マッピング単一 / リスト複数) のどれも拾う。
+    ファイル名に review を含むものは除く。YAML を parse し、トップレベルの source_worktree と
+    source_tree_clean 配下 (マッピング単一 / リスト複数) の source_worktree だけを採る。parse できない
+    report は無視する。
     """
     reports = queue_dir / 'projects' / project / 'reports'
     found: list[str] = []
     for path in sorted([*reports.glob('*.yaml'), *reports.glob('archive/*.yaml')]):
+        if 'review' in path.name:
+            continue
         try:
-            text = path.read_text(encoding='utf-8', errors='replace')
-        except OSError:
+            doc = yaml.safe_load(path.read_text(encoding='utf-8', errors='replace'))
+        except (OSError, yaml.YAMLError):
             continue
-        if parse_scalars(text).get('task_id', '').strip() != task_id:
+        if not isinstance(doc, dict) or str(doc.get('task_id', '')).strip() != task_id:
             continue
-        found += [os.path.normpath(w) for w in SOURCE_WORKTREE_RE.findall(text) if os.path.isabs(w)]
+        clean = doc.get('source_tree_clean')
+        entries = [doc, *(clean if isinstance(clean, list) else [clean])]
+        for entry in entries:
+            w = entry.get('source_worktree') if isinstance(entry, dict) else None
+            if isinstance(w, str) and os.path.isabs(w.strip()):
+                found.append(os.path.normpath(w.strip()))
     return list(dict.fromkeys(found))
 
 
