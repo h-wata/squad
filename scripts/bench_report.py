@@ -89,7 +89,10 @@ def result_counts(db_path: Path, records: list[dict]) -> dict[tuple[str, str], i
 
 
 def load_task_evals(path: Path) -> dict[tuple[str, str], dict]:
-    """task_evals.jsonl を (project, task_id) ごとに最後の 1 行だけ返す. ファイルが無ければ空."""
+    """task_evals.jsonl を (project, task_id) ごとに最後の 1 行だけ返す. ファイルが無ければ空.
+
+    評価に失敗した行 (`error` が空でない) は数値を持たないので使わない。
+    """
     latest: dict[tuple[str, str], dict] = {}
     if not path.is_file():
         return latest
@@ -98,7 +101,7 @@ def load_task_evals(path: Path) -> dict[tuple[str, str], dict]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(rec, dict) and 'project' in rec and 'task_id' in rec:
+        if isinstance(rec, dict) and 'project' in rec and 'task_id' in rec and not rec.get('error'):
             latest[str(rec['project']), str(rec['task_id'])] = rec
     return latest
 

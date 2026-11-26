@@ -68,3 +68,22 @@ task を自動で投げる runner は持たない (構成を切り替えるた�
 - `metrics/task_evals.jsonl` (`scripts/eval_trajectory.py`) の `verify_attempt` / `verify_result` は、watchd が
   attempt ごとに写した `queue/projects/<pj>/verdicts/` から読む。写し始める前 (SQUAD-397 より前) の task は null。
   再試行で pass した trial は `verify_attempt >= 2` かつ `verify_result: pass`
+
+## 実行過程の指標を週 1 回まとめて評価する
+
+`scripts/eval_trajectory.py --backfill` は、各 project の `reports/archive/` にある最終 report
+(`status` が completed / blocked) のうち、`metrics/task_evals.jsonl` にその `report_id` の error の無い行が
+まだ無いものだけを評価して追記する。review の YAML と途中の report は対象外。再実行しても評価済みの `report_id` は
+増えない。transcript が見つからない report は行を書かず stderr に出す。それ以外の理由で評価できなかった report は
+`error` 付きの行で残り、`bench_report.py` の集計には入らず、次回の実行でやり直す。
+
+transcript (`~/.claude/projects/`) は 30 日で消える。消えた後は評価できないので、それより短い間隔 (週 1 回) で回す。
+副 worktree から実行しても、worker の transcript は主 checkout の `config/claude-worker/` の下を探す。
+
+```bash
+# 手動
+python3 scripts/eval_trajectory.py --backfill
+
+# cron (毎週月曜 09:00)
+0 9 * * 1 cd /home/gisen/work/squad && python3 scripts/eval_trajectory.py --backfill >> /tmp/eval_backfill.log 2>&1
+```
