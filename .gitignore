@@ -20,3 +20,7 @@ docs/poc-reports/
 # ローカル実行時に生成されるログ (commit 不要)
 watch.log
 even-terminal-*.log
+
+# eval_trajectory.py --backfill が週 1 回追記する (追跡すると main が常に dirty になる)。
+# metrics/task_costs.jsonl は手で計測して選んで commit するので追跡のまま
+metrics/task_evals.jsonl
