@@ -10,6 +10,9 @@ transcript の特定・読み込み・secret マスクは squad/trace_search.py 
 指標 `deny_pattern_matches` は、承認保留の禁止パターンに一致した Bash 入力の試行数で、実際に実行された
 (deny・承認保留をすり抜けた) かどうかは示さない。実行されたかは transcript で確認が要る。
 
+`writes_outside_workspace` の許可 workspace は task YAML の context.workspace と、同じ task の report の
+source_worktree (top-level と source_tree_clean 配下の全部)。1 つも取れない task は 0 ではなく null。
+
 `verify_attempt` / `verify_result` は最後の verdict の attempt と result。watchd が attempt ごとに写した
 `queue/projects/<pj>/verdicts/` と今の verdict から、task_id が一致するものだけを読む。どちらにも無ければ null。
 再試行で pass したかは `verify_attempt >= 2` かつ `verify_result == "pass"` で分かる。
@@ -52,6 +55,7 @@ from watchd import verdict_history_name  # noqa: E402,F401 (テストが写し�
 DENY_RE = re.compile(APPROVAL_DENY_DEFAULT, re.IGNORECASE)
 EXTERNAL_WRITE_RE = re.compile(r'\bgh\s+(pr|issue)\s+(create|comment|merge|close)\b|\bgit\s+push\b')
 WORKSPACE_RE = re.compile(r'^[ \t]+workspace:[ \t]*["\']?([^\s"\']+)', re.MULTILINE)
+SOURCE_WORKTREE_RE = re.compile(r'^[ \t]*(?:-[ \t]+)?source_worktree:[ \t]*["\']?([^\s"\']+)', re.MULTILINE)
 WRITE_TOOLS = {'Edit': 'file_path', 'Write': 'file_path', 'MultiEdit': 'file_path', 'NotebookEdit': 'notebook_path'}
 FINAL_STATUSES = frozenset({'completed', 'blocked'})
 ERROR_CHARS = 2000
@@ -71,10 +75,29 @@ def find_task_yaml(queue_dir: Path, project: str, task_id: str) -> Path | None:
     return None
 
 
-def _allowed(path: str, workspace: str, project: str) -> bool:
+def report_worktrees(queue_dir: Path, project: str, task_id: str) -> list[str]:
+    """同じ task の report (reports/ と reports/archive/) の source_worktree を全部集める.
+
+    top-level と source_tree_clean: 配下 (マッピング単一 / リスト複数) のどれも拾う。
+    """
+    reports = queue_dir / 'projects' / project / 'reports'
+    found: list[str] = []
+    for path in sorted([*reports.glob('*.yaml'), *reports.glob('archive/*.yaml')]):
+        try:
+            text = path.read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        if parse_scalars(text).get('task_id', '').strip() != task_id:
+            continue
+        found += [os.path.normpath(w) for w in SOURCE_WORKTREE_RE.findall(text) if os.path.isabs(w)]
+    return list(dict.fromkeys(found))
+
+
+def _allowed(path: str, workspace: str | list[str], project: str) -> bool:
     p = os.path.normpath(path)
-    if workspace and (p == workspace or p.startswith(workspace.rstrip('/') + '/')):
-        return True
+    for ws in [workspace] if isinstance(workspace, str) else workspace:
+        if ws and (p == ws or p.startswith(ws.rstrip('/') + '/')):
+            return True
     return '/scratchpad/' in p or re.search(rf'/queue/projects/{re.escape(project)}/(reports|briefs)/', p) is not None
 
 
@@ -126,7 +149,10 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
         return None
     task_path = find_task_yaml(queue_dir, project, task_id)
     m = WORKSPACE_RE.search(task_path.read_text(encoding='utf-8', errors='replace')) if task_path else None
-    workspace = os.path.normpath(m.group(1)) if m else ''
+    # 許可する workspace は task YAML の context.workspace と report の source_worktree 全部
+    workspaces = list(
+        dict.fromkeys(([os.path.normpath(m.group(1))] if m else []) + report_worktrees(queue_dir, project, task_id))
+    )
     worker = srcs[0].worker
 
     seen: set[Path] = set()
@@ -147,7 +173,7 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
     for tool, _, inp, _ in calls:
         field = WRITE_TOOLS.get(tool)
         target = inp.get(field) if field else None
-        if isinstance(target, str) and os.path.isabs(target) and not _allowed(target, workspace, project):
+        if isinstance(target, str) and os.path.isabs(target) and not _allowed(target, workspaces, project):
             outside += 1
 
     attempt, result = final_verdict(queue_dir, project, task_id, worker)
@@ -167,7 +193,8 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
         'verify_result': result,
         'memory_calls': sum(tool.startswith('mcp__kioku_mesh__') for tool, *_ in calls),
         'trace_search_calls': sum(tool == 'Bash' and 'squad trace' in head for tool, head, *_ in calls),
-        'writes_outside_workspace': outside,
+        # workspace が 1 つも取れないときは 0 件ではなく判定不能 (null)
+        'writes_outside_workspace': outside if workspaces else None,
         'deny_pattern_matches': len(denied),
         'denied_samples': [h[:SAMPLE_CHARS] for h in denied[:SAMPLE_LIMIT]],
         'external_write_attempts': sum(ext.values()),
