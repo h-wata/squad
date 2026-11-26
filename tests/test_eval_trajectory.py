@@ -348,3 +348,72 @@ def test_duplicated_tool_result_rows_count_once(tmp_path: Path, monkeypatch: pyt
     assert got['tool_calls'] == 1
     assert got['external_write_attempts'] == 1
     assert got['external_write_attempt_dups'] == 0
+
+
+def _archive(queue: Path, name: str, body: str, project: str = 'pj') -> None:
+    arch = queue / 'projects' / project / 'reports' / 'archive'
+    arch.mkdir(parents=True, exist_ok=True)
+    (arch / name).write_text(body)
+
+
+def _final(report_id: str, task_id: str = 'T1', status: str = 'completed') -> str:
+    return (
+        f'report_id: "{report_id}"\ntask_id: {task_id}\nstatus: {status}\nworker: worker2\n'
+        f'session_id: "{SID}"\ncompleted_at: "{T_END}"\n'
+    )
+
+
+def _backfill(queue: Path, out: Path) -> int:
+    return eval_trajectory.main(['--backfill', '--queue-dir', str(queue), '--out', str(out)])
+
+
+def _rows(out: Path) -> list[dict]:
+    return [json.loads(line) for line in out.read_text().splitlines()]
+
+
+def test_backfill_evaluates_only_unevaluated_final_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    _archive(queue, 'T1__r-done.yaml', _final('r-done'))
+    _archive(queue, 'T1__r-blocked.yaml', _final('r-blocked', status='blocked'))
+    _archive(queue, 'T1__r-progress.yaml', _final('r-progress', status='in_progress'))
+    _archive(queue, 'worker4_review_T1__r-review.yaml', _final('r-review'))
+    # 既に行がある report_id は評価しない
+    out.write_text(json.dumps({'project': 'pj', 'task_id': 'T1', 'report_id': 'r-blocked', 'tool_calls': 99}) + '\n')
+    assert _backfill(queue, out) == 0
+    rows = _rows(out)
+    assert sorted(x['report_id'] for x in rows) == ['r-blocked', 'r-done']
+    done = next(x for x in rows if x['report_id'] == 'r-done')
+    assert done['tool_calls'] == 1
+    assert done['error'] is None
+    assert next(x for x in rows if x['report_id'] == 'r-blocked')['tool_calls'] == 99  # 触っていない
+
+
+def test_backfill_second_run_appends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    _archive(queue, 'T1__r1.yaml', _final('r1'))
+    _archive(queue, 'T9__r2.yaml', _final('r2', task_id='T9').replace(SID, 'none'), project='other')  # error 行
+    assert _backfill(queue, out) == 0
+    assert len(_rows(out)) == 2
+    assert _backfill(queue, out) == 0
+    assert len(_rows(out)) == 2
+
+
+def test_backfill_failure_becomes_error_row_excluded_from_bench(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    _archive(queue, 'T9__r2.yaml', _final('r2', task_id='T9').replace(SID, 'none'), project='other')
+    assert _backfill(queue, out) == 0
+    (row,) = _rows(out)
+    assert row['report_id'] == 'r2'
+    assert row['error']
+    assert bench_report.load_task_evals(out) == {}

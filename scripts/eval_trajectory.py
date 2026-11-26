@@ -14,8 +14,15 @@ transcript の特定・読み込み・secret マスクは squad/trace_search.py 
 `queue/projects/<pj>/verdicts/` と今の verdict から、task_id が一致するものだけを読む。どちらにも無ければ null。
 再試行で pass したかは `verify_attempt >= 2` かつ `verify_result == "pass"` で分かる。
 
+バッチ評価 (`--backfill`): 全 project の `reports/archive/` にある最終 report (status が completed / blocked、
+`report_id` あり、ファイル名に review を含まないもの) のうち、`--out` にその report_id の行がまだ無いものだけを
+評価して追記する。再実行しても同じ report_id の行は増えない。評価に失敗した (transcript が無い等) report は
+`error` に理由を入れた行で残す (bench_report.py は error 行を集計に使わない)。transcript は 30 日で消えるので、
+それより短い間隔 (週 1 回) で回す。手順は docs/benchmark.md。
+
 使い方:
   eval_trajectory.py --project <pj> --task-id <id> [--queue-dir <dir>] [--out <jsonl>]
+  eval_trajectory.py --backfill [--queue-dir <dir>] [--out <jsonl>]
 """
 
 from __future__ import annotations
@@ -45,6 +52,8 @@ DENY_RE = re.compile(APPROVAL_DENY_DEFAULT, re.IGNORECASE)
 EXTERNAL_WRITE_RE = re.compile(r'\bgh\s+(pr|issue)\s+(create|comment|merge|close)\b|\bgit\s+push\b')
 WORKSPACE_RE = re.compile(r'^[ \t]+workspace:[ \t]*["\']?([^\s"\']+)', re.MULTILINE)
 WRITE_TOOLS = {'Edit': 'file_path', 'Write': 'file_path', 'MultiEdit': 'file_path', 'NotebookEdit': 'notebook_path'}
+FINAL_STATUSES = frozenset({'completed', 'blocked'})
+ERROR_CHARS = 2000
 SAMPLE_LIMIT = 3
 SAMPLE_CHARS = 120
 
@@ -167,14 +176,65 @@ def evaluate(queue_dir: Path, project: str, task_id: str) -> dict | None:
     }
 
 
+def evaluated_ids(out: Path) -> set[str]:
+    """既に out に行がある report_id の集合. ファイルが無ければ空."""
+    ids: set[str] = set()
+    if not out.is_file():
+        return ids
+    for line in out.read_text(encoding='utf-8', errors='replace').splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get('report_id'), str) and rec['report_id']:
+            ids.add(rec['report_id'])
+    return ids
+
+
+def backfill(queue_dir: Path, out: Path) -> int:
+    """未評価の最終 report だけを評価して out に追記する. 追記した行数を返す."""
+    done = evaluated_ids(out)
+    rows: list[dict] = []
+    for path in sorted((queue_dir / 'projects').glob('*/reports/archive/*.yaml')):
+        if 'review' in path.name:
+            continue
+        s = parse_scalars(path.read_text(encoding='utf-8', errors='replace'))
+        report_id, task_id = s.get('report_id', '').strip(), s.get('task_id', '').strip()
+        if not report_id or not task_id or s.get('status', '').strip() not in FINAL_STATUSES or report_id in done:
+            continue
+        done.add(report_id)
+        project = path.parents[2].name
+        base = {'report_id': report_id, 'status': s['status'].strip(), 'source': 'backfill', 'error': None}
+        try:
+            rec = evaluate(queue_dir, project, task_id)
+            row = {**(rec or {'project': project, 'task_id': task_id}), **base}
+            if rec is None:
+                row['error'] = 'not_found: report か transcript が見つからない'
+        except Exception as e:  # noqa: BLE001 (1 件の失敗で残りを止めず、error 行に残す)
+            row = {'project': project, 'task_id': task_id, **base, 'error': f'{type(e).__name__}: {e}'[-ERROR_CHARS:]}
+        row.setdefault('measured_at', datetime.now().astimezone().isoformat(timespec='seconds'))
+        rows.append(row)
+    if rows:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open('a', encoding='utf-8') as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + '\n' for r in rows)
+    return len(rows)
+
+
 def main(argv: list[str] | None = None) -> int:
     mtc = trace_search.mtc
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--project', required=True)
-    parser.add_argument('--task-id', required=True)
+    parser.add_argument('--project')
+    parser.add_argument('--task-id')
+    parser.add_argument('--backfill', action='store_true', help='未評価の最終 report だけを評価して追記する')
     parser.add_argument('--queue-dir', type=Path, default=mtc.QUEUE_ROOT / 'queue')
     parser.add_argument('--out', type=Path, default=mtc.METRICS_PATH.parent / 'task_evals.jsonl')
     args = parser.parse_args(argv)
+    if args.backfill:
+        print(f'{backfill(args.queue_dir, args.out)} 件を追記しました')
+        return 0
+    if not (args.project and args.task_id):
+        parser.error('--project と --task-id が必要です (または --backfill)')
     rec = evaluate(args.queue_dir, args.project, args.task_id)
     if rec is None:
         print(f'{args.project}/{args.task_id}: report か transcript が見つかりません', file=sys.stderr)
