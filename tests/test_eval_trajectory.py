@@ -477,3 +477,143 @@ def test_backfill_separates_rows_when_existing_file_lacks_trailing_newline(
     lines = out.read_text().splitlines()
     assert len(lines) == 2
     assert [json.loads(x)['report_id'] for x in lines] == ['r-old', 'r1']
+
+
+def _no_task_yaml(queue: Path) -> None:
+    (queue / 'projects' / 'pj' / 'tasks' / 'worker2.yaml').write_text('task_id: OTHER\n')
+
+
+def _report(queue: Path, extra: str) -> None:
+    rp = queue / 'projects' / 'pj' / 'reports' / 'worker2_report.yaml'
+    rp.write_text(rp.read_text() + extra)
+
+
+def test_report_source_worktree_fills_missing_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/mine/a.py')
+    r.write('/wt/other/b.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(queue, 'source_worktree: "/wt/mine"\n')
+    assert eval_trajectory.evaluate(queue, 'pj', 'T1')['writes_outside_workspace'] == 1
+
+
+def test_report_source_tree_clean_all_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    for w in ('a', 'b', 'c'):
+        r.write(f'/wt/{w}/x.py')
+    r.write('/wt/zzz/x.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(
+        queue,
+        'source_tree_clean:\n  - source_worktree: "/wt/a"\n    status_command: "git -C /wt/a status -s"\n'
+        '  - source_worktree: "/wt/b"\n    status_command: "git -C /wt/b status -s"\n',
+    )
+    assert eval_trajectory.evaluate(queue, 'pj', 'T1')['writes_outside_workspace'] == 2  # c と zzz
+    rp = queue / 'projects' / 'pj' / 'reports' / 'worker2_report.yaml'
+    rp.write_text(
+        'task_id: T1\nstatus: completed\nworker: worker2\n'
+        f'session_id: "{SID}"\ncompleted_at: "{T_END}"\n'
+        'source_tree_clean:\n  source_worktree: "/wt/c"\n  status_command: "git -C /wt/c status -s"\n'
+    )
+    assert eval_trajectory.evaluate(queue, 'pj', 'T1')['writes_outside_workspace'] == 3  # a, b, zzz
+
+
+def test_context_workspace_still_allowed_with_report_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write(f'{WS}/a.py')
+    r.write('/wt/mine/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _report(queue, 'source_worktree: "/wt/mine"\n')
+    assert eval_trajectory.evaluate(queue, 'pj', 'T1')['writes_outside_workspace'] == 0
+
+
+def test_writes_outside_is_null_without_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/mine/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    m = eval_trajectory.evaluate(queue, 'pj', 'T1')
+    assert m['writes_outside_workspace'] is None
+    # 集計側 (bench_report) は null を無視して落ちない
+    evals = {('pj', 'A1'): {'attribution': 'exact', 'writes_outside_workspace': None}}
+    lines = bench_report.render([_bench('A1', 'c', 1)], None, evals)
+    assert 'writes_outside_workspace' in lines[0]
+
+
+def _extra_report(queue: Path, name: str, body: str, *, archive: bool = False) -> None:
+    d = queue / 'projects' / 'pj' / 'reports' / ('archive' if archive else '.')
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(body)
+
+
+def _writes_outside(queue: Path) -> int:
+    return eval_trajectory.evaluate(queue, 'pj', 'T1')['writes_outside_workspace']
+
+
+def test_review_report_worktree_is_not_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/reviewed/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _extra_report(queue, 'T1__review-x.yaml', 'task_id: T1\nsource_worktree: "/wt/reviewed"\n', archive=True)
+    _extra_report(queue, 'worker4_review.yaml', 'task_id: T1\nsource_worktree: "/wt/reviewed"\n')
+    assert _writes_outside(queue) is None  # 許可 workspace が 1 つも取れない
+
+
+def test_only_structured_source_worktree_fields_are_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    for w in ('nested', 'block', 'top', 'single', 'listed'):
+        r.write(f'/wt/{w}/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(
+        queue,
+        'source_worktree: "/wt/top"\n'
+        'other:\n  source_worktree: "/wt/nested"\n'
+        'notes: |\n  source_worktree: /wt/block\n',
+    )
+    assert _writes_outside(queue) == 4  # top 以外 (nested / block / single / listed) は外
+    _extra_report(queue, 'worker3_report.yaml', 'task_id: T1\nsource_tree_clean:\n  source_worktree: "/wt/single"\n')
+    assert _writes_outside(queue) == 3
+    _extra_report(
+        queue,
+        'x.yaml',
+        'task_id: T1\nsource_tree_clean:\n  - source_worktree: "/wt/listed"\n  - source_worktree: relative/p\n',
+        archive=True,
+    )
+    assert _writes_outside(queue) == 2  # nested / block だけが外
+
+
+def test_unparsable_report_is_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/mine/a.py')
+    r.write('/wt/broken/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(queue, 'source_worktree: "/wt/mine"\n')
+    _extra_report(queue, 'broken.yaml', 'task_id: T1\nsource_worktree: /wt/broken\nx: [unclosed\n  : :\n')
+    assert _writes_outside(queue) == 1  # 壊れた report の /wt/broken は無視、落ちない
+
+
+def test_review_report_detected_by_content_is_not_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/reviewed/a.py')
+    r.write('/wt/mine/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(queue, 'source_worktree: "/wt/mine"\n')
+    # ファイル名に review を含まないが、内容が review report (SQUAD-395 型)
+    for i, key in enumerate(('verdict: approve', 'reviewed_pr: 145')):
+        _extra_report(queue, f'T1__{i}.yaml', f'task_id: T1\nsource_worktree: "/wt/reviewed"\n{key}\n', archive=True)
+    assert _writes_outside(queue) == 1  # /wt/reviewed だけが外。/wt/mine は author の report で許可
+
+
+def test_author_report_with_only_reviewed_head_sha_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.write('/wt/mine/a.py')
+    queue = _setup(tmp_path, monkeypatch, r)
+    _no_task_yaml(queue)
+    _report(queue, 'source_worktree: "/wt/mine"\nreviewed_head_sha: "abc"\n')
+    assert _writes_outside(queue) == 0
