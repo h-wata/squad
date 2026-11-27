@@ -391,6 +391,18 @@ def test_backfill_evaluates_only_unevaluated_final_reports(tmp_path: Path, monke
     assert next(x for x in rows if x['report_id'] == 'r-blocked')['tool_calls'] == 99  # 触っていない
 
 
+def test_backfill_excludes_review_report_by_content_not_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    r = Rows()
+    r.bash('a')
+    queue = _setup(tmp_path, monkeypatch, r)
+    out = tmp_path / 'evals.jsonl'
+    _archive(queue, 'T1__r-verdict.yaml', _final('r-verdict') + 'verdict: approve\n')
+    _archive(queue, 'T1__r-reviewed-pr.yaml', _final('r-reviewed-pr') + 'reviewed_pr: 12\n')
+    _archive(queue, 'T1__r-author.yaml', _final('r-author') + 'reviewed_head_sha: abc123\n')
+    assert _backfill(queue, out) == 0
+    assert [x['report_id'] for x in _rows(out)] == ['r-author']
+
+
 def test_backfill_second_run_appends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r = Rows()
     r.bash('a')

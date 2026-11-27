@@ -77,26 +77,32 @@ def find_task_yaml(queue_dir: Path, project: str, task_id: str) -> Path | None:
     return None
 
 
+def is_review_report(path: Path, doc: object) -> bool:
+    """Review report か. ファイル名に review を含む、または内容に verdict / reviewed_pr を持つ.
+
+    reviewed_head_sha は author の report にも出るので判定に使わない。doc が dict でない (parse できない) ときは
+    ファイル名だけで判定する。
+    """
+    return 'review' in path.name or (isinstance(doc, dict) and bool(REVIEW_CONTENT_KEYS & doc.keys()))
+
+
 def report_worktrees(queue_dir: Path, project: str, task_id: str) -> list[str]:
     """同じ task の author の report (reports/ と reports/archive/) の source_worktree を集める.
 
-    review report は、ファイル名に review を含むもの、または内容に verdict / reviewed_pr を持つものを除く
-    (reviewed_head_sha だけは author の report にも出るので判定に使わない)。
+    review report (is_review_report) は除く。
     YAML を parse し、トップレベルの source_worktree と source_tree_clean 配下
     (マッピング単一 / リスト複数) の source_worktree だけを採る。parse できない report は無視する。
     """
     reports = queue_dir / 'projects' / project / 'reports'
     found: list[str] = []
     for path in sorted([*reports.glob('*.yaml'), *reports.glob('archive/*.yaml')]):
-        if 'review' in path.name:
-            continue
         try:
             doc = yaml.safe_load(path.read_text(encoding='utf-8', errors='replace'))
         except (OSError, yaml.YAMLError):
             continue
         if not isinstance(doc, dict) or str(doc.get('task_id', '')).strip() != task_id:
             continue
-        if REVIEW_CONTENT_KEYS & doc.keys():
+        if is_review_report(path, doc):
             continue
         clean = doc.get('source_tree_clean')
         entries = [doc, *(clean if isinstance(clean, list) else [clean])]
@@ -246,9 +252,14 @@ def backfill(queue_dir: Path, out: Path) -> int:
     done = evaluated_ids(out)
     rows: list[dict] = []
     for path in sorted((queue_dir / 'projects').glob('*/reports/archive/*.yaml')):
-        if 'review' in path.name:
+        text = path.read_text(encoding='utf-8', errors='replace')
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError:
+            doc = None  # parse できない report はファイル名だけで判定する
+        if is_review_report(path, doc):
             continue
-        s = parse_scalars(path.read_text(encoding='utf-8', errors='replace'))
+        s = parse_scalars(text)
         report_id, task_id = s.get('report_id', '').strip(), s.get('task_id', '').strip()
         if not report_id or not task_id or s.get('status', '').strip() not in FINAL_STATUSES or report_id in done:
             continue
